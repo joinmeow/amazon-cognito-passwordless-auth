@@ -1,10 +1,21 @@
-node_modules
-cdk.context.json
-*.d.ts
-cdk.out
-*.tgz
+# Build output
 dist
+
+# NodeJS dependencies
+node_modules
+**/node_modules
+
+# TypeScript declarations
+*.d.ts
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Packages
+*.tgz
+
+# Generated dirs
 ./custom-auth/**/*
 ./lib/**/*
 ./react/**/*
-**/.DS_Store

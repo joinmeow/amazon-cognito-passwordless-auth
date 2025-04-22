@@ -12,11 +12,7 @@ module.exports = {
     sourceType: "module",
   },
   overrides: [
-    getCdkOverrides("cdk/lib"),
-    getCdkOverrides("cdk/custom-auth"),
-    getCdkOverrides("end-to-end-example/cdk"),
     getClientOverrides("client"),
-    getClientOverrides("end-to-end-example/client"),
   ],
   plugins: ["@typescript-eslint", "header", "import"],
   root: true,
@@ -34,25 +30,6 @@ function rules() {
       { allowNullish: true },
     ],
     "import/extensions": ["error", "ignorePackages"],
-  };
-}
-
-function getCdkOverrides(basedir) {
-  return {
-    files: `${basedir}/**/*`,
-    parserOptions: {
-      ecmaVersion: "latest",
-      sourceType: "module",
-      tsconfigRootDir: __dirname,
-      project: [`${basedir}/tsconfig.json`],
-    },
-    extends: [
-      "eslint:recommended",
-      "plugin:security/recommended-legacy",
-      "plugin:@typescript-eslint/recommended",
-      "plugin:@typescript-eslint/recommended-requiring-type-checking",
-    ],
-    rules: rules(),
   };
 }
 

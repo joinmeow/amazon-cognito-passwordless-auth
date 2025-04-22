@@ -1,9 +1,16 @@
-cdk.out
+# Build files
+**/dist/**/*
+dist
+
+# Node modules
 node_modules
+
+# Generated files
 *.d.ts
 *.js
 *.cjs
-dist
+
+# Generated dirs
 ./custom-auth/**/*
 ./lib/**/*
 ./react/**/*

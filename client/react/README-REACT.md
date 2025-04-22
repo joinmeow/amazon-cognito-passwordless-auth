@@ -4,12 +4,12 @@
 
 Upon deploying the backend (with the `Passwordless` CDK construct), custom authentication flows are added to your Amazon Cognito User Pool, and your front-end will need to initiate and "dance" along in the Passwordless choreography to sign users in. This library provides a hook and sample components to make that easy:
 
-- React hook: `usePasswordless`: this hook provides all functionality to sign-in with Magic Links, FIDO2, SMS Step Up Auth (and passwords too should you want it).
+- React hook: `usePasswordless`: this hook provides all functionality to sign-in with Magic Links, FIDO2 (and passwords too should you want it).
 - Sample React components––to get started quickly and for inspiration to build your own:
   - `<Passwordless />`: sample component that renders a login page, allowing the user to choose between FIDO2 and Magic Links
   - `<Fido2Toast />`: sample component (a "toast" at the top of the page) that (1) recommends to add a FIDO2 credential if the user doesn't yet have one and (2) shows the user's registered FIDO2 credentials
 
-A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with magic links and FIDO2, and SMS OTP Step Up Authentication.
+A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with magic links and FIDO2.
 
 ## `usePasswordless` hook
 
@@ -34,9 +34,6 @@ const {
   /** Username Password */
   authenticateWithSRP, // function to sign in with username and password (using SRP: Secure Remote Password, where the password isn't sent over the wire)
   authenticateWithPlaintextPassword, // function to sign in with username and password (the password is sent in plaintext over the wire, instead use authenticateWithSRP if you can)
-
-  /** SMS OTP Step Up */
-  stepUpAuthenticationWithSmsOtp, // function to sign in with the user's current tokens (JWTs) and an OTP (One Time Password) that is sent to the user via SMS
 
   /** JWTs */
   tokens, // raw (i.e. string) JWTs of the signed-in user: ID token, Access token and Refresh Token
@@ -149,7 +146,6 @@ A great way to learn how to use this library is to look at how we use it ourselv
 
 - In [main.tsx](../../end-to-end-example/client/src/main.tsx) we configure the library and wrap our own app with the `PasswordlesContextProvider` as well as with the `Passwordless` component. Also we add the `<Fido2Toast />` container, to display the [FIDO2 "toast"](#fido2toast--component).
 - In [App.tsx](../../end-to-end-example/client/src/App.tsx) we use the `usePasswordless` hook to understand the user's sign-in status, provide a button to sign out, and toggle show/hide the authenticators manager (part of the [FIDO2 "toast"](#fido2toast--component)).
-- In [StepUpAuth.tsx](../../end-to-end-example/client/src/StepUpAuth.tsx) we show how to execute SMS OTP Step Up Authentication.
 
 #### Configuration
 

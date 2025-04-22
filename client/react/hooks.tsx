@@ -25,7 +25,6 @@ import {
 } from "../fido2.js";
 import { authenticateWithSRP } from "../srp.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
-import { stepUpAuthenticationWithSmsOtp } from "../sms-otp-stepup.js";
 import { configure } from "../config.js";
 import { retrieveTokens, storeTokens, TokensFromStorage } from "../storage.js";
 import { BusyState, IdleState, busyState } from "../model.js";
@@ -549,30 +548,6 @@ function _usePasswordless() {
         password,
         smsMfaCode,
         otpMfaCode,
-        clientMetadata,
-        statusCb: setSigninInStatus,
-        tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
-      });
-      signinIn.signedIn.catch(setLastError);
-      return signinIn;
-    },
-    /** Sign-in again, using the user's current tokens (JWTs) and an OTP (One Time Password) that is sent to the user via SMS */
-    stepUpAuthenticationWithSmsOtp: ({
-      username,
-      smsMfaCode,
-      clientMetadata,
-    }: {
-      /**
-       * Username, or alias (e-mail, phone number)
-       */
-      username: string;
-      smsMfaCode: (phoneNumber: string, attempt: number) => Promise<string>;
-      clientMetadata?: Record<string, string>;
-    }) => {
-      setLastError(undefined);
-      const signinIn = stepUpAuthenticationWithSmsOtp({
-        username,
-        smsMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
         tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
