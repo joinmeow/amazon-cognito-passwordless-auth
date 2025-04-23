@@ -821,6 +821,8 @@ function _useLocalUserCache() {
       });
       setLastSignedInUsers(undefined);
     },
+    /** The status of the most recent sign-in attempt */
+    signingInStatus,
   };
 }
 /** React hook to turn state (or any variable) into a promise that can be awaited */
