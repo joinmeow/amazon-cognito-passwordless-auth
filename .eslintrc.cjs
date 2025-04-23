@@ -11,9 +11,7 @@ module.exports = {
     ecmaVersion: "latest",
     sourceType: "module",
   },
-  overrides: [
-    getClientOverrides("client"),
-  ],
+  overrides: [getClientOverrides("client")],
   plugins: ["@typescript-eslint", "header", "import"],
   root: true,
 };

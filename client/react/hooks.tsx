@@ -33,6 +33,13 @@ import {
   CognitoAccessTokenPayload,
   CognitoIdTokenPayload,
 } from "../jwt-model.js";
+import {
+  verifySoftwareTokenForCurrentUser as verifySoftwareTokenForCurrentUserApi,
+  associateSoftwareTokenForCurrentUser as associateSoftwareTokenForCurrentUserApi,
+  confirmDevice as confirmDeviceApi,
+  updateDeviceStatus,
+  forgetDevice as forgetDeviceApi,
+} from "../cognito-api.js";
 import React, {
   useState,
   useEffect,
@@ -41,6 +48,11 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+
+// Helper to safely access browser globals
+const isBrowser = () => typeof globalThis !== "undefined";
+const getLocalStorage = () =>
+  isBrowser() ? globalThis.localStorage : undefined;
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
@@ -151,6 +163,12 @@ function _usePasswordless() {
   ] = useState<boolean>();
   const [creatingCredential, setCreatingCredential] = useState(false);
   const [fido2Credentials, setFido2Credentials] = useState<Fido2Credential[]>();
+  const [deviceKey, setDeviceKey] = useState<string | null>(() => {
+    if (isBrowser() && getLocalStorage()) {
+      return getLocalStorage()?.getItem("deviceKey") || null;
+    }
+    return null;
+  });
   const updateFido2Credential = useCallback(
     (update: { credentialId: string } & Partial<Fido2Credential>) =>
       setFido2Credentials((state) => {
@@ -423,6 +441,81 @@ function _usePasswordless() {
     fido2Credentials,
     /** Are we currently creating a FIDO2 credential? */
     creatingCredential,
+    /** The device key for remembered device authentication */
+    deviceKey,
+    /**
+     * Confirm a device for trusted device authentication.
+     * The device key must be available from a recent authentication response.
+     */
+    confirmDevice: async (
+      deviceName: string,
+      deviceVerifierConfig: { passwordVerifier: string; salt: string }
+    ) => {
+      if (!tokens?.accessToken) {
+        throw new Error("User must be signed in to confirm a device");
+      }
+
+      if (!deviceKey) {
+        throw new Error("No device key available");
+      }
+
+      const { debug } = configure();
+      debug?.("Confirming device:", deviceKey);
+
+      const result = await confirmDeviceApi({
+        accessToken: tokens.accessToken,
+        deviceKey,
+        deviceName,
+        deviceSecretVerifierConfig: deviceVerifierConfig,
+      });
+
+      // If user confirmation is necessary, set device as remembered
+      if (result.UserConfirmationNecessary) {
+        debug?.(
+          "User confirmation necessary for device, setting as remembered"
+        );
+        await updateDeviceStatus({
+          accessToken: tokens.accessToken,
+          deviceKey,
+          deviceRememberedStatus: "remembered",
+        });
+      }
+
+      return result;
+    },
+    /**
+     * Forget a device to stop using it for trusted device authentication
+     */
+    forgetDevice: async (deviceKeyToForget: string = deviceKey || "") => {
+      if (!tokens?.accessToken) {
+        throw new Error("User must be signed in to forget a device");
+      }
+
+      if (!deviceKeyToForget) {
+        throw new Error("No device key provided");
+      }
+
+      const { debug } = configure();
+      debug?.("Forgetting device:", deviceKeyToForget);
+
+      await forgetDeviceApi({
+        accessToken: tokens.accessToken,
+        deviceKey: deviceKeyToForget,
+      });
+
+      // If forgetting the current device, clear it
+      if (deviceKeyToForget === deviceKey) {
+        localStorage.removeItem("deviceKey");
+        setDeviceKey(null);
+      }
+    },
+    /**
+     * Clear the stored device key
+     */
+    clearDeviceKey: () => {
+      localStorage.removeItem("deviceKey");
+      setDeviceKey(null);
+    },
     /** Register a FIDO2 credential with the Relying Party */
     fido2CreateCredential: (
       ...args: Parameters<typeof fido2CreateCredential>
@@ -501,6 +594,7 @@ function _usePasswordless() {
       password,
       smsMfaCode,
       otpMfaCode,
+      deviceKey: providedDeviceKey,
       clientMetadata,
     }: {
       /**
@@ -510,17 +604,40 @@ function _usePasswordless() {
       password: string;
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
+      /**
+       * Device key for device authentication (if available from previous sessions)
+       */
+      deviceKey?: string;
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
+      const { debug } = configure();
+      // Use provided device key or the one from state
+      const effectiveDeviceKey = providedDeviceKey || deviceKey;
+
       const signinIn = authenticateWithSRP({
         username,
         password,
         smsMfaCode,
         otpMfaCode,
+        deviceKey: effectiveDeviceKey || undefined,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
+        tokensCb: (tokens) => {
+          // If this authentication generated a new device key, store it
+          if (tokens.newDeviceMetadata?.deviceKey) {
+            // Store the device key in localStorage for future authentication
+            localStorage.setItem(
+              "deviceKey",
+              tokens.newDeviceMetadata.deviceKey
+            );
+            setDeviceKey(tokens.newDeviceMetadata.deviceKey);
+            debug?.(
+              `Stored new device key: ${tokens.newDeviceMetadata.deviceKey}`
+            );
+          }
+          return storeTokens(tokens).then(() => setTokens(tokens));
+        },
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -531,6 +648,7 @@ function _usePasswordless() {
       password,
       smsMfaCode,
       otpMfaCode,
+      deviceKey: providedDeviceKey,
       clientMetadata,
     }: {
       /**
@@ -540,17 +658,40 @@ function _usePasswordless() {
       password: string;
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
+      /**
+       * Device key for device authentication (if available from previous sessions)
+       */
+      deviceKey?: string;
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
+      const { debug } = configure();
+      // Use provided device key or the one from state
+      const effectiveDeviceKey = providedDeviceKey || deviceKey;
+
       const signinIn = authenticateWithPlaintextPassword({
         username,
         password,
         smsMfaCode,
         otpMfaCode,
+        deviceKey: effectiveDeviceKey || undefined,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
+        tokensCb: (tokens) => {
+          // If this authentication generated a new device key, store it
+          if (tokens.newDeviceMetadata?.deviceKey) {
+            // Store the device key in localStorage for future authentication
+            localStorage.setItem(
+              "deviceKey",
+              tokens.newDeviceMetadata.deviceKey
+            );
+            setDeviceKey(tokens.newDeviceMetadata.deviceKey);
+            debug?.(
+              `Stored new device key: ${tokens.newDeviceMetadata.deviceKey}`
+            );
+          }
+          return storeTokens(tokens).then(() => setTokens(tokens));
+        },
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -791,5 +932,98 @@ export function useAwaitableState<T>(state: T) {
     reject: (reason: Error) => reject.current!(reason),
     /** That value of awaitable (promise) once it resolves. This is undefined if (1) awaitable is not yet resolved or (2) the state has changed since awaitable was resolved */
     awaited,
+  };
+}
+
+/** React hook to manage TOTP MFA setup and verification for a user */
+export function useTotpMfa() {
+  const { tokensParsed } = usePasswordless();
+  const [secretCode, setSecretCode] = useState<string>();
+  const [qrCodeUrl, setQrCodeUrl] = useState<string>();
+  const [setupStatus, setSetupStatus] = useState<
+    "IDLE" | "GENERATING" | "READY" | "VERIFYING" | "VERIFIED" | "ERROR"
+  >("IDLE");
+  const [errorMessage, setErrorMessage] = useState<string>();
+
+  // Begin TOTP MFA setup
+  const beginSetup = useCallback(async () => {
+    setSetupStatus("GENERATING");
+    setErrorMessage(undefined);
+
+    try {
+      const result = (await associateSoftwareTokenForCurrentUserApi()) as {
+        SecretCode: string;
+      };
+      setSecretCode(result.SecretCode);
+
+      // Generate QR code URL if we have a username from tokensParsed
+      if (tokensParsed?.idToken && result.SecretCode) {
+        const username =
+          tokensParsed.idToken["cognito:username"] ||
+          tokensParsed.idToken.email ||
+          "";
+        const issuer = "YourApp"; // This should be configurable
+        const url = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}?secret=${encodeURIComponent(result.SecretCode)}&issuer=${encodeURIComponent(issuer)}`;
+        setQrCodeUrl(url);
+      }
+
+      setSetupStatus("READY");
+      return result;
+    } catch (error) {
+      setSetupStatus("ERROR");
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }, [tokensParsed]);
+
+  // Verify TOTP code to complete MFA setup
+  const verifySetup = useCallback(async (code: string, deviceName?: string) => {
+    setSetupStatus("VERIFYING");
+    setErrorMessage(undefined);
+
+    try {
+      const result = (await verifySoftwareTokenForCurrentUserApi({
+        userCode: code,
+        friendlyDeviceName: deviceName,
+      })) as { Status: string };
+
+      setSetupStatus(result.Status === "SUCCESS" ? "VERIFIED" : "ERROR");
+
+      if (result.Status !== "SUCCESS") {
+        setErrorMessage(`Verification failed with status: ${result.Status}`);
+        throw new Error(`Verification failed with status: ${result.Status}`);
+      }
+
+      return result;
+    } catch (error) {
+      setSetupStatus("ERROR");
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }, []);
+
+  // Reset the setup process
+  const resetSetup = useCallback(() => {
+    setSecretCode(undefined);
+    setQrCodeUrl(undefined);
+    setSetupStatus("IDLE");
+    setErrorMessage(undefined);
+  }, []);
+
+  return {
+    /** Current status of the TOTP MFA setup process */
+    setupStatus,
+    /** Secret code generated for TOTP setup (to display to user) */
+    secretCode,
+    /** QR code URL that can be turned into a QR code for scanning */
+    qrCodeUrl,
+    /** Error message if something went wrong */
+    errorMessage,
+    /** Start the TOTP MFA setup process */
+    beginSetup,
+    /** Verify the TOTP code to complete setup */
+    verifySetup,
+    /** Reset the setup state */
+    resetSetup,
   };
 }

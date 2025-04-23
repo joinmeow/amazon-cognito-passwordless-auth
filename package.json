@@ -37,6 +37,10 @@
       "import": "./dist/client/cognito-api.js",
       "types": "./cognito-api.d.ts"
     },
+    "./cognito-security": {
+      "import": "./dist/client/cognito-security.js",
+      "types": "./cognito-security.d.ts"
+    },
     "./common": {
       "import": "./dist/client/common.js",
       "types": "./common.d.ts"

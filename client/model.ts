@@ -18,6 +18,10 @@ export interface TokensFromSignIn {
   refreshToken: string;
   expireAt: Date;
   username: string;
+  newDeviceMetadata?: {
+    deviceKey: string;
+    deviceGroupKey: string;
+  };
 }
 export interface TokensFromRefresh {
   accessToken: string;
@@ -35,6 +39,7 @@ export const busyState = [
   "SIGNING_IN_WITH_PASSWORD",
   "SIGNING_IN_WITH_OTP",
   "SIGNING_OUT",
+  "AUTHENTICATING_WITH_DEVICE",
 ] as const;
 export type BusyState = (typeof busyState)[number];
 const idleState = [

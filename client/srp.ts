@@ -18,6 +18,7 @@ import {
   initiateAuth,
   respondToAuthChallenge,
   assertIsChallengeResponse,
+  isAuthenticatedResponse,
   handleAuthResponse,
 } from "./cognito-api.js";
 import { defaultTokensCb } from "./common.js";
@@ -258,6 +259,7 @@ export function authenticateWithSRP({
   otpMfaCode,
   newPassword,
   customChallengeAnswer,
+  deviceKey,
   authflow = "USER_SRP_AUTH",
   tokensCb,
   statusCb,
@@ -272,6 +274,10 @@ export function authenticateWithSRP({
   otpMfaCode?: () => Promise<string>;
   newPassword?: () => Promise<string>;
   customChallengeAnswer?: () => Promise<string>;
+  /**
+   * Device key for device authentication (if available from previous sessions)
+   */
+  deviceKey?: string;
   authflow?: "USER_SRP_AUTH" | "CUSTOM_AUTH";
   tokensCb?: (tokens: TokensFromSignIn) => void | Promise<void>;
   statusCb?: (status: BusyState | IdleState) => void;
@@ -289,6 +295,8 @@ export function authenticateWithSRP({
       const smallA = generateSmallA();
       const largeAHex = await calculateLargeAHex(smallA);
       debug?.(`Invoking initiateAuth ...`);
+
+      // Include device key in auth if available
       const challenge = await initiateAuth({
         authflow,
         authParameters: {
@@ -297,6 +305,7 @@ export function authenticateWithSRP({
           CHALLENGE_NAME: "SRP_A",
         },
         clientMetadata,
+        deviceKey, // Include device key if provided
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, challenge);
@@ -320,19 +329,29 @@ export function authenticateWithSRP({
         }
       );
       debug?.(`Invoking respondToAuthChallenge ...`);
+
+      // Include device key in challenge response if available
+      const challengeResponses: Record<string, string> = {
+        USERNAME: username,
+        PASSWORD_CLAIM_SECRET_BLOCK: secretBlockB64,
+        TIMESTAMP: timestamp,
+        PASSWORD_CLAIM_SIGNATURE: passwordClaimSignature,
+      };
+
+      if (deviceKey) {
+        challengeResponses.DEVICE_KEY = deviceKey;
+      }
+
       const authResult = await respondToAuthChallenge({
         challengeName: challenge.ChallengeName,
-        challengeResponses: {
-          USERNAME: username,
-          PASSWORD_CLAIM_SECRET_BLOCK: secretBlockB64,
-          TIMESTAMP: timestamp,
-          PASSWORD_CLAIM_SIGNATURE: passwordClaimSignature,
-        },
+        challengeResponses,
         clientMetadata,
         session: challenge.Session,
         abort: abort.signal,
       });
       debug?.(`Response from respondToAuthChallenge:`, authResult);
+
+      // Handle any authentication challenges
       const tokens = await handleAuthResponse({
         authResponse: authResult,
         username,
@@ -343,9 +362,21 @@ export function authenticateWithSRP({
         clientMetadata,
         abort: abort.signal,
       });
+
+      // Check for new device metadata in the response
+      if (
+        isAuthenticatedResponse(authResult) &&
+        authResult.AuthenticationResult.NewDeviceMetadata
+      ) {
+        debug?.(
+          "Got new device metadata in authentication response. This can be used for device authentication in future requests."
+        );
+      }
+
       tokensCb
         ? await tokensCb(tokens)
         : await defaultTokensCb({ tokens, abort: abort.signal });
+
       statusCb?.("SIGNED_IN_WITH_PASSWORD");
       return tokens;
     } catch (err) {

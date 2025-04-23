@@ -38,7 +38,10 @@ await Passwordless.signInWithMagicLink("user@example.com");
 ### Usage in React
 
 ```jsx
-import { PasswordlessProvider, usePasswordless } from "@joinmeow/amazon-cognito-passwordless-auth/react";
+import {
+  PasswordlessProvider,
+  usePasswordless,
+} from "@joinmeow/amazon-cognito-passwordless-auth/react";
 
 function App() {
   return (
@@ -53,7 +56,7 @@ function App() {
 
 function YourApp() {
   const { signInWithFido2, signInWithMagicLink } = usePasswordless();
-  
+
   return (
     <div>
       <button onClick={() => signInWithFido2()}>Sign in with FIDO2</button>

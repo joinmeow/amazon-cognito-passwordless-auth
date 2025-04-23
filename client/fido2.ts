@@ -351,7 +351,7 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
   }
 }
 
-async function fido2getCredential({
+export async function fido2getCredential({
   relyingPartyId,
   challenge,
   credentials,

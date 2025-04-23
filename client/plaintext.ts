@@ -14,7 +14,11 @@
  */
 import { configure } from "./config.js";
 import { IdleState, BusyState, TokensFromSignIn } from "./model.js";
-import { initiateAuth, handleAuthResponse } from "./cognito-api.js";
+import {
+  initiateAuth,
+  handleAuthResponse,
+  isAuthenticatedResponse,
+} from "./cognito-api.js";
 import { defaultTokensCb } from "./common.js";
 
 export function authenticateWithPlaintextPassword({
@@ -23,6 +27,7 @@ export function authenticateWithPlaintextPassword({
   smsMfaCode,
   otpMfaCode,
   newPassword,
+  deviceKey,
   tokensCb,
   statusCb,
   clientMetadata,
@@ -35,6 +40,10 @@ export function authenticateWithPlaintextPassword({
   smsMfaCode?: () => Promise<string>;
   otpMfaCode?: () => Promise<string>;
   newPassword?: () => Promise<string>;
+  /**
+   * Device key for device authentication (if available from previous sessions)
+   */
+  deviceKey?: string;
   tokensCb?: (tokens: TokensFromSignIn) => void | Promise<void>;
   statusCb?: (status: BusyState | IdleState) => void;
   currentStatus?: BusyState | IdleState;
@@ -49,12 +58,27 @@ export function authenticateWithPlaintextPassword({
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
       debug?.(`Invoking initiateAuth ...`);
+
+      // Create auth parameters with optional device key
+      const authParameters: Record<string, string> = {
+        USERNAME: username,
+        PASSWORD: password,
+      };
+
+      if (deviceKey) {
+        authParameters.DEVICE_KEY = deviceKey;
+        debug?.(`Including device key in authentication: ${deviceKey}`);
+      }
+
       const authResponse = await initiateAuth({
         authflow: "USER_PASSWORD_AUTH",
-        authParameters: { USERNAME: username, PASSWORD: password },
+        authParameters,
+        deviceKey, // Also pass device key to the initiateAuth function
         clientMetadata,
+        abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, authResponse);
+
       const tokens = await handleAuthResponse({
         authResponse,
         username,
@@ -64,17 +88,29 @@ export function authenticateWithPlaintextPassword({
         clientMetadata,
         abort: abort.signal,
       });
+
+      // Check for new device metadata in the response
+      if (
+        isAuthenticatedResponse(authResponse) &&
+        authResponse.AuthenticationResult.NewDeviceMetadata
+      ) {
+        debug?.(
+          "Got new device metadata in authentication response. This can be used for device authentication in future requests."
+        );
+      }
+
       tokensCb
         ? await tokensCb(tokens)
         : await defaultTokensCb({ tokens, abort: abort.signal });
       statusCb?.("SIGNED_IN_WITH_PASSWORD");
+      return tokens;
     } catch (err) {
       statusCb?.("PASSWORD_SIGNIN_FAILED");
       throw err;
     }
   })();
   return {
-    signedIn: signedIn,
+    signedIn,
     abort: () => abort.abort(),
   };
 }

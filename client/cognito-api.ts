@@ -15,6 +15,7 @@
 import { parseJwtPayload, throwIfNot2xx, bufferToBase64 } from "./util.js";
 import { configure, MinimalResponse } from "./config.js";
 import { retrieveTokens } from "./storage.js";
+import { CognitoSecurityProvider } from "./cognito-security.js";
 
 const AWS_REGION_REGEXP = /^[a-z]{2}-[a-z]+-\d$/;
 
@@ -31,7 +32,9 @@ type ChallengeName =
   | "PASSWORD_VERIFIER"
   | "SMS_MFA"
   | "NEW_PASSWORD_REQUIRED"
-  | "SOFTWARE_TOKEN_MFA";
+  | "SOFTWARE_TOKEN_MFA"
+  | "DEVICE_SRP_AUTH"
+  | "DEVICE_PASSWORD_VERIFIER";
 
 interface ChallengeResponse {
   ChallengeName: ChallengeName;
@@ -46,6 +49,10 @@ interface AuthenticatedResponse {
     RefreshToken: string;
     ExpiresIn: number;
     TokenType: string;
+    NewDeviceMetadata?: {
+      DeviceKey: string;
+      DeviceGroupKey: string;
+    };
   };
   ChallengeParameters: Record<string, string>;
 }
@@ -175,15 +182,52 @@ export async function initiateAuth<
   authflow,
   authParameters,
   clientMetadata,
+  deviceKey,
   abort,
 }: {
   authflow: T;
   authParameters: Record<string, string>;
   clientMetadata?: Record<string, string>;
+  deviceKey?: string;
   abort?: AbortSignal;
 }) {
-  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
-    configure();
+  const {
+    fetch,
+    cognitoIdpEndpoint,
+    proxyApiHeaders,
+    clientId,
+    clientSecret,
+    debug,
+  } = configure();
+
+  // Enhance with security context data if it's an authentication flow and a username is provided
+  let userContextData;
+
+  if (authflow !== "REFRESH_TOKEN_AUTH" && authParameters.USERNAME) {
+    try {
+      // Use our security provider to get encoded data
+      const securityProvider = CognitoSecurityProvider.getInstance();
+      const encodedData = await securityProvider.getSecurityData(
+        authParameters.USERNAME
+      );
+
+      if (encodedData) {
+        userContextData = {
+          EncodedData: encodedData,
+        };
+        debug?.("User context data successfully collected for initiateAuth");
+      }
+    } catch (err) {
+      // Don't fail auth if context collection fails
+      debug?.("Failed to collect user context data for initiateAuth:", err);
+    }
+  }
+
+  // Add device key to auth parameters if provided
+  if (deviceKey) {
+    authParameters.DEVICE_KEY = deviceKey;
+  }
+
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
       ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
@@ -206,6 +250,7 @@ export async function initiateAuth<
           }),
         },
         ClientMetadata: clientMetadata,
+        ...(userContextData && { UserContextData: userContextData }),
       }),
     }
   ).then(extractInitiateAuthResponse(authflow));
@@ -224,8 +269,43 @@ export async function respondToAuthChallenge({
   clientMetadata?: Record<string, string>;
   abort?: AbortSignal;
 }) {
-  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
-    configure();
+  const {
+    fetch,
+    cognitoIdpEndpoint,
+    proxyApiHeaders,
+    clientId,
+    clientSecret,
+    debug,
+  } = configure();
+
+  // Enhance with security context data if a username is provided
+  let userContextData;
+
+  if (challengeResponses.USERNAME) {
+    try {
+      // Use our security provider to get encoded data
+      const securityProvider = CognitoSecurityProvider.getInstance();
+      const encodedData = await securityProvider.getSecurityData(
+        challengeResponses.USERNAME
+      );
+
+      if (encodedData) {
+        userContextData = {
+          EncodedData: encodedData,
+        };
+        debug?.(
+          "User context data successfully collected for respondToAuthChallenge"
+        );
+      }
+    } catch (err) {
+      // Don't fail auth if context collection fails
+      debug?.(
+        "Failed to collect user context data for respondToAuthChallenge:",
+        err
+      );
+    }
+  }
+
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
       ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
@@ -249,6 +329,7 @@ export async function respondToAuthChallenge({
         ClientId: clientId,
         Session: session,
         ClientMetadata: clientMetadata,
+        ...(userContextData && { UserContextData: userContextData }),
       }),
       signal: abort,
     }
@@ -257,11 +338,13 @@ export async function respondToAuthChallenge({
 
 /**
  * Confirms the sign-up of a user in Amazon Cognito.
+ * Automatically collects and includes threat protection data when available.
  *
  * @param params - The parameters for confirming the sign-up.
  * @param params.username - The username or alias (e-mail, phone number) of the user.
  * @param params.confirmationCode - The confirmation code received by the user.
  * @param [params.clientMetadata] - Additional metadata to be passed to the server.
+ * @param [params.forceAliasCreation] - When true, forces user confirmation despite existing aliases.
  * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
  * @returns A promise that resolves to the response of the confirmation request.
  */
@@ -269,15 +352,35 @@ export async function confirmSignUp({
   username,
   confirmationCode,
   clientMetadata,
+  forceAliasCreation,
   abort,
 }: {
   username: string;
   confirmationCode: string;
   clientMetadata?: Record<string, string>;
+  forceAliasCreation?: boolean;
   abort?: AbortSignal;
 }) {
   const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
     configure();
+
+  // Security-forward approach: attempt to collect user context data by default
+  let userContextData;
+
+  try {
+    // Use our security provider to get encoded data
+    const securityProvider = CognitoSecurityProvider.getInstance();
+    const encodedData = await securityProvider.getSecurityData(username);
+
+    if (encodedData) {
+      userContextData = {
+        EncodedData: encodedData,
+      };
+    }
+  } catch (err) {
+    // Don't fail the sign-up if context collection fails
+  }
+
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
       ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
@@ -294,6 +397,10 @@ export async function confirmSignUp({
         ConfirmationCode: confirmationCode,
         ClientId: clientId,
         ClientMetadata: clientMetadata,
+        ...(forceAliasCreation !== undefined && {
+          ForceAliasCreation: forceAliasCreation,
+        }),
+        ...(userContextData && { UserContextData: userContextData }),
         ...(clientSecret && {
           SecretHash: await calculateSecretHash(username),
         }),
@@ -458,8 +565,34 @@ export async function signUp({
   validationData?: { name: string; value: string }[];
   abort?: AbortSignal;
 }) {
-  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
-    configure();
+  const {
+    fetch,
+    cognitoIdpEndpoint,
+    proxyApiHeaders,
+    clientId,
+    clientSecret,
+    debug,
+  } = configure();
+
+  // Enhance with security context data
+  let userContextData;
+
+  try {
+    // Use our security provider to get encoded data
+    const securityProvider = CognitoSecurityProvider.getInstance();
+    const encodedData = await securityProvider.getSecurityData(username);
+
+    if (encodedData) {
+      userContextData = {
+        EncodedData: encodedData,
+      };
+      debug?.("User context data successfully collected for signUp");
+    }
+  } catch (err) {
+    // Don't fail sign-up if context collection fails
+    debug?.("Failed to collect user context data for signUp:", err);
+  }
+
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
       ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
@@ -491,6 +624,7 @@ export async function signUp({
         ...(clientSecret && {
           SecretHash: await calculateSecretHash(username),
         }),
+        ...(userContextData && { UserContextData: userContextData }),
       }),
       signal: abort,
     }
@@ -652,6 +786,7 @@ export async function handleAuthResponse({
   otpMfaCode,
   newPassword,
   customChallengeAnswer,
+  deviceHandler,
   clientMetadata,
   abort,
 }: {
@@ -664,6 +799,21 @@ export async function handleAuthResponse({
   otpMfaCode?: () => Promise<string>;
   newPassword?: () => Promise<string>;
   customChallengeAnswer?: () => Promise<string>;
+  /**
+   * Handler for device authentication challenges (DEVICE_SRP_AUTH and DEVICE_PASSWORD_VERIFIER)
+   */
+  deviceHandler?: {
+    deviceKey: string;
+    handleDeviceSrpAuth: (
+      srpB: string,
+      secretBlock: string
+    ) => Promise<{
+      deviceGroupKey: string;
+      passwordVerifier: string;
+      passwordClaimSecretBlock: string;
+      timestamp: string;
+    }>;
+  };
   clientMetadata?: Record<string, string>;
   abort?: AbortSignal;
 }) {
@@ -694,6 +844,54 @@ export async function handleAuthResponse({
     } else if (authResponse.ChallengeName === "SOFTWARE_TOKEN_MFA") {
       if (!otpMfaCode) throw new Error("Missing Software MFA Code");
       responseParameters.SOFTWARE_TOKEN_MFA_CODE = await otpMfaCode();
+    } else if (authResponse.ChallengeName === "DEVICE_SRP_AUTH") {
+      if (!deviceHandler)
+        throw new Error("Missing device handler for DEVICE_SRP_AUTH");
+
+      // Get challenge parameters
+      const srpB = authResponse.ChallengeParameters.SRP_B;
+      const secretBlock = authResponse.ChallengeParameters.SECRET_BLOCK;
+
+      debug?.("Handling DEVICE_SRP_AUTH challenge");
+
+      // Let the device handler generate the response
+      const {
+        deviceGroupKey,
+        passwordVerifier,
+        passwordClaimSecretBlock,
+        timestamp,
+      } = await deviceHandler.handleDeviceSrpAuth(srpB, secretBlock);
+
+      // Add the response parameters
+      responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
+      responseParameters.DEVICE_GROUP_KEY = deviceGroupKey;
+      responseParameters.PASSWORD_CLAIM_SIGNATURE = passwordVerifier;
+      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK = passwordClaimSecretBlock;
+      responseParameters.TIMESTAMP = timestamp;
+    } else if (authResponse.ChallengeName === "DEVICE_PASSWORD_VERIFIER") {
+      if (!deviceHandler)
+        throw new Error("Missing device handler for DEVICE_PASSWORD_VERIFIER");
+
+      // Get challenge parameters
+      const srpB = authResponse.ChallengeParameters.SRP_B;
+      const secretBlock = authResponse.ChallengeParameters.SECRET_BLOCK;
+
+      debug?.("Handling DEVICE_PASSWORD_VERIFIER challenge");
+
+      // Let the device handler generate the response
+      const {
+        deviceGroupKey,
+        passwordVerifier,
+        passwordClaimSecretBlock,
+        timestamp,
+      } = await deviceHandler.handleDeviceSrpAuth(srpB, secretBlock);
+
+      // Add the response parameters
+      responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
+      responseParameters.DEVICE_GROUP_KEY = deviceGroupKey;
+      responseParameters.PASSWORD_CLAIM_SIGNATURE = passwordVerifier;
+      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK = passwordClaimSecretBlock;
+      responseParameters.TIMESTAMP = timestamp;
     } else {
       throw new Error(`Unsupported challenge: ${authResponse.ChallengeName}`);
     }
@@ -760,4 +958,698 @@ async function calculateSecretHash(username?: string) {
     new TextEncoder().encode(`${username}${clientId}`)
   );
   return bufferToBase64(signature);
+}
+
+// Type declaration for the Amazon Cognito Advanced Security module
+declare global {
+  interface Window {
+    AmazonCognitoAdvancedSecurityData?: {
+      getData: (
+        username: string,
+        userPoolId: string,
+        clientId: string
+      ) => string;
+    };
+  }
+}
+
+/**
+ * Resends the confirmation code to a user who has signed up but not confirmed their account.
+ * Automatically collects and includes threat protection data when available.
+ *
+ * @param params - The parameters for resending the confirmation code.
+ * @param params.username - The username or alias (e-mail, phone number) of the user.
+ * @param [params.clientMetadata] - Additional metadata to be passed to the server.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing code delivery details.
+ */
+export async function resendConfirmationCode({
+  username,
+  clientMetadata,
+  abort,
+}: {
+  username: string;
+  clientMetadata?: Record<string, string>;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
+    configure();
+
+  // Security-forward approach: attempt to collect user context data by default
+  let userContextData;
+
+  try {
+    // Use our security provider to get encoded data
+    const securityProvider = CognitoSecurityProvider.getInstance();
+    const encodedData = await securityProvider.getSecurityData(username);
+
+    if (encodedData) {
+      userContextData = {
+        EncodedData: encodedData,
+      };
+    }
+  } catch (err) {
+    // Don't fail if context collection fails
+  }
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target":
+          "AWSCognitoIdentityProviderService.ResendConfirmationCode",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        Username: username,
+        ClientId: clientId,
+        ClientMetadata: clientMetadata,
+        ...(clientSecret && {
+          SecretHash: await calculateSecretHash(username),
+        }),
+        ...(userContextData && { UserContextData: userContextData }),
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Sends a password-reset confirmation code to the user.
+ * Automatically collects and includes threat protection data when available.
+ *
+ * @param params - The parameters for the forgot password request.
+ * @param params.username - The username or alias (e-mail, phone number) of the user.
+ * @param [params.clientMetadata] - Additional metadata to be passed to the server.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing code delivery details.
+ */
+export async function forgotPassword({
+  username,
+  clientMetadata,
+  abort,
+}: {
+  username: string;
+  clientMetadata?: Record<string, string>;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
+    configure();
+
+  // Security-forward approach: attempt to collect user context data by default
+  let userContextData;
+
+  try {
+    // Use our security provider to get encoded data
+    const securityProvider = CognitoSecurityProvider.getInstance();
+    const encodedData = await securityProvider.getSecurityData(username);
+
+    if (encodedData) {
+      userContextData = {
+        EncodedData: encodedData,
+      };
+    }
+  } catch (err) {
+    // Don't fail if context collection fails
+  }
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.ForgotPassword",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        Username: username,
+        ClientId: clientId,
+        ClientMetadata: clientMetadata,
+        ...(clientSecret && {
+          SecretHash: await calculateSecretHash(username),
+        }),
+        ...(userContextData && { UserContextData: userContextData }),
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Completes the password reset process by validating the confirmation code and setting a new password.
+ * Automatically collects and includes threat protection data when available.
+ *
+ * @param params - The parameters for confirming the forgot password request.
+ * @param params.username - The username or alias (e-mail, phone number) of the user.
+ * @param params.confirmationCode - The confirmation code sent to the user.
+ * @param params.password - The new password for the user.
+ * @param [params.clientMetadata] - Additional metadata to be passed to the server.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves when the password has been successfully reset.
+ */
+export async function confirmForgotPassword({
+  username,
+  confirmationCode,
+  password,
+  clientMetadata,
+  abort,
+}: {
+  username: string;
+  confirmationCode: string;
+  password: string;
+  clientMetadata?: Record<string, string>;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId, clientSecret } =
+    configure();
+
+  // Security-forward approach: attempt to collect user context data by default
+  let userContextData;
+
+  try {
+    // Use our security provider to get encoded data
+    const securityProvider = CognitoSecurityProvider.getInstance();
+    const encodedData = await securityProvider.getSecurityData(username);
+
+    if (encodedData) {
+      userContextData = {
+        EncodedData: encodedData,
+      };
+    }
+  } catch (err) {
+    // Don't fail if context collection fails
+  }
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target":
+          "AWSCognitoIdentityProviderService.ConfirmForgotPassword",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        Username: username,
+        ConfirmationCode: confirmationCode,
+        Password: password,
+        ClientId: clientId,
+        ClientMetadata: clientMetadata,
+        ...(clientSecret && {
+          SecretHash: await calculateSecretHash(username),
+        }),
+        ...(userContextData && { UserContextData: userContextData }),
+      }),
+      signal: abort,
+    }
+  ).then(throwIfNot2xx);
+}
+
+/**
+ * Changes the password for a signed-in user.
+ * Requires a valid access token from the signed-in user.
+ *
+ * @param params - The parameters for changing the password.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param params.previousPassword - The user's current password.
+ * @param params.proposedPassword - The new password.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves when the password has been successfully changed.
+ */
+export async function changePassword({
+  accessToken,
+  previousPassword,
+  proposedPassword,
+  abort,
+}: {
+  accessToken: string;
+  previousPassword: string;
+  proposedPassword: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.ChangePassword",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        PreviousPassword: previousPassword,
+        ProposedPassword: proposedPassword,
+      }),
+      signal: abort,
+    }
+  ).then(throwIfNot2xx);
+}
+
+/**
+ * Changes the password for the currently signed-in user, using the stored access token.
+ * This is a convenience method that automatically uses the access token from storage.
+ *
+ * @param params - The parameters for changing the password.
+ * @param params.previousPassword - The user's current password.
+ * @param params.proposedPassword - The new password.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves when the password has been successfully changed.
+ */
+export async function changePasswordForCurrentUser({
+  previousPassword,
+  proposedPassword,
+  abort,
+}: {
+  previousPassword: string;
+  proposedPassword: string;
+  abort?: AbortSignal;
+}) {
+  const tokens = await retrieveTokens();
+
+  if (!tokens?.accessToken) {
+    throw new Error(
+      "No access token available. User must be signed in to change password."
+    );
+  }
+
+  return changePassword({
+    accessToken: tokens.accessToken,
+    previousPassword,
+    proposedPassword,
+    abort,
+  });
+}
+
+/**
+ * Begins setup of time-based one-time password (TOTP) multi-factor authentication (MFA) for a user.
+ * Returns a unique private key that can be used with authenticator apps like Google Authenticator or Authy.
+ *
+ * @param params - The parameters for associating a software token.
+ * @param [params.accessToken] - A valid access token for the signed-in user. Required if session is not provided.
+ * @param [params.session] - A session string from a challenge response. Required if accessToken is not provided.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing the secret code and session.
+ */
+export async function associateSoftwareToken({
+  accessToken,
+  session,
+  abort,
+}: {
+  accessToken?: string;
+  session?: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  if (!accessToken && !session) {
+    throw new Error("Either accessToken or session must be provided");
+  }
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target":
+          "AWSCognitoIdentityProviderService.AssociateSoftwareToken",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        ...(accessToken && { AccessToken: accessToken }),
+        ...(session && { Session: session }),
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Verifies the time-based one-time password (TOTP) multi-factor authentication (MFA) setup for a user.
+ * This should be called after associateSoftwareToken to complete the MFA setup.
+ *
+ * @param params - The parameters for verifying a software token.
+ * @param params.userCode - The time-based one-time password that the user provides from their authenticator app.
+ * @param [params.accessToken] - A valid access token for the signed-in user. Required if session is not provided.
+ * @param [params.session] - A session string from associateSoftwareToken or a challenge response. Required if accessToken is not provided.
+ * @param [params.friendlyDeviceName] - A friendly name for the device that will be generating TOTP codes.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing the status of the verification.
+ */
+export async function verifySoftwareToken({
+  userCode,
+  accessToken,
+  session,
+  friendlyDeviceName,
+  abort,
+}: {
+  userCode: string;
+  accessToken?: string;
+  session?: string;
+  friendlyDeviceName?: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  if (!accessToken && !session) {
+    throw new Error("Either accessToken or session must be provided");
+  }
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.VerifySoftwareToken",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        UserCode: userCode,
+        ...(accessToken && { AccessToken: accessToken }),
+        ...(session && { Session: session }),
+        ...(friendlyDeviceName && { FriendlyDeviceName: friendlyDeviceName }),
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Convenience method for beginning TOTP MFA setup for the currently signed-in user.
+ * Automatically uses the stored access token.
+ *
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing the secret code.
+ */
+export async function associateSoftwareTokenForCurrentUser({
+  abort,
+}: {
+  abort?: AbortSignal;
+} = {}) {
+  const tokens = await retrieveTokens();
+
+  if (!tokens?.accessToken) {
+    throw new Error(
+      "No access token available. User must be signed in to set up TOTP MFA."
+    );
+  }
+
+  return associateSoftwareToken({
+    accessToken: tokens.accessToken,
+    abort,
+  });
+}
+
+/**
+ * Convenience method for verifying TOTP MFA setup for the currently signed-in user.
+ * Automatically uses the stored access token.
+ *
+ * @param params.userCode - The time-based one-time password that the user provides from their authenticator app.
+ * @param [params.friendlyDeviceName] - A friendly name for the device that will be generating TOTP codes.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response containing the status of the verification.
+ */
+export async function verifySoftwareTokenForCurrentUser({
+  userCode,
+  friendlyDeviceName,
+  abort,
+}: {
+  userCode: string;
+  friendlyDeviceName?: string;
+  abort?: AbortSignal;
+}) {
+  const tokens = await retrieveTokens();
+
+  if (!tokens?.accessToken) {
+    throw new Error(
+      "No access token available. User must be signed in to verify TOTP MFA."
+    );
+  }
+
+  return verifySoftwareToken({
+    userCode,
+    accessToken: tokens.accessToken,
+    friendlyDeviceName,
+    abort,
+  });
+}
+
+/**
+ * Confirms a device to be tracked for a user. This allows for "Remember this device" functionality.
+ * For remembered devices, MFA challenges can be skipped on subsequent sign-ins.
+ *
+ * @param params - The parameters for confirming a device.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param params.deviceKey - The device key returned during authentication.
+ * @param params.deviceName - A friendly name for the device.
+ * @param params.deviceSecretVerifierConfig - The SRP configuration for the device.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the response indicating if user confirmation is necessary.
+ */
+export async function confirmDevice({
+  accessToken,
+  deviceKey,
+  deviceName,
+  deviceSecretVerifierConfig,
+  abort,
+}: {
+  accessToken: string;
+  deviceKey: string;
+  deviceName?: string;
+  deviceSecretVerifierConfig: {
+    passwordVerifier: string;
+    salt: string;
+  };
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.ConfirmDevice",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        DeviceKey: deviceKey,
+        ...(deviceName && { DeviceName: deviceName }),
+        DeviceSecretVerifierConfig: {
+          PasswordVerifier: deviceSecretVerifierConfig.passwordVerifier,
+          Salt: deviceSecretVerifierConfig.salt,
+        },
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then(
+      (res) => res.json() as Promise<{ UserConfirmationNecessary: boolean }>
+    );
+}
+
+/**
+ * Updates the device status for a user's device.
+ * This is typically called after confirmDevice if the user is prompted to remember the device.
+ *
+ * @param params - The parameters for updating device status.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param params.deviceKey - The device key returned during authentication.
+ * @param params.deviceRememberedStatus - The remembered status of the device (remembered or not_remembered).
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves when the device status has been updated.
+ */
+export async function updateDeviceStatus({
+  accessToken,
+  deviceKey,
+  deviceRememberedStatus,
+  abort,
+}: {
+  accessToken: string;
+  deviceKey: string;
+  deviceRememberedStatus: "remembered" | "not_remembered";
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.UpdateDeviceStatus",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        DeviceKey: deviceKey,
+        DeviceRememberedStatus: deviceRememberedStatus,
+      }),
+      signal: abort,
+    }
+  ).then(throwIfNot2xx);
+}
+
+/**
+ * Lists all devices for the currently authenticated user.
+ *
+ * @param params - The parameters for listing devices.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param [params.limit] - The maximum number of devices to list.
+ * @param [params.paginationToken] - The pagination token from a previous list operation.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the list of devices.
+ */
+export async function listDevices({
+  accessToken,
+  limit,
+  paginationToken,
+  abort,
+}: {
+  accessToken: string;
+  limit?: number;
+  paginationToken?: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.ListDevices",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        ...(limit && { Limit: limit }),
+        ...(paginationToken && { PaginationToken: paginationToken }),
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Gets the device information for a specific device.
+ *
+ * @param params - The parameters for getting device information.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param params.deviceKey - The device key for the device to get information about.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves to the device information.
+ */
+export async function getDevice({
+  accessToken,
+  deviceKey,
+  abort,
+}: {
+  accessToken: string;
+  deviceKey: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.GetDevice",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        DeviceKey: deviceKey,
+      }),
+      signal: abort,
+    }
+  )
+    .then(throwIfNot2xx)
+    .then((res) => res.json());
+}
+
+/**
+ * Removes the specified device from the user's account.
+ *
+ * @param params - The parameters for forgetting a device.
+ * @param params.accessToken - A valid access token for the signed-in user.
+ * @param params.deviceKey - The device key for the device to forget.
+ * @param [params.abort] - An optional AbortSignal object that can be used to abort the request.
+ * @returns A promise that resolves when the device has been forgotten.
+ */
+export async function forgetDevice({
+  accessToken,
+  deviceKey,
+  abort,
+}: {
+  accessToken: string;
+  deviceKey: string;
+  abort?: AbortSignal;
+}) {
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+
+  return fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      headers: {
+        "x-amz-target": "AWSCognitoIdentityProviderService.ForgetDevice",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify({
+        AccessToken: accessToken,
+        DeviceKey: deviceKey,
+      }),
+      signal: abort,
+    }
+  ).then(throwIfNot2xx);
 }

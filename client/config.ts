@@ -57,6 +57,21 @@ export interface Config {
      */
     timeout?: number;
   };
+  /** Advanced Security options for threat protection */
+  advancedSecurity?: {
+    /** Custom implementation of the advanced security data provider */
+    customProvider?: {
+      getData: (
+        username: string,
+        userPoolId?: string,
+        clientId?: string
+      ) => string | undefined;
+    };
+    /** Automatically inject the Amazon Cognito Advanced Security script if not already present */
+    autoInject?: boolean;
+    /** Custom region for the security script (defaults to the region from cognitoIdpEndpoint) */
+    region?: string;
+  };
   /**
    * Function that will be called with debug information,
    * e.g. you can use `console.debug` here.
