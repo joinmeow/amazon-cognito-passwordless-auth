@@ -16,8 +16,8 @@
     "url": "https://aws.amazon.com"
   },
   "repository": {
-    "url": "https://github.com/joinmeow/amazon-cognito-passwordless-auth",
-    "type": "git"
+    "type": "git",
+    "url": "git+https://github.com/joinmeow/amazon-cognito-passwordless-auth.git"
   },
   "main": "dist/client/index.js",
   "scripts": {
@@ -121,6 +121,7 @@
     "esbuild": "*"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://npm.pkg.github.com/",
+    "access": "public"
   }
 }

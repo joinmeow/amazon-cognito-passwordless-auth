@@ -20,6 +20,7 @@ jobs:
           scope: "@joinmeow"
       - run: npm ci
       - run: npm run dist
+      - run: npm pkg fix
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
