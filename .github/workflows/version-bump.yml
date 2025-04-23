@@ -38,5 +38,4 @@ jobs:
       - name: Push Changes
         run: |
           git push
-          git tag v${{ steps.bump.outputs.NEW_VERSION }}
           git push --tags
