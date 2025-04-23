@@ -38,4 +38,5 @@ jobs:
       - name: Push Changes
         run: |
           git push
-          git push origin v${{ steps.bump.outputs.NEW_VERSION }}
+          git tag v${{ steps.bump.outputs.NEW_VERSION }}
+          git push --tags
