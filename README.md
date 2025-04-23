@@ -29,7 +29,12 @@ This library provides implementations for different frontend frameworks:
 ### Usage in (plain) Web
 
 ```javascript
-import { Passwordless, initialize, signUp, confirmSignUp } from "@joinmeow/cognito-passwordless-auth";
+import {
+  Passwordless,
+  initialize,
+  signUp,
+  confirmSignUp,
+} from "@joinmeow/cognito-passwordless-auth";
 
 // Configure the client
 Passwordless.configure({
@@ -47,19 +52,19 @@ await signUp({
   password: "securePassword123",
   userAttributes: [
     { name: "email", value: "user@example.com" },
-    { name: "name", value: "Jane Doe" }
-  ]
+    { name: "name", value: "Jane Doe" },
+  ],
 });
 
 // Confirm sign up with verification code
 await confirmSignUp({
   username: "user@example.com",
-  confirmationCode: "123456"
+  confirmationCode: "123456",
 });
 
 // Start the sign-in process with FIDO2
-const { signedIn } = await authenticateWithFido2({ 
-  username: "user@example.com" 
+const { signedIn } = await authenticateWithFido2({
+  username: "user@example.com",
 });
 
 // Wait for the sign-in process to complete
@@ -70,7 +75,7 @@ const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "password123",
   // Use device authentication if available
-  deviceKey: localStorage.getItem("deviceKey")
+  deviceKey: localStorage.getItem("deviceKey"),
 });
 
 // Sign out
@@ -83,37 +88,30 @@ await signOut();
 import {
   PasswordlessContextProvider,
   usePasswordless,
-  useTotpMfa
+  useTotpMfa,
 } from "@joinmeow/cognito-passwordless-auth/react";
 
 function App() {
   return (
-    <PasswordlessContextProvider
-      enableLocalUserCache={true}
-    >
+    <PasswordlessContextProvider enableLocalUserCache={true}>
       <YourApp />
     </PasswordlessContextProvider>
   );
 }
 
 function YourApp() {
-  const { 
-    signInStatus, 
-    authenticateWithFido2, 
+  const {
+    signInStatus,
+    authenticateWithFido2,
     authenticateWithSRP,
     deviceKey,
     confirmDevice,
-    forgetDevice 
+    forgetDevice,
   } = usePasswordless();
 
   // For TOTP MFA setup
-  const { 
-    setupStatus, 
-    secretCode, 
-    qrCodeUrl, 
-    beginSetup, 
-    verifySetup 
-  } = useTotpMfa();
+  const { setupStatus, secretCode, qrCodeUrl, beginSetup, verifySetup } =
+    useTotpMfa();
 
   if (signInStatus === "SIGNED_IN") {
     return <Dashboard />;
@@ -124,17 +122,19 @@ function YourApp() {
       <button onClick={() => authenticateWithFido2()}>
         Sign in with FIDO2
       </button>
-      
-      <form onSubmit={(e) => {
-        e.preventDefault();
-        const form = e.target;
-        authenticateWithSRP({
-          username: form.username.value,
-          password: form.password.value,
-          // Use saved device key for faster authentication
-          deviceKey
-        });
-      }}>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          const form = e.target;
+          authenticateWithSRP({
+            username: form.username.value,
+            password: form.password.value,
+            // Use saved device key for faster authentication
+            deviceKey,
+          });
+        }}
+      >
         <input name="username" placeholder="Username" />
         <input name="password" type="password" placeholder="Password" />
         <button type="submit">Sign In</button>
@@ -155,9 +155,7 @@ The complete sign-up flow consists of:
 await signUp({
   username: "user@example.com",
   password: "securePassword123",
-  userAttributes: [
-    { name: "email", value: "user@example.com" }
-  ]
+  userAttributes: [{ name: "email", value: "user@example.com" }],
 });
 
 // 2. If an error occurs during sign-up, you can resend the confirmation code
@@ -166,13 +164,13 @@ await resendConfirmationCode({ username: "user@example.com" });
 // 3. Confirm the sign-up with the verification code that was sent to the user
 await confirmSignUp({
   username: "user@example.com",
-  confirmationCode: "123456"  // Code received via email or SMS
+  confirmationCode: "123456", // Code received via email or SMS
 });
 
 // 4. After sign-up confirmation, the user can sign in
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
-  password: "securePassword123"
+  password: "securePassword123",
 });
 ```
 
@@ -184,7 +182,7 @@ The device authentication flow eliminates the need for MFA on subsequent sign-in
 // 1. User signs in with SRP or plaintext password
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
-  password: "securePassword123"
+  password: "securePassword123",
 });
 
 // 2. Wait for the sign-in to complete
@@ -194,21 +192,18 @@ const tokens = await signedIn;
 if (tokens.newDeviceMetadata?.deviceKey) {
   // Store device key for future authentications
   localStorage.setItem("deviceKey", tokens.newDeviceMetadata.deviceKey);
-  
+
   // Generate SRP salt and verifier for the device
   const deviceVerifierConfig = generateDeviceVerifier();
-  
+
   // 4. Confirm the device with server
-  const result = await confirmDevice(
-    "My Device", 
-    deviceVerifierConfig
-  );
-  
+  const result = await confirmDevice("My Device", deviceVerifierConfig);
+
   // 5. If user confirmation is required, mark as remembered (this step is handled by the library)
   if (result.UserConfirmationNecessary) {
     await updateDeviceStatus({
       deviceKey: tokens.newDeviceMetadata.deviceKey,
-      deviceRememberedStatus: "remembered"
+      deviceRememberedStatus: "remembered",
     });
   }
 }
@@ -217,7 +212,7 @@ if (tokens.newDeviceMetadata?.deviceKey) {
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "securePassword123",
-  deviceKey: localStorage.getItem("deviceKey")
+  deviceKey: localStorage.getItem("deviceKey"),
 });
 
 // 7. When using a remembered device, Cognito will send DEVICE_SRP_AUTH challenge
@@ -225,6 +220,7 @@ const { signedIn } = await authenticateWithSRP({
 ```
 
 When a user signs in with a remembered device:
+
 1. The library includes the device key in the authentication request
 2. Amazon Cognito sends a DEVICE_SRP_AUTH challenge instead of an MFA challenge
 3. The library automatically responds to the device challenge
@@ -236,13 +232,8 @@ Set up Time-Based One-Time Password MFA for a user:
 
 ```javascript
 // In a React component
-const { 
-  setupStatus, 
-  secretCode, 
-  qrCodeUrl, 
-  beginSetup, 
-  verifySetup 
-} = useTotpMfa();
+const { setupStatus, secretCode, qrCodeUrl, beginSetup, verifySetup } =
+  useTotpMfa();
 
 // Start setup
 await beginSetup();
@@ -261,14 +252,14 @@ The library also supports password reset functionality:
 ```javascript
 // 1. Request a password reset code
 await forgotPassword({
-  username: "user@example.com"
+  username: "user@example.com",
 });
 
 // 2. Complete the password reset with the code received via email/SMS
 await confirmForgotPassword({
   username: "user@example.com",
   confirmationCode: "123456",
-  password: "newSecurePassword123"
+  password: "newSecurePassword123",
 });
 
 // 3. User can now sign in with the new password

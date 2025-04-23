@@ -341,10 +341,7 @@ function _usePasswordless() {
       : tokensParsed && (isSchedulingRefresh || isRefreshingTokens)
         ? ("REFRESHING_SIGN_IN" as const)
         : busyState
-              .filter(
-                (state) =>
-                  !["SIGNING_OUT"].includes(state)
-              )
+              .filter((state) => !["SIGNING_OUT"].includes(state))
               .includes(signingInStatus as BusyState)
           ? ("SIGNING_IN" as const)
           : initiallyRetrievingTokensFromStorage
@@ -556,7 +553,8 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
+        tokensCb: (newTokens) =>
+          storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -586,7 +584,8 @@ function _usePasswordless() {
         otpMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
+        tokensCb: (newTokens) =>
+          storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -616,7 +615,8 @@ function _usePasswordless() {
         otpMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
+        tokensCb: (newTokens) =>
+          storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -771,11 +771,7 @@ function _useLocalUserCache() {
       }
       return "ASK";
     },
-    [
-      creatingCredential,
-      hasFido2Credentials,
-      fidoPreferenceOverride,
-    ]
+    [creatingCredential, hasFido2Credentials, fidoPreferenceOverride]
   );
 
   // 4 Update user FIDO preference

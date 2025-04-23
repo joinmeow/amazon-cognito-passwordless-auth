@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version_type:
-        description: 'Type of version bump'
+        description: "Type of version bump"
         required: true
-        default: 'patch'
+        default: "patch"
         type: choice
         options:
           - patch
@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          node-version: "20.x"
       - name: Configure Git
         run: |
           git config user.name "GitHub Actions"
@@ -38,4 +38,4 @@ jobs:
       - name: Push Changes
         run: |
           git push
-          git push origin v${{ steps.bump.outputs.NEW_VERSION }} 
+          git push origin v${{ steps.bump.outputs.NEW_VERSION }}

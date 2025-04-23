@@ -380,15 +380,15 @@ export default function YourComponent() {
   const { confirmDevice } = usePasswordless();
 
   return (
-    <button 
+    <button
       onClick={() => {
         confirmDevice(
           "My Laptop", // Device name
-          { 
-            passwordVerifier: "generatedVerifier", 
-            salt: "generatedSalt" 
+          {
+            passwordVerifier: "generatedVerifier",
+            salt: "generatedSalt",
           } // Device SRP verification info
-        ).then(result => {
+        ).then((result) => {
           console.log("Device confirmed:", result);
         });
       }}
@@ -408,7 +408,7 @@ export default function YourComponent() {
   const { forgetDevice, deviceKey } = usePasswordless();
 
   return (
-    <button 
+    <button
       onClick={() => {
         forgetDevice(deviceKey).then(() => {
           console.log("Device forgotten");
