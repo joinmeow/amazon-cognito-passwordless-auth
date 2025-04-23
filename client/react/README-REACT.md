@@ -4,12 +4,12 @@
 
 Upon deploying the backend (with the `Passwordless` CDK construct), custom authentication flows are added to your Amazon Cognito User Pool, and your front-end will need to initiate and "dance" along in the Passwordless choreography to sign users in. This library provides a hook and sample components to make that easy:
 
-- React hook: `usePasswordless`: this hook provides all functionality to sign-in with Magic Links, FIDO2 (and passwords too should you want it).
+- React hook: `usePasswordless`: this hook provides all functionality to sign-in with FIDO2 (biometrics like Face ID or Touch ID) and SRP (Secure Remote Password).
 - Sample React components––to get started quickly and for inspiration to build your own:
-  - `<Passwordless />`: sample component that renders a login page, allowing the user to choose between FIDO2 and Magic Links
+  - `<Passwordless />`: sample component that renders a login page, allowing the user to authenticate with FIDO2 or username/password
   - `<Fido2Toast />`: sample component (a "toast" at the top of the page) that (1) recommends to add a FIDO2 credential if the user doesn't yet have one and (2) shows the user's registered FIDO2 credentials
 
-A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with magic links and FIDO2.
+A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with FIDO2 and SRP.
 
 ## `usePasswordless` hook
 
@@ -19,9 +19,6 @@ This hook uses React context. To use this hook, wrap your components with the `P
 import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
 
 const {
-  /** Magic links */
-  requestSignInLink, // function to request a sign-in link ("magic link") to be sent to the user's e-mail address
-
   /** FIDO2 */
   authenticateWithFido2, // function to sign in with FIDO2 (e.g. Face ID or Touch)
   fido2CreateCredential, // function to register a new FIDO2 credential with the Relying Party
@@ -34,6 +31,12 @@ const {
   /** Username Password */
   authenticateWithSRP, // function to sign in with username and password (using SRP: Secure Remote Password, where the password isn't sent over the wire)
   authenticateWithPlaintextPassword, // function to sign in with username and password (the password is sent in plaintext over the wire, instead use authenticateWithSRP if you can)
+
+  /** Device Authentication */
+  deviceKey, // The device key for remembered device authentication
+  confirmDevice, // Function to confirm a device for trusted device authentication
+  forgetDevice, // Function to forget a device to stop using it for trusted device authentication
+  clearDeviceKey, // Function to clear the stored device key
 
   /** JWTs */
   tokens, // raw (i.e. string) JWTs of the signed-in user: ID token, Access token and Refresh Token
@@ -48,7 +51,7 @@ const {
 
   /** Status */
   signInStatus, // overall auth status, e.g. is the user signed in or not? Use this field to show the relevant UI, e.g. render a sign-in page, if the status equals "NOT_SIGNED_IN"
-  signingInStatus, // status of the most recent sign-in attempt, e.g. "REQUESTING_SIGNIN_LINK", or "STARTING_SIGN_IN_WITH_FIDO2"
+  signingInStatus, // status of the most recent sign-in attempt, e.g. "STARTING_SIGN_IN_WITH_FIDO2"
   busy, // boolean, set to true during sign-in and sign-out (e.g. use this if you want to display a spinner)
 
   /** Sign out */
@@ -60,7 +63,7 @@ See more details below.
 
 ## `<Passwordless />` sample component
 
-A prefab sample login component, that supports signing in with FIDO2 and Magic Links. Shows the last user that was signed in on this device, so that they may sign-in again without having to enter their username:
+A prefab sample login component, that supports signing in with FIDO2 and username/password. Shows the last user that was signed in on this device, so that they may sign-in again without having to enter their username:
 
 <img src="../../drawings/passwordless-signin.png" alt="Passwordless Sign In" width="500px" />
 
@@ -208,7 +211,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
 );
 ```
 
-Note: React context is used to make sure authentication actions, such as trading the magic link hash for JWTs, happen only once––even though multiple components may use the `usePasswordless` hook in parallel.
+Note: React context is used to make sure authentication actions, happen only once––even though multiple components may use the `usePasswordless` hook in parallel.
 
 You can also wrap your app with the `Passwordless` component. In that case, your app will only show if the user is signed in, otherwise the `Passwordless` component shows to make the user sign in. If you're using the sample components, also include the CSS import:
 
@@ -281,46 +284,6 @@ function MyComponent() {
   const { signInStatus, ... } = usePasswordless();
 
   return <div>Your sign in status: {signInStatus}</div>;
-}
-```
-
-#### Sign In with Magic Link
-
-Signing in with a magic link works in 2 steps (see also: [MAGIC-LINKS](../../MAGIC-LINKS.md)):
-
-##### 1. Request Magic Link
-
-Your web app requests a magic link to be e-mailed to the user. Let's assume your web app runs at `https://www.example.org`. The Amazon Cognito User Pool (through custom authentication triggers) will then create a magic link such as `https://www.example.org#eyJ1c2VyTmFtZSI6...` and e-mail that to the user.
-
-##### 2. Open Magic Link
-
-The user opens their e-mail client and clicks on the magic link. This will open e.g. `https://www.example.org#eyJ1c2VyTmFtZSI6...` in a new browser tab, where your web app will initialize. Since you wrapped your app with the `PasswordlessContextProvider`, this passwordless library will initialize, check the browser's location, find the magic link there, and use it to complete the sign-in process to get JWTs from the Cognito User pool (you could say, the magic link is traded agains JWTs). After that the user is signed-in, and the JWTs will be stored in your configured storage (`localStorage` by default).
-
-All this happens automatically when your web app initializes, because you've wrapped it with the `PasswordlessContextProvider`. If you're building a custom sign in page (i.e. if you're not using the prefab `Passwordless` component), the only thing you have to code yourself is the requesting of a magic link:
-
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth";
-
-export default function YourComponent() {
-  const { requestSignInLink } = usePasswordless();
-
-  <form
-    onSubmit={(event) => {
-      // Request a magic link to be e-mailed to the user.
-      // When the user clicks on the link, your web app will open and parse the link
-      // automatically (if you've loaded this library), and sign the user in.
-      // Supply an optional redirectUri as the second argument to specify where
-      // in your application you'd like the user to be directed to after signing in.
-      requestSignInLink({
-        username: event.currentTarget.username.value,
-        redirectUri: "https://example.com/article/45",
-      });
-      event.preventDefault();
-    }}
-  >
-    <input type="text" placeholder="Username" name="username" />
-    <input type="submit" value="Request magic link" />
-  </form>;
 }
 ```
 
@@ -406,9 +369,61 @@ export default function YourComponent() {
 
 This will prompt the native WebAuthn dialog (e.g. Face/Touch) on your environment to perform the log in.
 
+#### Trusted Device Authentication
+
+Once a user is signed in, you can confirm their device for trusted authentication, allowing them to bypass MFA on future sign-ins when using the same device:
+
+```javascript
+import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+
+export default function YourComponent() {
+  const { confirmDevice } = usePasswordless();
+
+  return (
+    <button 
+      onClick={() => {
+        confirmDevice(
+          "My Laptop", // Device name
+          { 
+            passwordVerifier: "generatedVerifier", 
+            salt: "generatedSalt" 
+          } // Device SRP verification info
+        ).then(result => {
+          console.log("Device confirmed:", result);
+        });
+      }}
+    >
+      Remember this device
+    </button>
+  );
+}
+```
+
+To forget a device:
+
+```javascript
+import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+
+export default function YourComponent() {
+  const { forgetDevice, deviceKey } = usePasswordless();
+
+  return (
+    <button 
+      onClick={() => {
+        forgetDevice(deviceKey).then(() => {
+          console.log("Device forgotten");
+        });
+      }}
+    >
+      Forget this device
+    </button>
+  );
+}
+```
+
 #### Sign In with Password
 
-Sure you can still use passwords if you really want to :)
+You can still use passwords with SRP (Secure Remote Password) authentication:
 
 ```javascript
 import { usePasswordless } from "amazon-cognito-passwordless-auth";

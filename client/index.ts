@@ -14,11 +14,9 @@
  */
 import { configure, configureFromAmplify } from "./config.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
-import { signInWithLink } from "./magic-link.js";
 
 // Helper to safely check browser environment without direct window reference
 const isBrowser = () => typeof globalThis !== "undefined";
-const getLocation = () => (isBrowser() ? globalThis.location : undefined);
 
 // Initialize the security provider
 if (isBrowser()) {
@@ -28,16 +26,7 @@ if (isBrowser()) {
 
 export function initialize(overrides?: Parameters<typeof configure>[0]) {
   configure(overrides);
-  const location = getLocation();
-  if (location && location.hash.indexOf("access_token") !== -1) {
-    void signInWithLink()
-      .signedIn.then(() => {
-        location.replace(location.pathname + location.search);
-      })
-      .catch((err) => {
-        console.error(err);
-      });
-  }
+  // Magic link handling has been removed
 }
 
 export const Passwordless = {
@@ -54,7 +43,6 @@ export const Passwordless = {
 // Re-export everything from the other modules
 export * from "./common.js";
 export * from "./fido2.js";
-export * from "./magic-link.js";
 export * from "./model.js";
 export * from "./plaintext.js";
 export * from "./refresh.js";

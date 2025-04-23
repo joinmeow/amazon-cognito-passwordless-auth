@@ -65,7 +65,6 @@ export const Passwordless = ({
   children?: React.ReactNode;
 } = {}) => {
   const {
-    requestSignInLink,
     lastError,
     authenticateWithFido2,
     busy,
@@ -113,47 +112,12 @@ export const Passwordless = ({
     );
   }
 
-  if (signingInStatus === "SIGNING_IN_WITH_LINK") {
-    return (
-      <FlexContainer brand={brand}>
-        <div className="passwordless-flex">
-          <div className="passwordless-loading-spinner" />
-          <div>Checking the sign-in link...</div>
-        </div>
-      </FlexContainer>
-    );
-  }
-
   if (signingInStatus === "SIGNING_OUT") {
     return (
       <FlexContainer brand={brand}>
         <div className="passwordless-flex">
           <div className="passwordless-loading-spinner" />
           <div>Signing out, please wait...</div>
-        </div>
-      </FlexContainer>
-    );
-  }
-
-  if (signingInStatus === "SIGNIN_LINK_REQUESTED") {
-    return (
-      <FlexContainer brand={brand}>
-        <div className="passwordless-flex passwordless-flex-align-start">
-          <svg
-            width="24px"
-            height="20px"
-            viewBox="0 0 24 20"
-            version="1.1"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path d="M1.8,17.4 L1.8,3.23906256 L12,13.4402345 L22.2,3.23906256 L22.2,17.5195313 L1.8,17.5195313 L1.8,17.4 Z M21,1.8 L12,10.8 L3,1.8 L21,1.8 Z M0,0 L0,19.2 L24,19.2 L24,0 L0,0 Z"></path>
-          </svg>
-          <div>
-            <div className="passwordless-text-left">
-              <strong>Please check your email.</strong>
-            </div>
-            <div>We&apos;ve emailed you a secret sign-in link</div>
-          </div>
         </div>
       </FlexContainer>
     );
@@ -254,28 +218,6 @@ export const Passwordless = ({
                   </div>
                 </button>
               )}
-              <button
-                className={`passwordless-button passwordless-button-sign-in ${
-                  showFido2AuthOption && user.useFido === "YES"
-                    ? "passwordless-button-outlined"
-                    : ""
-                }`}
-                onClick={() =>
-                  requestSignInLink({
-                    username: user.username,
-                  })
-                }
-                disabled={busy}
-              >
-                <div className="passwordless-flex">
-                  <div className="passwordless-svg-icon-container passwordless-flex-align-start">
-                    <svg width="24px" height="20px">
-                      <path d="M1.8,17.4 L1.8,3.23906256 L12,13.4402345 L22.2,3.23906256 L22.2,17.5195313 L1.8,17.5195313 L1.8,17.4 Z M21,1.8 L12,10.8 L3,1.8 L21,1.8 Z M0,0 L0,19.2 L24,19.2 L24,0 L0,0 Z"></path>
-                    </svg>
-                  </div>
-                  <div>Sign in with magic link</div>
-                </div>
-              </button>
             </p>
             <div className="passwordless-mobile-spacer"></div>
           </div>
@@ -319,13 +261,11 @@ export const Passwordless = ({
             onSubmit={(e) => {
               e.preventDefault();
               if (showFido2AuthOption) {
-                // let the user choose between FIDO2 and Magic Link
+                // Only FIDO2 authentication is supported
                 setShowSignInOptionsForUser("NEW_USER");
               } else {
-                // no user choice necessary––only magic links supported
-                requestSignInLink({
-                  username: newUsername,
-                });
+                // No authentication methods available
+                console.warn("No authentication methods available");
               }
               return false;
             }}
@@ -364,12 +304,7 @@ export const Passwordless = ({
                 </div>
               ) : (
                 <div className="passwordless-flex">
-                  <div>Sign in</div>
-                  <div className="passwordless-svg-icon-container passwordless-flex-align-start">
-                    <svg width="24px" height="20px">
-                      <path d="M1.8,17.4 L1.8,3.23906256 L12,13.4402345 L22.2,3.23906256 L22.2,17.5195313 L1.8,17.5195313 L1.8,17.4 Z M21,1.8 L12,10.8 L3,1.8 L21,1.8 Z M0,0 L0,19.2 L24,19.2 L24,0 L0,0 Z"></path>
-                    </svg>
-                  </div>
+                  <div>Continue</div>
                 </div>
               )}
             </button>
@@ -377,32 +312,6 @@ export const Passwordless = ({
         </>
       )}
       <div className="passwordless-flex">
-        {signingInStatus === "SIGNIN_LINK_EXPIRED" && (
-          <div className="passwordless-flex passwordless-flex-align-start">
-            <svg
-              width="24px"
-              height="24px"
-              viewBox="0 0 24 24"
-              version="1.1"
-              xmlns="http://www.w3.org/2000/svg"
-              className="rotate-45"
-            >
-              <path d="M18,11.1 L12.9,11.1 L12.9,6 L11.1,6 L11.1,11.1 L6,11.1 L6,12.9 L11.1,12.9 L11.1,17.9988281 L12.9,17.9988281 L12.9,12.9 L18,12.9 L18,11.1 Z M12,24 C5.38359372,24 0,18.6164063 0,12 C0,5.38300776 5.38359372,0 12,0 C18.6164063,0 24,5.38300776 24,12 C24,18.6164063 18.6164063,24 12,24 Z M12,1.8 C6.37617192,1.8 1.8,6.37558596 1.8,12 C1.8,17.6238281 6.37617192,22.2 12,22.2 C17.6238281,22.2 22.2,17.6238281 22.2,12 C22.2,6.37558596 17.6238281,1.8 12,1.8 Z"></path>
-            </svg>
-            <div>
-              <div className="passwordless-text-left">
-                <strong>Authentication error.</strong>
-              </div>
-              <div>The sign-in link you tried to use is no longer valid</div>
-            </div>
-          </div>
-        )}
-        {signingInStatus === "REQUESTING_SIGNIN_LINK" && (
-          <>
-            <div className="passwordless-loading-spinner" />
-            <div>Starting sign-in...</div>
-          </>
-        )}
         {signingInStatus === "STARTING_SIGN_IN_WITH_FIDO2" && (
           <>
             <div className="passwordless-loading-spinner" />

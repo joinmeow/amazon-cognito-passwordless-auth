@@ -1,7 +1,5 @@
 # Usage in (plain) Web
 
-> **_Oops:_** These docs are pretty incomplete and don't explain how to sign in yet :( For now, the best we have are some useful comments in this issue: https://github.com/aws-samples/amazon-cognito-passwordless-auth/issues/1
-
 ### Configuration
 
 To use the library, you need to first configure it:
@@ -10,7 +8,7 @@ To use the library, you need to first configure it:
 import { Passwordless } from "amazon-cognito-passwordless-auth/react";
 
 Passwordless.configure({
-  cognitoIdpEndpoint: "eu-west-1", // you can also use the full endpoint URL, potentially to use a proxy
+  cognitoIdpEndpoint: "us-east-2", // you can also use the full endpoint URL, potentially to use a proxy
   clientId: "<client id>",
   // optional, only required if you want to use FIDO2:
   fido2: {

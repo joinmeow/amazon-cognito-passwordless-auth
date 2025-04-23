@@ -14,7 +14,6 @@
  */
 import { signOut } from "../common.js";
 import { parseJwtPayload, setTimeoutWallClock } from "../util.js";
-import { signInWithLink, requestSignInLink } from "../magic-link.js";
 import {
   fido2CreateCredential,
   fido2DeleteCredential,
@@ -125,7 +124,7 @@ type UsePasswordless = ReturnType<typeof _usePasswordless>;
 
 function _usePasswordless() {
   const [signingInStatus, setSigninInStatus] = useState<BusyState | IdleState>(
-    "CHECKING_FOR_SIGNIN_LINK"
+    "SIGNED_OUT"
   );
   const [
     initiallyRetrievingTokensFromStorage,
@@ -199,17 +198,10 @@ function _usePasswordless() {
     useState(false);
   const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
 
-  // At component mount, attempt sign-in with link
-  // This is a no-op, if there's no secret hash in the location bar
+  // At component mount, check sign-in status
   useEffect(() => {
     setLastError(undefined);
-    const signingIn = signInWithLink({
-      statusCb: setSigninInStatus,
-      tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
-    });
-    signingIn.signedIn.catch(setLastError);
-    return signingIn.abort;
-  }, [setTokens]);
+  }, []);
   const busy = busyState.includes(signingInStatus as BusyState);
 
   // Schedule token refresh
@@ -351,12 +343,11 @@ function _usePasswordless() {
         : busyState
               .filter(
                 (state) =>
-                  !["SIGNING_OUT", "CHECKING_FOR_SIGNIN_LINK"].includes(state)
+                  !["SIGNING_OUT"].includes(state)
               )
               .includes(signingInStatus as BusyState)
           ? ("SIGNING_IN" as const)
-          : initiallyRetrievingTokensFromStorage ||
-              signingInStatus === "CHECKING_FOR_SIGNIN_LINK"
+          : initiallyRetrievingTokensFromStorage
             ? ("CHECKING" as const)
             : signingInStatus === "SIGNING_OUT"
               ? ("SIGNING_OUT" as const)
@@ -546,24 +537,6 @@ function _usePasswordless() {
       signingOut.signedOut.catch(setLastError);
       return signingOut;
     },
-    /** Request a sign-in link ("magic link") to be sent to the user's e-mail address */
-    requestSignInLink: ({
-      username,
-      redirectUri,
-    }: {
-      username: string;
-      redirectUri?: string;
-    }) => {
-      setLastError(undefined);
-      const requesting = requestSignInLink({
-        username,
-        redirectUri,
-        statusCb: setSigninInStatus,
-        currentStatus: signingInStatus,
-      });
-      requesting.signInLinkRequested.catch(setLastError);
-      return requesting;
-    },
     /** Sign in with FIDO2 (e.g. Face ID or Touch) */
     authenticateWithFido2: ({
       username,
@@ -583,7 +556,7 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (tokens) => storeTokens(tokens).then(() => setTokens(tokens)),
+        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -594,7 +567,6 @@ function _usePasswordless() {
       password,
       smsMfaCode,
       otpMfaCode,
-      deviceKey: providedDeviceKey,
       clientMetadata,
     }: {
       /**
@@ -604,40 +576,17 @@ function _usePasswordless() {
       password: string;
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
-      /**
-       * Device key for device authentication (if available from previous sessions)
-       */
-      deviceKey?: string;
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
-      const { debug } = configure();
-      // Use provided device key or the one from state
-      const effectiveDeviceKey = providedDeviceKey || deviceKey;
-
       const signinIn = authenticateWithSRP({
         username,
         password,
         smsMfaCode,
         otpMfaCode,
-        deviceKey: effectiveDeviceKey || undefined,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (tokens) => {
-          // If this authentication generated a new device key, store it
-          if (tokens.newDeviceMetadata?.deviceKey) {
-            // Store the device key in localStorage for future authentication
-            localStorage.setItem(
-              "deviceKey",
-              tokens.newDeviceMetadata.deviceKey
-            );
-            setDeviceKey(tokens.newDeviceMetadata.deviceKey);
-            debug?.(
-              `Stored new device key: ${tokens.newDeviceMetadata.deviceKey}`
-            );
-          }
-          return storeTokens(tokens).then(() => setTokens(tokens));
-        },
+        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -648,7 +597,6 @@ function _usePasswordless() {
       password,
       smsMfaCode,
       otpMfaCode,
-      deviceKey: providedDeviceKey,
       clientMetadata,
     }: {
       /**
@@ -658,40 +606,17 @@ function _usePasswordless() {
       password: string;
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
-      /**
-       * Device key for device authentication (if available from previous sessions)
-       */
-      deviceKey?: string;
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
-      const { debug } = configure();
-      // Use provided device key or the one from state
-      const effectiveDeviceKey = providedDeviceKey || deviceKey;
-
       const signinIn = authenticateWithPlaintextPassword({
         username,
         password,
         smsMfaCode,
         otpMfaCode,
-        deviceKey: effectiveDeviceKey || undefined,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (tokens) => {
-          // If this authentication generated a new device key, store it
-          if (tokens.newDeviceMetadata?.deviceKey) {
-            // Store the device key in localStorage for future authentication
-            localStorage.setItem(
-              "deviceKey",
-              tokens.newDeviceMetadata.deviceKey
-            );
-            setDeviceKey(tokens.newDeviceMetadata.deviceKey);
-            debug?.(
-              `Stored new device key: ${tokens.newDeviceMetadata.deviceKey}`
-            );
-          }
-          return storeTokens(tokens).then(() => setTokens(tokens));
-        },
+        tokensCb: (newTokens) => storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
       signinIn.signedIn.catch(setLastError);
       return signinIn;
@@ -757,7 +682,6 @@ function _useLocalUserCache() {
   } = usePasswordless();
   const idToken = tokensParsed?.idToken;
   const hasFido2Credentials = fido2Credentials && !!fido2Credentials.length;
-  const justSignedInWithMagicLink = signingInStatus === "SIGNED_IN_WITH_LINK";
   const [lastSignedInUsers, setLastSignedInUsers] = useState<StoredUser[]>();
   const [currentUser, setCurrentUser] = useState<StoredUser>();
   const [fidoPreferenceOverride, setFidoPreferenceOverride] = useState<
@@ -837,9 +761,6 @@ function _useLocalUserCache() {
         return fidoPreferenceOverride;
       }
       if (user.useFido === "NO") {
-        if (justSignedInWithMagicLink) {
-          return "ASK";
-        }
         return "NO";
       }
       if (hasFido2Credentials) {
@@ -854,7 +775,6 @@ function _useLocalUserCache() {
       creatingCredential,
       hasFido2Credentials,
       fidoPreferenceOverride,
-      justSignedInWithMagicLink,
     ]
   );
 
@@ -903,7 +823,6 @@ function _useLocalUserCache() {
     },
   };
 }
-
 /** React hook to turn state (or any variable) into a promise that can be awaited */
 export function useAwaitableState<T>(state: T) {
   const resolve = useRef<(value: T) => void>();
