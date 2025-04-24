@@ -3,10 +3,14 @@ name: Publish Client Package to npm
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to publish (without v prefix)"
+      version_bump:
+        description: "Version increment type (patch, minor, major)"
         required: true
-        type: string
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 jobs:
   build-and-publish:
@@ -20,7 +24,7 @@ jobs:
           registry-url: https://registry.npmjs.org/
       - run: npm ci
       - name: Update package version
-        run: npm version ${{ github.event.inputs.version }} --no-git-tag-version
+        run: npm version ${{ github.event.inputs.version_bump }} --no-git-tag-version
       - run: npm run dist
       - run: npm publish
         env:
