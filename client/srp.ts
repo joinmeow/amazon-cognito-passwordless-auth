@@ -260,7 +260,6 @@ export function authenticateWithSRP({
   newPassword,
   customChallengeAnswer,
   deviceKey,
-  authflow = "USER_SRP_AUTH",
   tokensCb,
   statusCb,
   clientMetadata,
@@ -278,7 +277,6 @@ export function authenticateWithSRP({
    * Device key for device authentication (if available from previous sessions)
    */
   deviceKey?: string;
-  authflow?: "USER_SRP_AUTH" | "CUSTOM_AUTH";
   tokensCb?: (tokens: TokensFromSignIn) => void | Promise<void>;
   statusCb?: (status: BusyState | IdleState) => void;
   currentStatus?: BusyState | IdleState;
@@ -298,7 +296,7 @@ export function authenticateWithSRP({
 
       // Include device key in auth if available
       const challenge = await initiateAuth({
-        authflow,
+        authflow: "USER_SRP_AUTH",
         authParameters: {
           SRP_A: largeAHex,
           USERNAME: username,
