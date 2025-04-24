@@ -385,33 +385,27 @@ function _usePasswordless() {
   const revalidateFido2Credentials = () => {
     const { debug } = configure();
     
-    // Log current auth state for debugging
-    debug?.("Checking FIDO2 credentials with auth method:", authMethod, "signInStatus:", signInStatus);
-    
-    // Explicitly return early if using SRP authentication
-    if (authMethod === "SRP") {
-      debug?.("SRP authentication detected, skipping FIDO2 credential listing");
-      return () => {}; // Return empty cleanup function
+    // Only proceed if we're specifically using FIDO2 authentication
+    // This prevents any FIDO2 operations when using SRP or other auth methods
+    if (authMethod !== "FIDO2") {
+      debug?.("Not using FIDO2 authentication, skipping credential listing");
+      return () => {};
     }
     
-    // Only proceed with FIDO2 operations for non-SRP auth
+    // Only proceed with operations if signed in with FIDO2
     const cancel = new AbortController();
     if (isSignedIn) {
-      debug?.("Listing FIDO2 credentials for non-SRP authentication");
+      debug?.("Listing FIDO2 credentials for FIDO2 authentication");
       fido2ListCredentials()
         .then((res) => {
           if (!cancel.signal.aborted) {
-            debug?.("Successfully retrieved FIDO2 credentials:", res.authenticators.length);
             setFido2Credentials(res.authenticators.map(toFido2Credential));
           }
         })
         .catch((err) => {
-          const { debug } = configure();
           debug?.("Failed to list credentials:", err);
         });
       return () => cancel.abort();
-    } else {
-      debug?.("Not signed in, skipping FIDO2 credential listing");
     }
     
     return () => {};
