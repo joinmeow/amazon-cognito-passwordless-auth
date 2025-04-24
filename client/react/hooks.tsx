@@ -13,7 +13,7 @@
  * language governing permissions and limitations under the License.
  */
 import { signOut } from "../common.js";
-import { parseJwtPayload, setTimeoutWallClock } from "../util.js";
+import { parseJwtPayload, setTimeoutWallClock, bufferToBase64 } from "../util.js";
 import {
   fido2CreateCredential,
   fido2DeleteCredential,
@@ -436,8 +436,7 @@ function _usePasswordless() {
      * The device key must be available from a recent authentication response.
      */
     confirmDevice: async (
-      deviceName: string,
-      deviceVerifierConfig: { passwordVerifier: string; salt: string }
+      deviceName: string
     ) => {
       if (!tokens?.accessToken) {
         throw new Error("User must be signed in to confirm a device");
@@ -447,8 +446,25 @@ function _usePasswordless() {
         throw new Error("No device key available");
       }
 
-      const { debug } = configure();
+      const { debug, crypto } = configure();
       debug?.("Confirming device:", deviceKey);
+
+      // Generate device verifier config internally
+      // Generate a random salt
+      const saltBuffer = new Uint8Array(16);
+      crypto.getRandomValues(saltBuffer);
+      const salt = bufferToBase64(saltBuffer);
+      
+      // Generate a random password verifier
+      const passwordVerifierBuffer = new Uint8Array(64);
+      crypto.getRandomValues(passwordVerifierBuffer);
+      const passwordVerifier = bufferToBase64(passwordVerifierBuffer);
+
+      // Create device verifier config
+      const deviceVerifierConfig = {
+        passwordVerifier,
+        salt
+      };
 
       const result = await confirmDeviceApi({
         accessToken: tokens.accessToken,
