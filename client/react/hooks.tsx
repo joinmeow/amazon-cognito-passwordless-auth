@@ -201,6 +201,7 @@ function _usePasswordless() {
   const [showAuthenticatorManager, setShowAuthenticatorManager] =
     useState(false);
   const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
+  const [authMethod, setAuthMethod] = useState<"SRP" | "FIDO2" | "PLAINTEXT" | undefined>();
 
   // At component mount, check sign-in status
   useEffect(() => {
@@ -381,7 +382,7 @@ function _usePasswordless() {
   const isSignedIn = signInStatus === "SIGNED_IN";
   const revalidateFido2Credentials = () => {
     const cancel = new AbortController();
-    if (isSignedIn) {
+    if (isSignedIn && authMethod !== "SRP") {
       fido2ListCredentials()
         .then((res) => {
           if (!cancel.signal.aborted) {
@@ -395,7 +396,7 @@ function _usePasswordless() {
       return () => cancel.abort();
     }
   };
-  useEffect(revalidateFido2Credentials, [isSignedIn, toFido2Credential]);
+  useEffect(revalidateFido2Credentials, [isSignedIn, toFido2Credential, authMethod]);
 
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
@@ -540,6 +541,7 @@ function _usePasswordless() {
     /** Sign out */
     signOut: () => {
       setLastError(undefined);
+      setAuthMethod(undefined);
       const signingOut = signOut({
         statusCb: setSigninInStatus,
         tokensRemovedLocallyCb: () => {
@@ -566,6 +568,7 @@ function _usePasswordless() {
       clientMetadata?: Record<string, string>;
     } = {}) => {
       setLastError(undefined);
+      setAuthMethod("FIDO2");
       const signinIn = authenticateWithFido2({
         username,
         credentials,
@@ -595,6 +598,7 @@ function _usePasswordless() {
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
+      setAuthMethod("SRP");
       const signinIn = authenticateWithSRP({
         username,
         password,
@@ -626,6 +630,7 @@ function _usePasswordless() {
       clientMetadata?: Record<string, string>;
     }) => {
       setLastError(undefined);
+      setAuthMethod("PLAINTEXT");
       const signinIn = authenticateWithPlaintextPassword({
         username,
         password,
