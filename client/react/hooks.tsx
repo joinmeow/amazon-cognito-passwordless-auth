@@ -237,12 +237,18 @@ function _usePasswordless() {
 
   // If we have some tokens, but not all, attempt a refresh
   // Should only happen in corner cases, e.g. a developer deleted some keys from storage
+  // Skip this check if we're in the middle of SRP authentication process
   if (
     tokens &&
     (!tokens.idToken || !tokens.accessToken || !tokens.expireAt) &&
     !isRefreshingTokens &&
-    !isSchedulingRefresh
+    !isSchedulingRefresh &&
+    authMethod !== "SRP" &&
+    signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
+    signingInStatus !== "SIGNED_IN_WITH_PASSWORD"
   ) {
+    const { debug } = configure();
+    debug?.("Detected incomplete tokens, attempting refresh");
     refreshTokens({
       tokensCb: (newTokens) =>
         newTokens &&
