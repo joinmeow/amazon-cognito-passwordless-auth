@@ -56,9 +56,10 @@ export const signOut = (props?: {
   currentStatus?: BusyState | IdleState;
   tokensRemovedLocallyCb?: () => void;
   statusCb?: (status: BusyState | IdleState) => void;
+  skipTokenRevocation?: boolean;
 }) => {
   const { clientId, debug, storage } = configure();
-  const { currentStatus, statusCb } = props ?? {};
+  const { currentStatus, statusCb, skipTokenRevocation } = props ?? {};
   if (currentStatus && busyState.includes(currentStatus as BusyState)) {
     debug?.(
       `Initiating sign-out despite being in a busy state: ${currentStatus}`
@@ -66,6 +67,9 @@ export const signOut = (props?: {
   }
   statusCb?.("SIGNING_OUT");
   const abort = new AbortController();
+  
+  const tokenRevocationTracker = new Set<string>();
+  
   const signedOut = (async () => {
     try {
       const tokens = await retrieveTokens();
@@ -101,15 +105,26 @@ export const signOut = (props?: {
         ),
       ]);
       props?.tokensRemovedLocallyCb?.();
-      if (tokens.refreshToken) {
-        await revokeToken({
-          abort: undefined, // if we've come this far, let this proceed
-          refreshToken: tokens.refreshToken,
-        });
+      
+      if (tokens.refreshToken && 
+          !tokenRevocationTracker.has(tokens.refreshToken) && 
+          !skipTokenRevocation) {
+        try {
+          tokenRevocationTracker.add(tokens.refreshToken);
+          await revokeToken({
+            abort: undefined,
+            refreshToken: tokens.refreshToken,
+          });
+          debug?.("Successfully revoked refresh token");
+        } catch (revokeError) {
+          debug?.("Error revoking token, but continuing sign-out process:", revokeError);
+        }
       }
+      
       statusCb?.("SIGNED_OUT");
     } catch (err) {
       if (abort.signal.aborted) return;
+      debug?.("Error during sign-out:", err);
       currentStatus && statusCb?.(currentStatus);
       throw err;
     }

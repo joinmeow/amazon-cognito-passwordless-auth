@@ -1,174 +1,72 @@
-# Amazon Cognito Passwordless Auth - React client
+# Amazon Cognito Passwordless Auth - React Client
 
-> **_NOTE:_** This page describes the React specific features of this library. You can of course also use the [generic JavaScript](../README.md) features in React.
-
-Upon deploying the backend (with the `Passwordless` CDK construct), custom authentication flows are added to your Amazon Cognito User Pool, and your front-end will need to initiate and "dance" along in the Passwordless choreography to sign users in. This library provides a hook and sample components to make that easy:
-
-- React hook: `usePasswordless`: this hook provides all functionality to sign-in with FIDO2 (biometrics like Face ID or Touch ID) and SRP (Secure Remote Password).
-- Sample React components––to get started quickly and for inspiration to build your own:
-  - `<Passwordless />`: sample component that renders a login page, allowing the user to authenticate with FIDO2 or username/password
-  - `<Fido2Toast />`: sample component (a "toast" at the top of the page) that (1) recommends to add a FIDO2 credential if the user doesn't yet have one and (2) shows the user's registered FIDO2 credentials
-
-A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with FIDO2 and SRP.
-
-## `usePasswordless` hook
-
-This hook uses React context. To use this hook, wrap your components with the `PasswordlessContextProvider`: see [Configuration](#configuration).
-
-```jsx
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
-
-const {
-  /** FIDO2 */
-  authenticateWithFido2, // function to sign in with FIDO2 (e.g. Face ID or Touch)
-  fido2CreateCredential, // function to register a new FIDO2 credential with the Relying Party
-  creatingCredential, // boolean, set to true during creation of a FIDO2 credential
-  fido2Credentials, // array of the user's registered FIDO2 credentials. Each credential provides `update` and `delete` methods
-  userVerifyingPlatformAuthenticatorAvailable, // boolean, set to true if a user verifying platform authenticator is available (e.g. Face ID or Touch ID)
-  showAuthenticatorManager, // boolean, set to true if the FIDO2 credential manager UI component should be shown (the Fido2Toast component use this to show/hide itself)
-  toggleShowAuthenticatorManager, // function to toggle the showAuthenticatorManager boolean
-
-  /** Username Password */
-  authenticateWithSRP, // function to sign in with username and password (using SRP: Secure Remote Password, where the password isn't sent over the wire)
-  authenticateWithPlaintextPassword, // function to sign in with username and password (the password is sent in plaintext over the wire, instead use authenticateWithSRP if you can)
-
-  /** Device Authentication */
-  deviceKey, // The device key for remembered device authentication
-  confirmDevice, // Function to confirm a device for trusted device authentication
-  forgetDevice, // Function to forget a device to stop using it for trusted device authentication
-  clearDeviceKey, // Function to clear the stored device key
-
-  /** JWTs */
-  tokens, // raw (i.e. string) JWTs of the signed-in user: ID token, Access token and Refresh Token
-  tokensParsed, // JSON parsed ID and Access token of the signed-in user. Use this e.g. to access the user's attributes, such as e-mail, name (on the ID token)
-
-  /** Refresh JWTs */
-  refreshTokens, // function to force token refresh (it will happen automatically, but there's reasons to want to force it, e.g. if the user's attributes changed and you want this to be reflected in the ID token)
-  isRefreshingTokens, // boolean, set to true during token refresh
-
-  /** Errors */
-  lastError, // contains the last error that occured in the authentication flow (if any)
-
-  /** Status */
-  signInStatus, // overall auth status, e.g. is the user signed in or not? Use this field to show the relevant UI, e.g. render a sign-in page, if the status equals "NOT_SIGNED_IN"
-  signingInStatus, // status of the most recent sign-in attempt, e.g. "STARTING_SIGN_IN_WITH_FIDO2"
-  busy, // boolean, set to true during sign-in and sign-out (e.g. use this if you want to display a spinner)
-
-  /** Sign out */
-  signOut, // function to sign out (remove JWTs from storage, revoke tokens at Cognito)
-} = usePasswordless();
-```
-
-See more details below.
-
-## `<Passwordless />` sample component
-
-A prefab sample login component, that supports signing in with FIDO2 and username/password. Shows the last user that was signed in on this device, so that they may sign-in again without having to enter their username:
-
-<img src="../../drawings/passwordless-signin.png" alt="Passwordless Sign In" width="500px" />
-
-Users can also sign in with their Passkey, without typing in their username:
-
-<img src="../../drawings/passwordless-signin-passkey.png" alt="Passwordless Sign In" width="500px" />
-
-You should wrap your own in app in this component (as child). The component will render your app (the child), instead of itself, once the user successfully signs in:
-
-```jsx
-<Passwordless>
-  <App />
-</Passwordless>
-```
-
-If you don't wrap a child in this component (i.e. just have it as `<Passwordless />`) and the user is signed in, it will render itself as a debug utility:
-
-<img src="../../drawings/passwordless-signed-in.png" alt="Passwordless Signed In" width="500px" />
-
-## `<Fido2Toast />` sample component
-
-This component, that renders as a "toast" at the top right corner of the viewport, has two purposes:
-
-1. Recommend the user to create a FIDO2 credential if the user doesn't have one yet.
-2. Show the list of registered FIDO2 credentials, allowing the user the delete, update, and add new ones.
-
-Add the `<Fido2Toast />` at the top level of your app, below other components so it can render on top without needing `z-index` or other tricks. See [Configuration](#configuration).
-
-### Recommendation to create a FIDO2 credential
-
-The recommendation appears automatically on the top right of the page, if the user signed-in using another method than FIDO2, doesn't yet have any FIDO2 credentials set up, and has a user verifying platform authenticator available:
-
-<img src="../../drawings/fido2-recommendation-screenshot.png" alt="FIDO2 credentials" width="400px" />
-
-If the user clicks "Add face or touch unlock", registration starts. The user will have to perform the gesture (Face/Touch) and is then asked to provide a friendly name for the FIDO2 credential:
-
-<img src="../../drawings/fido2-friendly-name-screenshot.png" alt="FIDO2 credentials" width="450px" />
-
-If all went well, FIDO2 is activated. Next time, the user can sign in with FIDO2!:
-
-<img src="../../drawings/fido2-activated-screenshot.png" alt="FIDO2 credentials" width="250px" />
-
-### Manage FIDO2 credentials
-
-The FIDO2 credentials manager appears on the top right of the page, if you call `toggleShowAuthenticatorManager()` (function made available by the `usePasswordless` hook).
-
-<img src="../../drawings/fido2-authenticators-screenshot.png" alt="FIDO2 credentials" width="500px" />
-
-<br />
-
----
+> **_NOTE:_** This page describes the React-specific features of this library. You can also use the [generic JavaScript](../README.md) features in React.
 
 ## Table of Contents
 
-1. [Considerations](#1.-considerations)
-2. [Pre-requisites](#2.-pre-requisites)
-3. [Installation](#3.-installation)
-4. [Usage](#4.-usage)
+1. [Overview](#overview)
+2. [Getting Started](#getting-started)
+   - [Considerations](#considerations)
+   - [Installation](#installation)
+   - [Configuration](#configuration)
+3. [React Components](#react-components)
+   - [PasswordlessContextProvider](#passwordlesscontextprovider)
+   - [Passwordless Component](#passwordless-component)
+   - [Fido2Toast Component](#fido2toast-component)
+4. [React Hooks](#react-hooks)
+   - [usePasswordless Hook](#usepasswordless-hook)
+   - [useLocalUserCache Hook](#uselocalusercache-hook)
+5. [Authentication Methods](#authentication-methods)
+   - [FIDO2 Authentication](#fido2-authentication)
+   - [SRP Authentication](#srp-authentication)
+   - [Plaintext Password Authentication](#plaintext-password-authentication)
+   - [Device Authentication](#device-authentication)
+6. [Authentication Flows](#authentication-flows)
+7. [Advanced Usage](#advanced-usage)
+8. [Troubleshooting](#troubleshooting)
 
----
+## Overview
 
-### 1. Considerations
+Upon deploying the backend (with the `Passwordless` CDK construct), custom authentication flows are added to your Amazon Cognito User Pool, and your front-end will need to initiate and "dance" along in the Passwordless choreography to sign users in. This library provides a hook and sample components to make that easy:
+
+- **React Hooks**: The primary hook `usePasswordless` provides all functionality to sign-in with FIDO2 (biometrics like Face ID or Touch ID) and SRP (Secure Remote Password).
+- **Sample React components**—to get started quickly and for inspiration to build your own:
+  - `<Passwordless />`: Sample component that renders a login page, allowing the user to authenticate with FIDO2 or username/password
+  - `<Fido2Toast />`: Sample component (a "toast" at the top of the page) that (1) recommends to add a FIDO2 credential if the user doesn't yet have one and (2) shows the user's registered FIDO2 credentials
+
+A good way to see it in action and play around is to deploy the [end-to-end example](../../end-to-end-example) into your own AWS account. You can run the accompanying front end locally, and sign-in with FIDO2 and SRP.
+
+## Getting Started
+
+### Considerations
 
 - This library supports React 17.0+ and to be able to use it, you must have your [environment properly setup for react](https://reactjs.org/docs/getting-started.html).
 - As the time of writing, WebAuthn is natively supported on Chrome, Firefox, Microsoft Edge and Safari. However, browsers differ in their level of support (see also [fido2-browser-support](../../FIDO2.md#fido2-browser-support)).
 
-### 2. Pre-requisites
-
-- Make sure you have properly setup the library and deployed all required backend dependencies. [More info](../../README.md)
-- Mandatory peer dependency: [react](https://github.com/facebook/react)
-
-### 3. Installation
+### Installation
 
 This library is published as a npm package under `amazon-cognito-passwordless-auth` name. Install it by running the following command:
 
-```
+```bash
 npm install amazon-cognito-passwordless-auth
 ```
 
-### 4. Usage
+### Configuration
 
-A great way to learn how to use this library is to look at how we use it ourselves in the end-to-end example: [end-to-end-example/client](../../end-to-end-example/client)
+To use the library, you need to first import and configure it, and then wrap your app with the `PasswordlessContextProvider`.
 
-- In [main.tsx](../../end-to-end-example/client/src/main.tsx) we configure the library and wrap our own app with the `PasswordlesContextProvider` as well as with the `Passwordless` component. Also we add the `<Fido2Toast />` container, to display the [FIDO2 "toast"](#fido2toast--component).
-- In [App.tsx](../../end-to-end-example/client/src/App.tsx) we use the `usePasswordless` hook to understand the user's sign-in status, provide a button to sign out, and toggle show/hide the authenticators manager (part of the [FIDO2 "toast"](#fido2toast--component)).
-
-#### Configuration
-
-To use the library, you need to first import and configure it, and then wrap your app with the `PasswordlesContextProvider`.
-
-In your web app's entrypoint (e.g. `main.tsx`)
+1. **Configure the library** in your web app's entrypoint (e.g. `main.tsx`):
 
 ```javascript
-import { Passwordless } from "amazon-cognito-passwordless-auth/react";
+import { configure } from "amazon-cognito-passwordless-auth";
 
-Passwordless.configure({
-  cognitoIdpEndpoint: "eu-west-1", // you can also use the full endpoint URL, potentially to use a proxy
+configure({
+  cognitoIdpEndpoint: "eu-west-1", // Region or full endpoint URL
   clientId: "<client id>",
-  // optional, only required if you want to use FIDO2:
+  // Optional, required only if you want to use FIDO2:
   fido2: {
     baseUrl: "<fido2 base url>",
-    /**
-     * all other FIDO2 config is optional, values below are examples only to illustrate what you might configure.
-     * (this client side config is essentially an override, that's merged on top of the config received from the backend)
-     */
+    // Optional FIDO2 configuration parameters:
     authenticatorSelection: {
       userVerification: "required",
       requireResidentKey: true,
@@ -179,399 +77,754 @@ Passwordless.configure({
       id: "example.com",
       name: "Example",
     },
-    attestation: "direct",
-    extensions: {
-      appid: "u2f.example.com",
-      credProps: true,
-      hmacCreateSecret: true,
-    },
     timeout: 120000,
   },
-  userPoolId: "<user pool id>", // optional, only required if you want to use USER_SRP_AUTH
-  // optional, additional headers that will be sent with each request to Cognito:
+  userPoolId: "<user pool id>", // Required for SRP authentication
+  // Optional headers for Cognito requests:
   proxyApiHeaders: {
-    "<header 1>": "<value 1>",
-    "<header 2>": "<value 2>",
+    "<header name>": "<header value>",
   },
-  storage: localStorage, // Optional, default to localStorage
+  storage: localStorage, // Default is localStorage
 });
 ```
 
-Then, wrap your app with the `PasswordlessContextProvider`:
+2. **Wrap your app with the providers**:
 
-```typescript
-import { PasswordlessContextProvider } from "amazon-cognito-passwordless-auth/react";
+```jsx
+import { 
+  PasswordlessContextProvider, 
+  Passwordless as PasswordlessComponent,
+  Fido2Toast 
+} from "amazon-cognito-passwordless-auth/react";
+import "amazon-cognito-passwordless-auth/passwordless.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <PasswordlessContextProvider>
-    <React.StrictMode>
+    <PasswordlessComponent
+      brand={{
+        backgroundImageUrl: "<url>",
+        customerName: "ACME corp.",
+        customerLogoUrl: "<url>",
+      }}
+    >
       <App />
-    </React.StrictMode>
-  </PasswordlessContextProvider>
-);
-```
-
-Note: React context is used to make sure authentication actions, happen only once––even though multiple components may use the `usePasswordless` hook in parallel.
-
-You can also wrap your app with the `Passwordless` component. In that case, your app will only show if the user is signed in, otherwise the `Passwordless` component shows to make the user sign in. If you're using the sample components, also include the CSS import:
-
-```typescript
-import {
-  PasswordlessContextProvider,
-  Passwordless as PasswordlessComponent,
-} from "amazon-cognito-passwordless-auth/react";
-import "amazon-cognito-passwordless-auth/passwordless.css";
-
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <PasswordlessContextProvider>
-    <PasswordlessComponent
-      brand={{
-        backgroundImageUrl: "<url>",
-        customerName: "ACME corp.",
-        customerLogoUrl: "<url>",
-      }}
-    >
-      <React.StrictMode>
-        <App />
-      </React.StrictMode>
-    </PasswordlessComponent>
-  </PasswordlessContextProvider>
-);
-```
-
-If you want to make the `Passwordless` component bigger or smaller, e.g. the size of the entire page, override the height and width of the `.passwordless-main-container` class in your own CSS definitions. For example:
-
-```
-.passwordless-main-container {
-  height: 100vh !important;
-}
-```
-
-Also, add the [FIDO2 "toast"](#fido2toast-component) to display the suggestion to enable FaceID/TouchID, and be able to show the authenticators manager. Here's a complete example doing that:
-
-```typescript
-import {
-  PasswordlessContextProvider,
-  Passwordless as PasswordlessComponent,
-  Fido2Toast,
-} from "amazon-cognito-passwordless-auth/react";
-import "amazon-cognito-passwordless-auth/passwordless.css";
-
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <PasswordlessContextProvider>
-    <PasswordlessComponent
-      brand={{
-        backgroundImageUrl: "<url>",
-        customerName: "ACME corp.",
-        customerLogoUrl: "<url>",
-      }}
-    >
-      <React.StrictMode>
-        <App />
-      </React.StrictMode>
     </PasswordlessComponent>
     <Fido2Toast />
   </PasswordlessContextProvider>
 );
 ```
 
-In your components, use the `usePasswordless` hook:
+You can resize the `Passwordless` component by overriding the `.passwordless-main-container` class:
 
-```typescript
+```css
+.passwordless-main-container {
+  height: 100vh !important;
+}
+```
+
+## React Components
+
+### PasswordlessContextProvider
+
+This component provides the React context for the Passwordless library. It's required to wrap your app to use any of the hooks.
+
+```jsx
+<PasswordlessContextProvider enableLocalUserCache={true}>
+  <App />
+</PasswordlessContextProvider>
+```
+
+Props:
+- `enableLocalUserCache` (optional): Enable storing recently signed-in users
+- `children`: Your application components
+
+### Passwordless Component
+
+A pre-built login component that supports signing in with FIDO2 and username/password. It shows the last signed-in user on this device, so they can sign in again without entering their username:
+
+<img src="../../drawings/passwordless-signin.png" alt="Passwordless Sign In" width="500px" />
+
+Users can also sign in with their Passkey, without typing their username:
+
+<img src="../../drawings/passwordless-signin-passkey.png" alt="Passwordless Sign In" width="500px" />
+
+Usage:
+```jsx
+<Passwordless
+  brand={{
+    backgroundImageUrl: "url/to/background.jpg",
+    customerName: "Your Company",
+    customerLogoUrl: "url/to/logo.png"
+  }}
+>
+  <App />
+</Passwordless>
+```
+
+The component will render your app (the child) once the user signs in. If no child is provided and the user is signed in, it renders a debug utility view:
+
+<img src="../../drawings/passwordless-signed-in.png" alt="Passwordless Signed In" width="500px" />
+
+### Fido2Toast Component
+
+This component renders as a toast at the top right corner of the viewport, with two purposes:
+
+1. **Recommend FIDO2 credential creation** if the user doesn't have one yet
+2. **Manage FIDO2 credentials** - view, update, delete, and add credentials
+
+Add it at the top level of your app, below other components so it can render on top:
+
+```jsx
+<PasswordlessContextProvider>
+  <App />
+  <Fido2Toast />
+</PasswordlessContextProvider>
+```
+
+#### FIDO2 Credential Recommendation
+
+The recommendation appears automatically if the user:
+- Signed in with a method other than FIDO2
+- Doesn't have any FIDO2 credentials set up
+- Has a compatible platform authenticator available
+
+<img src="../../drawings/fido2-recommendation-screenshot.png" alt="FIDO2 credentials" width="400px" />
+
+When the user clicks "Add face or touch unlock", they'll provide the biometric gesture and name their credential:
+
+<img src="../../drawings/fido2-friendly-name-screenshot.png" alt="FIDO2 credentials" width="450px" />
+
+After completion, FIDO2 is activated for future sign-ins:
+
+<img src="../../drawings/fido2-activated-screenshot.png" alt="FIDO2 credentials" width="250px" />
+
+#### FIDO2 Credential Manager
+
+The credential manager appears when you call `toggleShowAuthenticatorManager()` from the `usePasswordless` hook:
+
+<img src="../../drawings/fido2-authenticators-screenshot.png" alt="FIDO2 credentials" width="500px" />
+
+```jsx
+function ManageCredentialsButton() {
+  const { toggleShowAuthenticatorManager } = usePasswordless();
+  
+  return (
+    <button onClick={toggleShowAuthenticatorManager}>
+      Manage FIDO2 Credentials
+    </button>
+  );
+}
+```
+
+## React Hooks
+
+### usePasswordless Hook
+
+This hook provides access to all authentication functionality. It must be used within a component wrapped by `PasswordlessContextProvider`.
+
+```jsx
 import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
 
 function MyComponent() {
-  const { signInStatus, ... } = usePasswordless();
-
-  return <div>Your sign in status: {signInStatus}</div>;
+  const {
+    // Authentication methods
+    authenticateWithFido2,      // Sign in with biometrics/security key
+    authenticateWithSRP,        // Sign in with username/password (secure)
+    authenticateWithPlaintextPassword, // Sign in with username/password (less secure)
+    signOut,                    // Sign out the current user
+    
+    // FIDO2 management
+    fido2CreateCredential,      // Register a new FIDO2 credential
+    fido2Credentials,           // Array of user's registered FIDO2 credentials
+    creatingCredential,         // Boolean: true during credential creation
+    userVerifyingPlatformAuthenticatorAvailable, // Boolean: is Face/Touch ID available?
+    showAuthenticatorManager,   // Boolean: should credential manager be shown?
+    toggleShowAuthenticatorManager, // Toggle the credential manager visibility
+    
+    // Device authentication
+    deviceKey,                  // Current device key for remembered device
+    confirmDevice,              // Confirm device for trusted authentication
+    forgetDevice,               // Stop using a device for trusted authentication
+    clearDeviceKey,             // Clear the stored device key
+    
+    // Tokens and refresh
+    tokens,                     // Raw JWT tokens (idToken, accessToken, refreshToken)
+    tokensParsed,               // Parsed JWT tokens with user information
+    refreshTokens,              // Force token refresh
+    isRefreshingTokens,         // Boolean: true during token refresh
+    
+    // Status and errors
+    signInStatus,               // Overall auth status: "SIGNED_IN", "NOT_SIGNED_IN", etc.
+    signingInStatus,            // Current auth action status
+    busy,                       // Boolean: true during authentication operations
+    lastError,                  // Last error that occurred during authentication
+  } = usePasswordless();
+  
+  // Your component logic here
 }
 ```
 
-#### Token (JWT) Storage
+#### Key Authentication Methods
 
-The library automatically saves the JWTs (id token, access token, refresh token) in your configured storage (default: `localStorage`) so that now you can use the rest of the methods and it will remember the logged user and will perform all requests against it.
+```jsx
+// FIDO2 Authentication
+authenticateWithFido2({
+  username,               // Optional: username or alias
+  credentials,            // Optional: array of credentials to use
+  clientMetadata,         // Optional: metadata for the request
+});
 
-To access them, use the `usePasswordless()` hook as follows:
+// SRP Authentication (secure password)
+authenticateWithSRP({
+  username,               // Username or alias
+  password,               // User's password
+  smsMfaCode,             // Optional: function returning SMS MFA code
+  otpMfaCode,             // Optional: function returning OTP MFA code
+  clientMetadata,         // Optional: metadata for the request
+});
 
-```javascript
-const {
-  tokens, // the raw tokens, i.e. ID, Access, Refresh token as strings
-  tokensParsed, // the JSON parsed tokens
-} = usePasswordless();
+// Plaintext Password Authentication
+authenticateWithPlaintextPassword({
+  username,               // Username or alias
+  password,               // User's password
+  smsMfaCode,             // Optional: function returning SMS MFA code
+  otpMfaCode,             // Optional: function returning OTP MFA code
+  clientMetadata,         // Optional: metadata for the request
+});
+
+// Sign Out
+signOut({
+  skipTokenRevocation,    // Optional: skip token revocation (default: false)
+});
 ```
 
-#### Create FIDO2 Credential
+#### Sign-In Status Values
 
-Once you are signed in, you can create FIDO2 (WebAuthn) credentials for your user, this will prompt the native WebAuthn dialog (e.g. Face/Touch) on your environment and set it up for your cognito user.
+The `signInStatus` property can have these values:
+- `"SIGNED_IN"`: User is authenticated
+- `"NOT_SIGNED_IN"`: User is not authenticated
+- `"CHECKING"`: Checking stored tokens
+- `"REFRESHING_SIGN_IN"`: Refreshing the authentication tokens
+- `"SIGNING_IN"`: Authentication in progress
+- `"SIGNING_OUT"`: Sign-out in progress
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+### useLocalUserCache Hook
 
-export default function YourComponent() {
-  const { fido2CreateCredential } = usePasswordless();
+This hook provides access to the list of recently signed-in users. To use it, enable the local user cache in the `PasswordlessContextProvider`:
 
+```jsx
+<PasswordlessContextProvider enableLocalUserCache={true}>
+  <App />
+</PasswordlessContextProvider>
+```
+
+Then use the hook:
+
+```jsx
+import { useLocalUserCache } from "amazon-cognito-passwordless-auth/react";
+
+function RecentUsersComponent() {
+  const {
+    currentUser,             // Current signed-in user details
+    lastSignedInUsers,       // Array of recently signed-in users
+    clearLastSignedInUsers,  // Function to clear the user cache
+    updateFidoPreference,    // Update FIDO2 preference for current user
+    signingInStatus,         // Current authentication status
+    authMethod,              // Current authentication method
+  } = useLocalUserCache();
+  
+  if (!lastSignedInUsers) return <div>Loading users...</div>;
+  
   return (
-    <form
-      onSubmit={(event) => {
-        fido2CreateCredential({
-          friendlyName: event.currentTarget.friendlyName.value,
-        }).then((credential) => {
-          //  The credential object will look like this:
-          //  credential = {
-          //    credentialId: string;
-          //    friendlyName: string;
-          //    createdAt: Date;
-          //    lastSignIn?: Date;
-          //    signCount: number;
-          //    update: (friendlyName: string) => void; // function to update the friendlyName
-          //    delete: () => void; // function to delete the credential
-          //    busy: boolean; // set to true if the credential is being updated or deleted
-          //  }
-          console.log(credential);
-        });
-        event.preventDefault();
-      }}
-    >
-      <input type="text" placeholder="Device name" name="friendlyName" />
-      <input type="submit" value="Create new FIDO2 credential" />
+    <div>
+      <h2>Recent Users</h2>
+      <ul>
+        {lastSignedInUsers.map(user => (
+          <li key={user.username}>{user.username}</li>
+        ))}
+      </ul>
+      <button onClick={clearLastSignedInUsers}>
+        Clear Recent Users
+      </button>
+    </div>
+  );
+}
+```
+
+### useAwaitableState Hook
+
+Helper hook to convert React state into a Promise that can be awaited:
+
+```jsx
+import { useAwaitableState } from "amazon-cognito-passwordless-auth/react";
+
+function MfaPrompt() {
+  const [code, setCode] = useState("");
+  const { 
+    awaitable,    // Function to get the Promise
+    resolve,      // Function to resolve the Promise with current state
+    reject,       // Function to reject the Promise
+    awaited       // Value once Promise is resolved
+  } = useAwaitableState(code);
+  
+  // Example: Create a function that returns a Promise for the code
+  const getCode = () => awaitable();
+  
+  // When user submits the form
+  const handleSubmit = () => resolve(); // Resolves with current code value
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input 
+        type="text" 
+        value={code}
+        onChange={e => setCode(e.target.value)}
+        placeholder="Enter MFA code"
+      />
+      <button type="submit">Submit</button>
     </form>
   );
 }
 ```
 
-This will prompt the native WebAuthn dialog (e.g. Face/Touch) on your environment to create the credential.
+### useTotpMfa Hook
 
-#### LogIn with your FIDO2 Credential
+Hook for managing TOTP (Time-based One-Time Password) MFA setup and verification:
 
-If the user has registered FIDO2 credentials, use the `authenticateWithFido2()` function to let the user sign-in with them.
+```jsx
+import { useTotpMfa } from "amazon-cognito-passwordless-auth/react";
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+function TotpSetupComponent() {
+  const {
+    setupStatus,     // IDLE, GENERATING, READY, VERIFYING, VERIFIED, ERROR
+    secretCode,      // The TOTP secret code to display to the user
+    qrCodeUrl,       // URL for QR code that can be scanned
+    errorMessage,    // Error message if any
+    beginSetup,      // Function to start the TOTP setup process
+    verifySetup,     // Function to verify the TOTP code
+    resetSetup       // Function to reset the setup process
+  } = useTotpMfa();
+  
+  return (
+    <div>
+      {setupStatus === "IDLE" && (
+        <button onClick={beginSetup}>Set up TOTP MFA</button>
+      )}
+      
+      {setupStatus === "READY" && secretCode && (
+        <div>
+          <p>Secret code: {secretCode}</p>
+          {qrCodeUrl && <img src={qrCodeUrl} alt="QR Code" />}
+          <button onClick={() => verifySetup(prompt("Enter code"))}>
+            Verify Code
+          </button>
+        </div>
+      )}
+      
+      {setupStatus === "VERIFIED" && (
+        <p>TOTP MFA setup complete!</p>
+      )}
+      
+      {errorMessage && <p>Error: {errorMessage}</p>}
+    </div>
+  );
+}
+```
 
-export default function YourComponent() {
+## Authentication Methods
+
+### FIDO2 Authentication
+
+Sign in with biometrics (Face ID, Touch ID) or security keys.
+
+```jsx
+function Fido2Login() {
   const { authenticateWithFido2 } = usePasswordless();
-
+  
+  const handleLogin = (username) => {
+    authenticateWithFido2({ username });
+  };
+  
   return (
-    <form
-      onSubmit={(event) => {
-        authenticateWithFido2({
-          username: event.currentTarget.username.value,
-        });
-        event.preventDefault();
-      }}
-    >
-      <input type="text" placeholder="Username" name="username" />
-      <input type="submit" value="Authenticate with FIDO2" />
+    <button onClick={() => handleLogin("user@example.com")}>
+      Sign in with Face/Touch ID
+    </button>
+  );
+}
+```
+
+### SRP Authentication
+
+Secure Remote Password - sign in with username/password without sending the password.
+
+```jsx
+function PasswordLogin() {
+  const { authenticateWithSRP } = usePasswordless();
+  
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    authenticateWithSRP({
+      username: event.target.username.value,
+      password: event.target.password.value
+    });
+  };
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="username" type="text" required />
+      <input name="password" type="password" required />
+      <button type="submit">Sign In</button>
     </form>
   );
 }
 ```
 
-This will prompt the native WebAuthn dialog (e.g. Face/Touch) on your environment to perform the log in.
+### Plaintext Password Authentication
 
-#### Trusted Device Authentication
+Authentication using plaintext password (less secure).
 
-Once a user is signed in, you can confirm their device for trusted authentication, allowing them to bypass MFA on future sign-ins when using the same device:
+```jsx
+function PlaintextLogin() {
+  const { authenticateWithPlaintextPassword } = usePasswordless();
+  
+  // Similar to SRP but uses authenticateWithPlaintextPassword
+}
+```
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+### Device Authentication
 
-export default function YourComponent() {
-  const { confirmDevice } = usePasswordless();
+Enable trusted device to bypass MFA on future sign-ins.
 
+```jsx
+function RememberDevice() {
+  const { tokens, confirmDevice } = usePasswordless();
+  
+  const handleRememberDevice = async () => {
+    if (tokens?.newDeviceMetadata) {
+      await confirmDevice("My Laptop");
+      console.log("Device remembered for future sign-ins");
+    }
+  };
+  
   return (
-    <button
-      onClick={() => {
-        confirmDevice(
-          "My Laptop", // Device name
-          {
-            passwordVerifier: "generatedVerifier",
-            salt: "generatedSalt",
-          } // Device SRP verification info
-        ).then((result) => {
-          console.log("Device confirmed:", result);
-        });
-      }}
-    >
+    <button onClick={handleRememberDevice}>
       Remember this device
     </button>
   );
 }
 ```
 
-To forget a device:
+## Authentication Flows
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+The library supports several authentication methods, each with its own flow and characteristics. This section visualizes how each flow works.
 
-export default function YourComponent() {
-  const { forgetDevice, deviceKey } = usePasswordless();
+### Authentication Methods Comparison
 
-  return (
-    <button
-      onClick={() => {
-        forgetDevice(deviceKey).then(() => {
-          console.log("Device forgotten");
-        });
-      }}
-    >
-      Forget this device
-    </button>
-  );
-}
+| Method | Security | User Experience | Requirements | Use Case |
+|--------|----------|-----------------|--------------|----------|
+| **FIDO2** | Highest - No passwords transmitted | Excellent - One tap/face scan | Browser WebAuthn support, FIDO2 API configured | Primary auth method for returning users |
+| **SRP** | High - Password not sent in plaintext | Good - Username/password required | UserPoolId configured | Password-based auth with enhanced security |
+| **Plaintext** | Lower - Password sent over TLS | Good - Username/password required | None | Fallback when SRP not configured |
+| **Device Auth** | Supplementary - Enhances existing auth | Excellent - Skip MFA on known devices | Prior successful auth | Reduce friction for returning users |
+
+### SRP Authentication Flow
+
+Secure Remote Password (SRP) authentication allows users to authenticate with a username and password without sending the password over the network.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+
+    C->>W: Call authenticateWithSRP()
+    W->>W: Set authMethod="SRP"
+    W->>W: Clear FIDO2 credentials
+    W->>A: InitiateAuth (USER_SRP_AUTH)
+    A->>W: Challenge (SRP parameters)
+    W->>W: Calculate SRP signature
+    W->>A: RespondToAuthChallenge (PASSWORD_VERIFIER)
+    A->>W: Success + Tokens
+    W->>W: Store tokens
+    W->>W: Update token state
+    W->>C: Authentication success
 ```
 
-#### Sign In with Password
+When using SRP authentication, the library now specifically prevents any FIDO2-related operations to avoid unnecessary API calls and potential errors. This is done by:
 
-You can still use passwords with SRP (Secure Remote Password) authentication:
+1. Setting `authMethod` to "SRP"
+2. Clearing any existing FIDO2 credentials
+3. Adding a `skipFido2` flag to the client metadata
+4. Preventing FIDO2 credential checks in both the main hook and user cache
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth";
+### FIDO2 Authentication Flow
 
-export default function YourComponent() {
-  const { authenticateWithSRP, authenticateWithPlaintextPassword } =
-    usePasswordless();
+FIDO2 (WebAuthn) authentication allows users to authenticate using biometrics or security keys without typing a password.
 
-  // Sample form that allows the user to sign up
-  return (
-    <form
-      onSubmit={(event) => {
-        if (event.currentTarget.srp) {
-          authenticateWithSRP({
-            username: event.currentTarget.username.value
-            password: event.currentTarget.password.value
-          });
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+    participant B as Browser WebAuthn API
+    participant U as User
+
+    C->>W: Call authenticateWithFido2()
+    W->>W: Set authMethod="FIDO2"
+    W->>A: InitiateAuth (CUSTOM_AUTH)
+    A->>W: Challenge (FIDO2 options)
+    W->>B: Get credential (navigator.credentials.get)
+    B->>U: Display native biometric/security key prompt
+    U->>B: Provide biometric/security key
+    B->>W: Return credential
+    W->>A: RespondToAuthChallenge (CUSTOM_CHALLENGE)
+    A->>W: Success + Tokens
+    W->>W: Store tokens
+    W->>W: Update token state
+    W->>W: Load FIDO2 credentials
+    W->>C: Authentication success
+```
+
+After successful FIDO2 authentication, the library automatically fetches the user's registered FIDO2 credentials to make them available through the `fido2Credentials` property.
+
+### Plaintext Password Authentication Flow
+
+This method sends the password directly to Cognito. It's less secure than SRP but may be necessary in some situations.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+    participant U as User
+
+    C->>W: Call authenticateWithPlaintextPassword()
+    W->>W: Set authMethod="PLAINTEXT"
+    W->>A: InitiateAuth (USER_PASSWORD_AUTH)
+    A->>W: Success or MFA Challenge
+    
+    alt MFA Challenge Required
+        W->>C: Prompt for MFA code
+        C->>U: Display MFA input
+        U->>C: Provide MFA code
+        C->>W: Submit MFA code
+        W->>A: RespondToAuthChallenge (MFA)
+        A->>W: Success + Tokens
+    else No MFA Required
+        A->>W: Success + Tokens directly
+    end
+    
+    W->>W: Store tokens
+    W->>W: Update token state
+    W->>C: Authentication success
+```
+
+### Token Refresh Flow
+
+The library automatically handles token refresh, but you can also manually refresh tokens when needed.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+
+    C->>W: Call refreshTokens()
+    W->>W: Set isRefreshingTokens=true
+    W->>A: InitiateAuth (REFRESH_TOKEN_AUTH)
+    A->>W: New tokens
+    W->>W: Store tokens
+    W->>W: Update token state
+    W->>W: Set isRefreshingTokens=false
+    W->>C: Tokens refreshed
+```
+
+### Sign Out Flow
+
+Signing out removes tokens from storage and optionally revokes the refresh token from Cognito.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+
+    C->>W: Call signOut()
+    W->>W: Set authMethod=undefined
+    W->>W: Remove tokens from storage
+    W->>W: Clear tokens from state
+    W->>W: Clear FIDO2 credentials
+    opt Token Revocation
+        W->>A: RevokeToken
+        A->>W: Success
+    end
+    W->>C: Signed out
+```
+
+### Device Authentication Flow
+
+Device authentication allows users to bypass MFA on subsequent sign-ins when using a remembered device.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as Hook (usePasswordless)
+    participant A as AWS Cognito
+
+    Note over C,A: After successful authentication
+    C->>W: Check for newDeviceMetadata in tokens
+    
+    alt newDeviceMetadata Present
+        C->>W: Call confirmDevice()
+        W->>W: Generate device verifier
+        W->>A: ConfirmDevice API call
+        A->>W: Confirmation result
+        opt User Confirmation Necessary
+            W->>A: UpdateDeviceStatus (remembered)
+            A->>W: Success
+        end
+        W->>C: Device confirmed
+    else No newDeviceMetadata
+        Note over C,W: No device confirmation needed
+    end
+```
+
+### Authentication Status Management
+
+The library tracks authentication state through several variables:
+
+- `signInStatus`: The overall auth status (e.g., "SIGNED_IN", "NOT_SIGNED_IN")
+- `signingInStatus`: Status of current auth action (e.g., "SIGNING_IN_WITH_PASSWORD")
+- `authMethod`: The method used for authentication ("SRP", "FIDO2", "PLAINTEXT")
+- `busy`: Whether an authentication operation is in progress
+
+This state management ensures that UI components can react appropriately to authentication events and prevent conflicting operations.
+
+## Advanced Usage
+
+Implement intelligent auth method selection based on user context:
+
+```jsx
+import { usePasswordless, useLocalUserCache } from "amazon-cognito-passwordless-auth/react";
+import { configure } from "amazon-cognito-passwordless-auth";
+
+function AuthDecisionFlow({ username, password }) {
+  const { 
+    authenticateWithSRP, 
+    authenticateWithFido2,
+    authenticateWithPlaintextPassword, 
+    confirmDevice,
+    fido2Credentials 
+  } = usePasswordless();
+  
+  // Determine available authentication methods
+  const hasFido2Credentials = fido2Credentials && fido2Credentials.length > 0;
+  const hasPassword = !!password;
+  const isSrpConfigured = !!configure().userPoolId;
+  
+  const handleAuth = async () => {
+    try {
+      let authResult;
+      
+      // Choose the best authentication method
+      if (hasFido2Credentials) {
+        authResult = await authenticateWithFido2({ username }).signedIn;
+      } else if (hasPassword) {
+        if (isSrpConfigured) {
+          authResult = await authenticateWithSRP({ username, password }).signedIn;
         } else {
-          authenticateWithPlaintextPassword({
-            username: event.currentTarget.username.value
-            password: event.currentTarget.password.value
-          });
+          authResult = await authenticateWithPlaintextPassword({ username, password }).signedIn;
         }
-        event.preventDefault();
-      }}
-    >
-      <input type="text" placeholder="Username" name="username" />
-      <input type="password" placeholder="Password" name="password" />
-      <input type="checkbox" name="srp" checked>Use Secure Remote Password (SRP)</input>
-      <input type="submit" value="Authenticate with username and password" />
-    </form>
-  );
+      } else {
+        // Redirect to sign up
+        return;
+      }
+      
+      // Set up device authentication if available
+      if (authResult?.newDeviceMetadata) {
+        await confirmDevice("My Device");
+      }
+    } catch (error) {
+      console.error("Authentication failed:", error);
+    }
+  };
+  
+  return <button onClick={handleAuth}>Sign In</button>;
 }
 ```
 
-#### SignOut
+## Troubleshooting
 
-To delete the stored tokens (JWTs), and revoke the refresh token, use the `signOut()` function.
+### Common Issues
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+#### 404 Errors on `/authenticators/list` During SRP Authentication
 
-export default function YourComponent() {
-  const { signOut } = usePasswordless();
+**Issue**: 404 errors for `/authenticators/list` endpoints after SRP authentication.
 
-  return <button onClick={() => signOut()}>Sign out</button>;
-}
-```
+**Solution**: This occurs when FIDO2 is not properly configured. Version 1.0.0+ prevents this automatically. If you still see this:
 
-#### Refresh JWTs
+1. Update to the latest version:
+   ```bash
+   npm list amazon-cognito-passwordless-auth  # Check current version
+   npm install amazon-cognito-passwordless-auth@latest
+   ```
+2. Verify you're using `authenticateWithSRP`
+3. Check that `authMethod` is correctly set to `"SRP"`
 
-The library automatically refreshes your tokens so you normally don't have to worry about this yourself. To force a refresh, use `refreshTokens()` function.
+#### Multiple Token Revocation Calls
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+**Issue**: Multiple calls to `revokeToken` API during sign-out.
 
-export default function YourComponent() {
-  const { refreshTokens } = usePasswordless();
+**Solution**: Version 1.0.0+ includes protection against duplicate revocation. If still occurring:
 
-  return <button onClick={() => refreshTokens()}>Refresh tokens!</button>;
-}
-```
+1. Use `skipTokenRevocation: true` with `signOut()`
+2. Add error handling for authentication failures
+3. Avoid rapid sign-in/out sequences
 
-#### List FIDO2 Credentials
+#### Authentication State Conflicts
 
-The list of FIDO2 credentials is made available via the hook:
+**Issue**: Confused authentication state between methods.
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+**Solution**:
+1. Ensure each auth method properly sets the `authMethod` state
+2. Don't mix authentication methods in the same flow
+3. Wait for operations to complete before starting new ones
 
-export default function YourComponent() {
-  // Credentials will be fetched when the app loads, initially fido2Credentials will be undefined
-  const { fido2Credentials } = usePasswordless();
-  // After credentials have been fetched, fido2Credentials will be an array of credentials.
-  // Each credential object in the array will look like this:
-  // credential = {
-  //   credentialId: string;
-  //   friendlyName: string;
-  //   createdAt: Date;
-  //   lastSignIn?: Date;
-  //   signCount: number;
-  //   update: (friendlyName: string) => void; // function to update the friendlyName
-  //   delete: () => void; // function to delete the credential
-  //   busy: boolean; // set to true if the credential is being updated or deleted
-  // }
+#### FIDO2 Credential Prompts Appearing Unexpectedly
 
-  return (
-    // Your component's view
-    <div>
-      {fido2Credentials === undefined
-        ? "Loading FIDO2 credentials ..."
-        : `You have ${fido2Credentials.length} registered credentials`}
-    </div>
-  );
-}
-```
+**Issue**: FIDO2 credential prompts after SRP authentication.
 
-#### Delete FIDO2 Credential
+**Solution**:
+1. `authMethod` state prevents FIDO2 suggestions for SRP
+2. `Fido2Toast` component respects this state
+3. Control FIDO2 preference with `updateFidoPreference`
 
-Each FIDO2 Credential exposes a `delete()` method:
+#### Token Refresh Failures
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+**Issue**: Token refresh fails, causing sign-out.
 
-export default function YourComponent() {
-  const { fido2Credentials } = usePasswordless();
+**Solution**:
+1. Implement error handling for refresh failures
+2. Consider a retry mechanism for refresh
+3. Provide clear feedback when sessions expire
 
-  // Sample list of FIDO2 credentials with delete button
-  return (
-    <div>
-      {fido2Credentials.map((c) => (
-        <>
-          <div key={c.credentialId}>{c.friendlyName}</div>
-          <button onClick={() => c.delete()}>Delete</button>
-        </>
-      ))}
-    </div>
-  );
-}
-```
+### FAQ
 
-#### Update FIDO2 Credential
+**Q: Can I use both FIDO2 and password authentication?**  
+A: Yes, you can implement both and let users choose, or intelligently select the best method.
 
-Each FIDO2 Credential exposes an `update()` method that takes a new friendly name:
+**Q: What happens if a user's device doesn't support FIDO2?**  
+A: The `userVerifyingPlatformAuthenticatorAvailable` property will be `false`, and you can fall back to password authentication.
 
-```javascript
-import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
+**Q: Can I customize the UI components?**  
+A: Yes, the sample components are for reference - you can build your own UI using the hooks.
 
-export default function YourComponent() {
-  const { fido2Credentials } = usePasswordless();
+**Q: How do I handle sign-up flows?**  
+A: Use the standard Cognito sign-up methods, then implement passwordless authentication.
 
-  // Sample form that allows the user to update the first credential
-  return (
-    <form
-      onSubmit={(event) => {
-        fido2Credentials[0].update({
-          friendlyName: event.currentTarget.friendlyName.value,
-        });
-        event.preventDefault();
-      }}
-    >
-      <input
-        type="text"
-        placeholder={fido2Credentials[0].friendlyName}
-        name="friendlyName"
-      />
-      <input type="submit" />
-    </form>
-  );
-}
-```
+## Examples
+
+A complete example implementation is available in the [end-to-end example](../../end-to-end-example) directory:
+
+- [main.tsx](../../end-to-end-example/client/src/main.tsx) - Library configuration and provider setup
+- [App.tsx](../../end-to-end-example/client/src/App.tsx) - Using the `usePasswordless` hook for sign-in status and user interface
