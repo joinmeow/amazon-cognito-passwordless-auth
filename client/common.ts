@@ -67,9 +67,9 @@ export const signOut = (props?: {
   }
   statusCb?.("SIGNING_OUT");
   const abort = new AbortController();
-  
+
   const tokenRevocationTracker = new Set<string>();
-  
+
   const signedOut = (async () => {
     try {
       const tokens = await retrieveTokens();
@@ -105,10 +105,12 @@ export const signOut = (props?: {
         ),
       ]);
       props?.tokensRemovedLocallyCb?.();
-      
-      if (tokens.refreshToken && 
-          !tokenRevocationTracker.has(tokens.refreshToken) && 
-          !skipTokenRevocation) {
+
+      if (
+        tokens.refreshToken &&
+        !tokenRevocationTracker.has(tokens.refreshToken) &&
+        !skipTokenRevocation
+      ) {
         try {
           tokenRevocationTracker.add(tokens.refreshToken);
           await revokeToken({
@@ -117,10 +119,13 @@ export const signOut = (props?: {
           });
           debug?.("Successfully revoked refresh token");
         } catch (revokeError) {
-          debug?.("Error revoking token, but continuing sign-out process:", revokeError);
+          debug?.(
+            "Error revoking token, but continuing sign-out process:",
+            revokeError
+          );
         }
       }
-      
+
       statusCb?.("SIGNED_OUT");
     } catch (err) {
       if (abort.signal.aborted) return;

@@ -44,14 +44,14 @@ jobs:
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           echo "Current version: $CURRENT_VERSION"
           echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          
+
           # Update the version according to the bump type
           npm version ${{ github.event.inputs.version_bump }} --no-git-tag-version
-          
+
           # Get the new version after bumping
           NEW_VERSION=$(node -p "require('./package.json').version")
           echo "New version: $NEW_VERSION"
-          
+
           # Set the output for later steps
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
       - name: Commit and push changes
@@ -73,9 +73,9 @@ jobs:
           body: |
             ## What's Changed
             ${{ github.event.inputs.release_notes || 'Version ' }}${{ steps.version.outputs.new_version }} (${{ github.event.inputs.version_bump }} release)
-            
+
             ### Changes since v${{ steps.version.outputs.current_version }}
-            
+
             To install this version:
             ```bash
             npm install @joinmeow/cognito-passwordless-auth@${{ steps.version.outputs.new_version }}

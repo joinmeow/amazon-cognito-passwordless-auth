@@ -201,7 +201,9 @@ function _usePasswordless() {
   const [showAuthenticatorManager, setShowAuthenticatorManager] =
     useState(false);
   const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
-  const [authMethod, setAuthMethod] = useState<"SRP" | "FIDO2" | "PLAINTEXT" | undefined>();
+  const [authMethod, setAuthMethod] = useState<
+    "SRP" | "FIDO2" | "PLAINTEXT" | undefined
+  >();
 
   // At component mount, check sign-in status
   useEffect(() => {
@@ -396,7 +398,11 @@ function _usePasswordless() {
       return () => cancel.abort();
     }
   };
-  useEffect(revalidateFido2Credentials, [isSignedIn, toFido2Credential, authMethod]);
+  useEffect(revalidateFido2Credentials, [
+    isSignedIn,
+    toFido2Credential,
+    authMethod,
+  ]);
 
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
@@ -550,9 +556,9 @@ function _usePasswordless() {
           setFido2Credentials(undefined);
         },
         currentStatus: signingInStatus,
-        skipTokenRevocation: options?.skipTokenRevocation
+        skipTokenRevocation: options?.skipTokenRevocation,
       });
-      signingOut.signedOut.catch(setLastError);
+      signingOut.signedOut.catch((error: Error) => setLastError(error));
       return signingOut;
     },
     /** Sign in with FIDO2 (e.g. Face ID or Touch) */
@@ -578,7 +584,11 @@ function _usePasswordless() {
         tokensCb: (newTokens) =>
           storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
-      signinIn.signedIn.catch(setLastError);
+      signinIn.signedIn.catch((error: Error) => {
+        // If authentication fails, make sure to clean up properly
+        setLastError(error);
+        // Don't change auth method on failure - keep it as SRP to prevent FIDO2 ops
+      });
       return signinIn;
     },
     /** Sign in with username and password (using SRP: Secure Remote Password, where the password isn't sent over the wire) */
@@ -603,13 +613,13 @@ function _usePasswordless() {
       setFido2Credentials(undefined);
       // Set auth method before authentication starts
       setAuthMethod("SRP");
-      
+
       // Add an anti-FIDO2 flag to the clientMetadata
       const updatedClientMetadata = {
         ...clientMetadata,
         skipFido2: "true",
       };
-      
+
       const signinIn = authenticateWithSRP({
         username,
         password,
@@ -622,18 +632,18 @@ function _usePasswordless() {
             // Explicitly set tokens in state after successful authentication
             // This helps prevent race conditions where token state isn't updated before other operations
             setTokens(newTokens);
-            
+
             // Double check auth method is set correctly
             setAuthMethod("SRP");
           }),
       });
-      
-      signinIn.signedIn.catch((error) => {
+
+      signinIn.signedIn.catch((error: Error) => {
         // If authentication fails, make sure to clean up properly
         setLastError(error);
         // Don't change auth method on failure - keep it as SRP to prevent FIDO2 ops
       });
-      
+
       return signinIn;
     },
     /** Sign in with username and password (the password is sent in plaintext over the wire) */
@@ -665,7 +675,7 @@ function _usePasswordless() {
         tokensCb: (newTokens) =>
           storeTokens(newTokens).then(() => setTokens(newTokens)),
       });
-      signinIn.signedIn.catch(setLastError);
+      signinIn.signedIn.catch((error: Error) => setLastError(error));
       return signinIn;
     },
     /** Should the FIDO2 credential manager UI component be shown? */
@@ -727,27 +737,30 @@ function _useLocalUserCache() {
     fido2Credentials,
     signingInStatus,
   } = usePasswordless();
-  
+
   // Access the authMethod directly from the parent context
   // We need to use another way to access the authMethod value
   // Since it's not exposed in the usePasswordless() return object
   // Let's create a local version in this hook
-  const [authMethodLocal, setAuthMethodLocal] = useState<"SRP" | "FIDO2" | "PLAINTEXT" | undefined>();
-  
+  const [authMethodLocal, setAuthMethodLocal] = useState<
+    "SRP" | "FIDO2" | "PLAINTEXT" | undefined
+  >();
+
   // Keep our local authMethod in sync with the main one by watching signingInStatus
   useEffect(() => {
     if (signingInStatus === "SIGNED_IN_WITH_PASSWORD") {
       setAuthMethodLocal("SRP");
     } else if (signingInStatus === "SIGNED_IN_WITH_FIDO2") {
-      setAuthMethodLocal("FIDO2"); 
+      setAuthMethodLocal("FIDO2");
     } else if (signingInStatus === "SIGNED_OUT") {
       setAuthMethodLocal(undefined);
     }
   }, [signingInStatus]);
-  
+
   const idToken = tokensParsed?.idToken;
   // Only consider FIDO2 credentials if we're not using SRP auth
-  const hasFido2Credentials = authMethodLocal !== "SRP" && fido2Credentials && !!fido2Credentials.length;
+  const hasFido2Credentials =
+    authMethodLocal !== "SRP" && fido2Credentials && !!fido2Credentials.length;
   const [lastSignedInUsers, setLastSignedInUsers] = useState<StoredUser[]>();
   const [currentUser, setCurrentUser] = useState<StoredUser>();
   const [fidoPreferenceOverride, setFidoPreferenceOverride] = useState<
@@ -820,7 +833,7 @@ function _useLocalUserCache() {
       if (authMethodLocal === "SRP") {
         return "NO";
       }
-      
+
       const { fido2 } = configure();
       if (!fido2) {
         return "NO";
@@ -842,7 +855,12 @@ function _useLocalUserCache() {
       }
       return "ASK";
     },
-    [creatingCredential, hasFido2Credentials, fidoPreferenceOverride, authMethodLocal]
+    [
+      creatingCredential,
+      hasFido2Credentials,
+      fidoPreferenceOverride,
+      authMethodLocal,
+    ]
   );
 
   // 4 Update user FIDO preference - only if not using SRP
@@ -851,7 +869,7 @@ function _useLocalUserCache() {
     if (authMethodLocal === "SRP" || !currentUser) {
       return;
     }
-    
+
     const useFido = determineFido(currentUser);
     if (useFido === "INDETERMINATE") return;
     setCurrentUser((state) => {
@@ -863,9 +881,7 @@ function _useLocalUserCache() {
           transports: c.transports,
         })),
       };
-      return JSON.stringify(state) === JSON.stringify(update)
-        ? state
-        : update;
+      return JSON.stringify(state) === JSON.stringify(update) ? state : update;
     });
   }, [currentUser, determineFido, fido2Credentials, authMethodLocal]);
 

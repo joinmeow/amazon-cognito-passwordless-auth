@@ -91,10 +91,10 @@ configure({
 2. **Wrap your app with the providers**:
 
 ```jsx
-import { 
-  PasswordlessContextProvider, 
+import {
+  PasswordlessContextProvider,
   Passwordless as PasswordlessComponent,
-  Fido2Toast 
+  Fido2Toast,
 } from "amazon-cognito-passwordless-auth/react";
 import "amazon-cognito-passwordless-auth/passwordless.css";
 
@@ -135,6 +135,7 @@ This component provides the React context for the Passwordless library. It's req
 ```
 
 Props:
+
 - `enableLocalUserCache` (optional): Enable storing recently signed-in users
 - `children`: Your application components
 
@@ -149,12 +150,13 @@ Users can also sign in with their Passkey, without typing their username:
 <img src="../../drawings/passwordless-signin-passkey.png" alt="Passwordless Sign In" width="500px" />
 
 Usage:
+
 ```jsx
 <Passwordless
   brand={{
     backgroundImageUrl: "url/to/background.jpg",
     customerName: "Your Company",
-    customerLogoUrl: "url/to/logo.png"
+    customerLogoUrl: "url/to/logo.png",
   }}
 >
   <App />
@@ -184,6 +186,7 @@ Add it at the top level of your app, below other components so it can render on 
 #### FIDO2 Credential Recommendation
 
 The recommendation appears automatically if the user:
+
 - Signed in with a method other than FIDO2
 - Doesn't have any FIDO2 credentials set up
 - Has a compatible platform authenticator available
@@ -207,7 +210,7 @@ The credential manager appears when you call `toggleShowAuthenticatorManager()` 
 ```jsx
 function ManageCredentialsButton() {
   const { toggleShowAuthenticatorManager } = usePasswordless();
-  
+
   return (
     <button onClick={toggleShowAuthenticatorManager}>
       Manage FIDO2 Credentials
@@ -228,38 +231,38 @@ import { usePasswordless } from "amazon-cognito-passwordless-auth/react";
 function MyComponent() {
   const {
     // Authentication methods
-    authenticateWithFido2,      // Sign in with biometrics/security key
-    authenticateWithSRP,        // Sign in with username/password (secure)
+    authenticateWithFido2, // Sign in with biometrics/security key
+    authenticateWithSRP, // Sign in with username/password (secure)
     authenticateWithPlaintextPassword, // Sign in with username/password (less secure)
-    signOut,                    // Sign out the current user
-    
+    signOut, // Sign out the current user
+
     // FIDO2 management
-    fido2CreateCredential,      // Register a new FIDO2 credential
-    fido2Credentials,           // Array of user's registered FIDO2 credentials
-    creatingCredential,         // Boolean: true during credential creation
+    fido2CreateCredential, // Register a new FIDO2 credential
+    fido2Credentials, // Array of user's registered FIDO2 credentials
+    creatingCredential, // Boolean: true during credential creation
     userVerifyingPlatformAuthenticatorAvailable, // Boolean: is Face/Touch ID available?
-    showAuthenticatorManager,   // Boolean: should credential manager be shown?
+    showAuthenticatorManager, // Boolean: should credential manager be shown?
     toggleShowAuthenticatorManager, // Toggle the credential manager visibility
-    
+
     // Device authentication
-    deviceKey,                  // Current device key for remembered device
-    confirmDevice,              // Confirm device for trusted authentication
-    forgetDevice,               // Stop using a device for trusted authentication
-    clearDeviceKey,             // Clear the stored device key
-    
+    deviceKey, // Current device key for remembered device
+    confirmDevice, // Confirm device for trusted authentication
+    forgetDevice, // Stop using a device for trusted authentication
+    clearDeviceKey, // Clear the stored device key
+
     // Tokens and refresh
-    tokens,                     // Raw JWT tokens (idToken, accessToken, refreshToken)
-    tokensParsed,               // Parsed JWT tokens with user information
-    refreshTokens,              // Force token refresh
-    isRefreshingTokens,         // Boolean: true during token refresh
-    
+    tokens, // Raw JWT tokens (idToken, accessToken, refreshToken)
+    tokensParsed, // Parsed JWT tokens with user information
+    refreshTokens, // Force token refresh
+    isRefreshingTokens, // Boolean: true during token refresh
+
     // Status and errors
-    signInStatus,               // Overall auth status: "SIGNED_IN", "NOT_SIGNED_IN", etc.
-    signingInStatus,            // Current auth action status
-    busy,                       // Boolean: true during authentication operations
-    lastError,                  // Last error that occurred during authentication
+    signInStatus, // Overall auth status: "SIGNED_IN", "NOT_SIGNED_IN", etc.
+    signingInStatus, // Current auth action status
+    busy, // Boolean: true during authentication operations
+    lastError, // Last error that occurred during authentication
   } = usePasswordless();
-  
+
   // Your component logic here
 }
 ```
@@ -269,38 +272,39 @@ function MyComponent() {
 ```jsx
 // FIDO2 Authentication
 authenticateWithFido2({
-  username,               // Optional: username or alias
-  credentials,            // Optional: array of credentials to use
-  clientMetadata,         // Optional: metadata for the request
+  username, // Optional: username or alias
+  credentials, // Optional: array of credentials to use
+  clientMetadata, // Optional: metadata for the request
 });
 
 // SRP Authentication (secure password)
 authenticateWithSRP({
-  username,               // Username or alias
-  password,               // User's password
-  smsMfaCode,             // Optional: function returning SMS MFA code
-  otpMfaCode,             // Optional: function returning OTP MFA code
-  clientMetadata,         // Optional: metadata for the request
+  username, // Username or alias
+  password, // User's password
+  smsMfaCode, // Optional: function returning SMS MFA code
+  otpMfaCode, // Optional: function returning OTP MFA code
+  clientMetadata, // Optional: metadata for the request
 });
 
 // Plaintext Password Authentication
 authenticateWithPlaintextPassword({
-  username,               // Username or alias
-  password,               // User's password
-  smsMfaCode,             // Optional: function returning SMS MFA code
-  otpMfaCode,             // Optional: function returning OTP MFA code
-  clientMetadata,         // Optional: metadata for the request
+  username, // Username or alias
+  password, // User's password
+  smsMfaCode, // Optional: function returning SMS MFA code
+  otpMfaCode, // Optional: function returning OTP MFA code
+  clientMetadata, // Optional: metadata for the request
 });
 
 // Sign Out
 signOut({
-  skipTokenRevocation,    // Optional: skip token revocation (default: false)
+  skipTokenRevocation, // Optional: skip token revocation (default: false)
 });
 ```
 
 #### Sign-In Status Values
 
 The `signInStatus` property can have these values:
+
 - `"SIGNED_IN"`: User is authenticated
 - `"NOT_SIGNED_IN"`: User is not authenticated
 - `"CHECKING"`: Checking stored tokens
@@ -325,27 +329,25 @@ import { useLocalUserCache } from "amazon-cognito-passwordless-auth/react";
 
 function RecentUsersComponent() {
   const {
-    currentUser,             // Current signed-in user details
-    lastSignedInUsers,       // Array of recently signed-in users
-    clearLastSignedInUsers,  // Function to clear the user cache
-    updateFidoPreference,    // Update FIDO2 preference for current user
-    signingInStatus,         // Current authentication status
-    authMethod,              // Current authentication method
+    currentUser, // Current signed-in user details
+    lastSignedInUsers, // Array of recently signed-in users
+    clearLastSignedInUsers, // Function to clear the user cache
+    updateFidoPreference, // Update FIDO2 preference for current user
+    signingInStatus, // Current authentication status
+    authMethod, // Current authentication method
   } = useLocalUserCache();
-  
+
   if (!lastSignedInUsers) return <div>Loading users...</div>;
-  
+
   return (
     <div>
       <h2>Recent Users</h2>
       <ul>
-        {lastSignedInUsers.map(user => (
+        {lastSignedInUsers.map((user) => (
           <li key={user.username}>{user.username}</li>
         ))}
       </ul>
-      <button onClick={clearLastSignedInUsers}>
-        Clear Recent Users
-      </button>
+      <button onClick={clearLastSignedInUsers}>Clear Recent Users</button>
     </div>
   );
 }
@@ -360,25 +362,25 @@ import { useAwaitableState } from "amazon-cognito-passwordless-auth/react";
 
 function MfaPrompt() {
   const [code, setCode] = useState("");
-  const { 
-    awaitable,    // Function to get the Promise
-    resolve,      // Function to resolve the Promise with current state
-    reject,       // Function to reject the Promise
-    awaited       // Value once Promise is resolved
+  const {
+    awaitable, // Function to get the Promise
+    resolve, // Function to resolve the Promise with current state
+    reject, // Function to reject the Promise
+    awaited, // Value once Promise is resolved
   } = useAwaitableState(code);
-  
+
   // Example: Create a function that returns a Promise for the code
   const getCode = () => awaitable();
-  
+
   // When user submits the form
   const handleSubmit = () => resolve(); // Resolves with current code value
-  
+
   return (
     <form onSubmit={handleSubmit}>
-      <input 
-        type="text" 
+      <input
+        type="text"
         value={code}
-        onChange={e => setCode(e.target.value)}
+        onChange={(e) => setCode(e.target.value)}
         placeholder="Enter MFA code"
       />
       <button type="submit">Submit</button>
@@ -396,21 +398,21 @@ import { useTotpMfa } from "amazon-cognito-passwordless-auth/react";
 
 function TotpSetupComponent() {
   const {
-    setupStatus,     // IDLE, GENERATING, READY, VERIFYING, VERIFIED, ERROR
-    secretCode,      // The TOTP secret code to display to the user
-    qrCodeUrl,       // URL for QR code that can be scanned
-    errorMessage,    // Error message if any
-    beginSetup,      // Function to start the TOTP setup process
-    verifySetup,     // Function to verify the TOTP code
-    resetSetup       // Function to reset the setup process
+    setupStatus, // IDLE, GENERATING, READY, VERIFYING, VERIFIED, ERROR
+    secretCode, // The TOTP secret code to display to the user
+    qrCodeUrl, // URL for QR code that can be scanned
+    errorMessage, // Error message if any
+    beginSetup, // Function to start the TOTP setup process
+    verifySetup, // Function to verify the TOTP code
+    resetSetup, // Function to reset the setup process
   } = useTotpMfa();
-  
+
   return (
     <div>
       {setupStatus === "IDLE" && (
         <button onClick={beginSetup}>Set up TOTP MFA</button>
       )}
-      
+
       {setupStatus === "READY" && secretCode && (
         <div>
           <p>Secret code: {secretCode}</p>
@@ -420,11 +422,9 @@ function TotpSetupComponent() {
           </button>
         </div>
       )}
-      
-      {setupStatus === "VERIFIED" && (
-        <p>TOTP MFA setup complete!</p>
-      )}
-      
+
+      {setupStatus === "VERIFIED" && <p>TOTP MFA setup complete!</p>}
+
       {errorMessage && <p>Error: {errorMessage}</p>}
     </div>
   );
@@ -440,11 +440,11 @@ Sign in with biometrics (Face ID, Touch ID) or security keys.
 ```jsx
 function Fido2Login() {
   const { authenticateWithFido2 } = usePasswordless();
-  
+
   const handleLogin = (username) => {
     authenticateWithFido2({ username });
   };
-  
+
   return (
     <button onClick={() => handleLogin("user@example.com")}>
       Sign in with Face/Touch ID
@@ -460,15 +460,15 @@ Secure Remote Password - sign in with username/password without sending the pass
 ```jsx
 function PasswordLogin() {
   const { authenticateWithSRP } = usePasswordless();
-  
+
   const handleSubmit = (event) => {
     event.preventDefault();
     authenticateWithSRP({
       username: event.target.username.value,
-      password: event.target.password.value
+      password: event.target.password.value,
     });
   };
-  
+
   return (
     <form onSubmit={handleSubmit}>
       <input name="username" type="text" required />
@@ -486,7 +486,7 @@ Authentication using plaintext password (less secure).
 ```jsx
 function PlaintextLogin() {
   const { authenticateWithPlaintextPassword } = usePasswordless();
-  
+
   // Similar to SRP but uses authenticateWithPlaintextPassword
 }
 ```
@@ -498,19 +498,15 @@ Enable trusted device to bypass MFA on future sign-ins.
 ```jsx
 function RememberDevice() {
   const { tokens, confirmDevice } = usePasswordless();
-  
+
   const handleRememberDevice = async () => {
     if (tokens?.newDeviceMetadata) {
       await confirmDevice("My Laptop");
       console.log("Device remembered for future sign-ins");
     }
   };
-  
-  return (
-    <button onClick={handleRememberDevice}>
-      Remember this device
-    </button>
-  );
+
+  return <button onClick={handleRememberDevice}>Remember this device</button>;
 }
 ```
 
@@ -520,12 +516,12 @@ The library supports several authentication methods, each with its own flow and 
 
 ### Authentication Methods Comparison
 
-| Method | Security | User Experience | Requirements | Use Case |
-|--------|----------|-----------------|--------------|----------|
-| **FIDO2** | Highest - No passwords transmitted | Excellent - One tap/face scan | Browser WebAuthn support, FIDO2 API configured | Primary auth method for returning users |
-| **SRP** | High - Password not sent in plaintext | Good - Username/password required | UserPoolId configured | Password-based auth with enhanced security |
-| **Plaintext** | Lower - Password sent over TLS | Good - Username/password required | None | Fallback when SRP not configured |
-| **Device Auth** | Supplementary - Enhances existing auth | Excellent - Skip MFA on known devices | Prior successful auth | Reduce friction for returning users |
+| Method          | Security                               | User Experience                       | Requirements                                   | Use Case                                   |
+| --------------- | -------------------------------------- | ------------------------------------- | ---------------------------------------------- | ------------------------------------------ |
+| **FIDO2**       | Highest - No passwords transmitted     | Excellent - One tap/face scan         | Browser WebAuthn support, FIDO2 API configured | Primary auth method for returning users    |
+| **SRP**         | High - Password not sent in plaintext  | Good - Username/password required     | UserPoolId configured                          | Password-based auth with enhanced security |
+| **Plaintext**   | Lower - Password sent over TLS         | Good - Username/password required     | None                                           | Fallback when SRP not configured           |
+| **Device Auth** | Supplementary - Enhances existing auth | Excellent - Skip MFA on known devices | Prior successful auth                          | Reduce friction for returning users        |
 
 ### SRP Authentication Flow
 
@@ -602,7 +598,7 @@ sequenceDiagram
     W->>W: Set authMethod="PLAINTEXT"
     W->>A: InitiateAuth (USER_PASSWORD_AUTH)
     A->>W: Success or MFA Challenge
-    
+
     alt MFA Challenge Required
         W->>C: Prompt for MFA code
         C->>U: Display MFA input
@@ -613,7 +609,7 @@ sequenceDiagram
     else No MFA Required
         A->>W: Success + Tokens directly
     end
-    
+
     W->>W: Store tokens
     W->>W: Update token state
     W->>C: Authentication success
@@ -673,7 +669,7 @@ sequenceDiagram
 
     Note over C,A: After successful authentication
     C->>W: Check for newDeviceMetadata in tokens
-    
+
     alt newDeviceMetadata Present
         C->>W: Call confirmDevice()
         W->>W: Generate device verifier
@@ -705,41 +701,48 @@ This state management ensures that UI components can react appropriately to auth
 Implement intelligent auth method selection based on user context:
 
 ```jsx
-import { usePasswordless, useLocalUserCache } from "amazon-cognito-passwordless-auth/react";
+import {
+  usePasswordless,
+  useLocalUserCache,
+} from "amazon-cognito-passwordless-auth/react";
 import { configure } from "amazon-cognito-passwordless-auth";
 
 function AuthDecisionFlow({ username, password }) {
-  const { 
-    authenticateWithSRP, 
+  const {
+    authenticateWithSRP,
     authenticateWithFido2,
-    authenticateWithPlaintextPassword, 
+    authenticateWithPlaintextPassword,
     confirmDevice,
-    fido2Credentials 
+    fido2Credentials,
   } = usePasswordless();
-  
+
   // Determine available authentication methods
   const hasFido2Credentials = fido2Credentials && fido2Credentials.length > 0;
   const hasPassword = !!password;
   const isSrpConfigured = !!configure().userPoolId;
-  
+
   const handleAuth = async () => {
     try {
       let authResult;
-      
+
       // Choose the best authentication method
       if (hasFido2Credentials) {
         authResult = await authenticateWithFido2({ username }).signedIn;
       } else if (hasPassword) {
         if (isSrpConfigured) {
-          authResult = await authenticateWithSRP({ username, password }).signedIn;
+          authResult = await authenticateWithSRP({ username, password })
+            .signedIn;
         } else {
-          authResult = await authenticateWithPlaintextPassword({ username, password }).signedIn;
+          authResult = await authenticateWithPlaintextPassword({
+            username,
+            password,
+          }).signedIn;
         }
       } else {
         // Redirect to sign up
         return;
       }
-      
+
       // Set up device authentication if available
       if (authResult?.newDeviceMetadata) {
         await confirmDevice("My Device");
@@ -748,7 +751,7 @@ function AuthDecisionFlow({ username, password }) {
       console.error("Authentication failed:", error);
     }
   };
-  
+
   return <button onClick={handleAuth}>Sign In</button>;
 }
 ```
@@ -786,6 +789,7 @@ function AuthDecisionFlow({ username, password }) {
 **Issue**: Confused authentication state between methods.
 
 **Solution**:
+
 1. Ensure each auth method properly sets the `authMethod` state
 2. Don't mix authentication methods in the same flow
 3. Wait for operations to complete before starting new ones
@@ -795,6 +799,7 @@ function AuthDecisionFlow({ username, password }) {
 **Issue**: FIDO2 credential prompts after SRP authentication.
 
 **Solution**:
+
 1. `authMethod` state prevents FIDO2 suggestions for SRP
 2. `Fido2Toast` component respects this state
 3. Control FIDO2 preference with `updateFidoPreference`
@@ -804,6 +809,7 @@ function AuthDecisionFlow({ username, password }) {
 **Issue**: Token refresh fails, causing sign-out.
 
 **Solution**:
+
 1. Implement error handling for refresh failures
 2. Consider a retry mechanism for refresh
 3. Provide clear feedback when sessions expire
