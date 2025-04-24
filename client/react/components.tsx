@@ -160,7 +160,7 @@ export const Passwordless = ({
             </button>
             <button
               className="passwordless-button passwordless-button-sign-out"
-              onClick={signOut}
+              onClick={() => signOut()}
             >
               Sign out
             </button>
