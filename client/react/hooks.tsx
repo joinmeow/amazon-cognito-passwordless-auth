@@ -390,14 +390,14 @@ function _usePasswordless() {
   const isSignedIn = signInStatus === "SIGNED_IN";
   const revalidateFido2Credentials = () => {
     const { debug } = configure();
-    
+
     // Only proceed if we're specifically using FIDO2 authentication
     // This prevents any FIDO2 operations when using SRP or other auth methods
     if (authMethod !== "FIDO2") {
       debug?.("Not using FIDO2 authentication, skipping credential listing");
       return () => {};
     }
-    
+
     // Only proceed with operations if signed in with FIDO2
     const cancel = new AbortController();
     if (isSignedIn) {
@@ -413,7 +413,7 @@ function _usePasswordless() {
         });
       return () => cancel.abort();
     }
-    
+
     return () => {};
   };
   useEffect(revalidateFido2Credentials, [
@@ -628,12 +628,12 @@ function _usePasswordless() {
     }) => {
       const { debug } = configure();
       debug?.("Starting SRP authentication process");
-      
+
       setLastError(undefined);
-      
+
       // Clear any existing FIDO2 credentials to prevent unwanted checks
       setFido2Credentials(undefined);
-      
+
       // Set auth method before authentication starts
       setAuthMethod("SRP");
 
@@ -653,7 +653,9 @@ function _usePasswordless() {
           setSigninInStatus(status);
           // Ensure authMethod remains SRP throughout the authentication process
           if (status === "SIGNED_IN_WITH_PASSWORD") {
-            debug?.("SRP authentication successful, reinforcing SRP auth method");
+            debug?.(
+              "SRP authentication successful, reinforcing SRP auth method"
+            );
             setAuthMethod("SRP");
             // Explicitly clear FIDO2 credentials again to prevent any listing attempts
             setFido2Credentials(undefined);
@@ -666,7 +668,9 @@ function _usePasswordless() {
             setTokens(newTokens);
 
             // Double check auth method is set correctly and no FIDO2 operations should happen
-            debug?.("Authentication tokens stored, ensuring SRP auth method is preserved");
+            debug?.(
+              "Authentication tokens stored, ensuring SRP auth method is preserved"
+            );
             setAuthMethod("SRP");
             // Make doubly sure no FIDO2 credentials are cached
             setFido2Credentials(undefined);
