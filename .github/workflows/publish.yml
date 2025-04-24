@@ -12,19 +12,51 @@ on:
           - minor
           - major
 
+permissions:
+  contents: write
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20.x"
           registry-url: https://registry.npmjs.org/
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
       - run: npm ci
       - name: Update package version
-        run: npm version ${{ github.event.inputs.version_bump }} --no-git-tag-version
+        id: version
+        run: |
+          # Get the current version before bumping
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $CURRENT_VERSION"
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          
+          # Update the version according to the bump type
+          npm version ${{ github.event.inputs.version_bump }} --no-git-tag-version
+          
+          # Get the new version after bumping
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "New version: $NEW_VERSION"
+          
+          # Set the output for later steps
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+      - name: Commit and push changes
+        run: |
+          git add package.json package-lock.json
+          git commit -m "Bump version from ${{ steps.version.outputs.current_version }} to ${{ steps.version.outputs.new_version }}"
+          git tag v${{ steps.version.outputs.new_version }}
+          git push
+          git push --tags
       - run: npm run dist
       - run: npm publish
         env:
