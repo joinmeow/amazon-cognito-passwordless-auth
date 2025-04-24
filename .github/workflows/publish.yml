@@ -11,6 +11,10 @@ on:
           - patch
           - minor
           - major
+      release_notes:
+        description: "Release notes (markdown supported)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -61,3 +65,22 @@ jobs:
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN}}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.new_version }}
+          name: v${{ steps.version.outputs.new_version }}
+          body: |
+            ## What's Changed
+            ${{ github.event.inputs.release_notes || 'Version ' }}${{ steps.version.outputs.new_version }} (${{ github.event.inputs.version_bump }} release)
+            
+            ### Changes since v${{ steps.version.outputs.current_version }}
+            
+            To install this version:
+            ```bash
+            npm install @joinmeow/cognito-passwordless-auth@${{ steps.version.outputs.new_version }}
+            ```
+          draft: false
+          prerelease: false
+          generate_release_notes: ${{ github.event.inputs.release_notes == '' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
