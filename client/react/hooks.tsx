@@ -383,11 +383,25 @@ function _usePasswordless() {
   // Track FIDO2 authenticators for the user
   const isSignedIn = signInStatus === "SIGNED_IN";
   const revalidateFido2Credentials = () => {
+    const { debug } = configure();
+    
+    // Log current auth state for debugging
+    debug?.("Checking FIDO2 credentials with auth method:", authMethod, "signInStatus:", signInStatus);
+    
+    // Explicitly return early if using SRP authentication
+    if (authMethod === "SRP") {
+      debug?.("SRP authentication detected, skipping FIDO2 credential listing");
+      return () => {}; // Return empty cleanup function
+    }
+    
+    // Only proceed with FIDO2 operations for non-SRP auth
     const cancel = new AbortController();
-    if (isSignedIn && authMethod !== "SRP") {
+    if (isSignedIn) {
+      debug?.("Listing FIDO2 credentials for non-SRP authentication");
       fido2ListCredentials()
         .then((res) => {
           if (!cancel.signal.aborted) {
+            debug?.("Successfully retrieved FIDO2 credentials:", res.authenticators.length);
             setFido2Credentials(res.authenticators.map(toFido2Credential));
           }
         })
@@ -396,7 +410,11 @@ function _usePasswordless() {
           debug?.("Failed to list credentials:", err);
         });
       return () => cancel.abort();
+    } else {
+      debug?.("Not signed in, skipping FIDO2 credential listing");
     }
+    
+    return () => {};
   };
   useEffect(revalidateFido2Credentials, [
     isSignedIn,
@@ -608,9 +626,14 @@ function _usePasswordless() {
       otpMfaCode?: () => Promise<string>;
       clientMetadata?: Record<string, string>;
     }) => {
+      const { debug } = configure();
+      debug?.("Starting SRP authentication process");
+      
       setLastError(undefined);
+      
       // Clear any existing FIDO2 credentials to prevent unwanted checks
       setFido2Credentials(undefined);
+      
       // Set auth method before authentication starts
       setAuthMethod("SRP");
 
@@ -626,23 +649,43 @@ function _usePasswordless() {
         smsMfaCode,
         otpMfaCode,
         clientMetadata: updatedClientMetadata,
-        statusCb: setSigninInStatus,
+        statusCb: (status) => {
+          setSigninInStatus(status);
+          // Ensure authMethod remains SRP throughout the authentication process
+          if (status === "SIGNED_IN_WITH_PASSWORD") {
+            debug?.("SRP authentication successful, reinforcing SRP auth method");
+            setAuthMethod("SRP");
+            // Explicitly clear FIDO2 credentials again to prevent any listing attempts
+            setFido2Credentials(undefined);
+          }
+        },
         tokensCb: (newTokens) =>
           storeTokens(newTokens).then(() => {
             // Explicitly set tokens in state after successful authentication
             // This helps prevent race conditions where token state isn't updated before other operations
             setTokens(newTokens);
 
-            // Double check auth method is set correctly
+            // Double check auth method is set correctly and no FIDO2 operations should happen
+            debug?.("Authentication tokens stored, ensuring SRP auth method is preserved");
             setAuthMethod("SRP");
+            // Make doubly sure no FIDO2 credentials are cached
+            setFido2Credentials(undefined);
           }),
       });
 
-      signinIn.signedIn.catch((error: Error) => {
-        // If authentication fails, make sure to clean up properly
-        setLastError(error);
-        // Don't change auth method on failure - keep it as SRP to prevent FIDO2 ops
-      });
+      signinIn.signedIn
+        .then(() => {
+          debug?.("SRP authentication promise resolved successfully");
+          // One final check to ensure auth method is still SRP after promise resolves
+          setAuthMethod("SRP");
+        })
+        .catch((error: Error) => {
+          debug?.("SRP authentication failed:", error);
+          // If authentication fails, make sure to clean up properly
+          setLastError(error);
+          // Keep the auth method as SRP to prevent FIDO2 operations
+          setAuthMethod("SRP");
+        });
 
       return signinIn;
     },
