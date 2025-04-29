@@ -123,7 +123,7 @@ async function _refreshTokens({
     // Check if device key is available from localStorage
     let deviceKey: string | undefined = undefined;
     try {
-      if (typeof localStorage !== 'undefined') {
+      if (typeof localStorage !== "undefined") {
         const storedDeviceKey = localStorage.getItem("deviceKey");
         if (storedDeviceKey) {
           deviceKey = storedDeviceKey;
