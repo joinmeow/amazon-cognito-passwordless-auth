@@ -119,12 +119,35 @@ async function _refreshTokens({
         `Will not attempt refresh using token that failed previously: ${refreshToken}`
       );
     }
+
+    // Check if device key is available from localStorage
+    let deviceKey: string | undefined = undefined;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const storedDeviceKey = localStorage.getItem("deviceKey");
+        if (storedDeviceKey) {
+          deviceKey = storedDeviceKey;
+        }
+      }
+    } catch (err) {
+      debug?.("Failed to access localStorage for deviceKey:", err);
+    }
+
     debug?.("Refreshing tokens using refresh token ...");
+    const authParameters: Record<string, string> = {
+      REFRESH_TOKEN: refreshToken,
+    };
+
+    // Add device key to auth parameters if available
+    if (deviceKey) {
+      debug?.("Including device key in refresh token flow");
+      authParameters.DEVICE_KEY = deviceKey;
+    }
+
     const authResult = await initiateAuth({
       authflow: "REFRESH_TOKEN_AUTH",
-      authParameters: {
-        REFRESH_TOKEN: refreshToken,
-      },
+      authParameters,
+      deviceKey, // Also pass deviceKey parameter to initiateAuth
       abort,
     }).catch((err) => {
       invalidRefreshTokens.add(refreshToken);
