@@ -80,6 +80,10 @@ configure({
     timeout: 120000,
   },
   userPoolId: "<user pool id>", // Required for SRP authentication
+  // TOTP MFA configuration (defaults to "YourApp" if not provided):
+  totp: {
+    issuer: "YourCompany", // The name that will appear in authenticator apps
+  },
   // Optional headers for Cognito requests:
   proxyApiHeaders: {
     "<header name>": "<header value>",
@@ -400,12 +404,15 @@ function TotpSetupComponent() {
   const {
     setupStatus, // IDLE, GENERATING, READY, VERIFYING, VERIFIED, ERROR
     secretCode, // The TOTP secret code to display to the user
-    qrCodeUrl, // URL for QR code that can be scanned
+    qrCodeUrl, // URL for QR code that can be scanned (uses configured issuer name)
     errorMessage, // Error message if any
     beginSetup, // Function to start the TOTP setup process
     verifySetup, // Function to verify the TOTP code
     resetSetup, // Function to reset the setup process
   } = useTotpMfa();
+
+  // The issuer name can be configured (defaults to "YourApp"):
+  // configure({ totp: { issuer: "YourCompany" } })
 
   return (
     <div>

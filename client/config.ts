@@ -30,6 +30,15 @@ export interface Config {
   clientSecret?: string;
   /** The Amazon Cognito User Pool ID */
   userPoolId?: string;
+  /** TOTP MFA configuration */
+  totp?: {
+    /** 
+     * The issuer name used in TOTP setup. 
+     * This appears in authenticator apps like Google Authenticator.
+     * Required for TOTP MFA setup.
+     */
+    issuer: string;
+  };
   /** FIDO2 (WebAuthn) configuration */
   fido2?: {
     /** The base URL (i.e. the URL with path "/") of your FIDO2 API */
@@ -127,6 +136,9 @@ export function configure(config?: ConfigInput) {
       fetch: config.fetch ?? Defaults.fetch,
       location: config.location ?? Defaults.location,
       history: config.history ?? Defaults.history,
+      totp: config.totp ?? {
+        issuer: "YourApp",
+      },
     };
     config_.debug?.("Configuration loaded:", config);
   } else {

@@ -231,6 +231,14 @@ When a user signs in with a remembered device:
 Set up Time-Based One-Time Password MFA for a user:
 
 ```javascript
+// Configure the TOTP issuer (defaults to "YourApp")
+configure({
+  // ... other configuration
+  totp: {
+    issuer: "YourCompany", // The name shown in authenticator apps
+  },
+});
+
 // In a React component
 const { setupStatus, secretCode, qrCodeUrl, beginSetup, verifySetup } =
   useTotpMfa();
@@ -239,6 +247,7 @@ const { setupStatus, secretCode, qrCodeUrl, beginSetup, verifySetup } =
 await beginSetup();
 
 // Show QR code to user (qrCodeUrl contains the otpauth:// URL)
+// The QR code will show "YourCompany:username" in authenticator apps
 // ...
 
 // Verify the code from the user's authenticator app

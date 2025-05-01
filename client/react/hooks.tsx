@@ -1018,7 +1018,9 @@ export function useTotpMfa() {
           tokensParsed.idToken["cognito:username"] ||
           tokensParsed.idToken.email ||
           "";
-        const issuer = "YourApp"; // This should be configurable
+        const { totp } = configure();
+        // With the default value in the configure function, this will always have a value
+        const issuer = totp?.issuer || "YourApp";
         const url = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}?secret=${encodeURIComponent(result.SecretCode)}&issuer=${encodeURIComponent(issuer)}`;
         setQrCodeUrl(url);
       }
