@@ -550,7 +550,6 @@ When using SRP authentication, the library now specifically prevents any FIDO2-r
 
 1. Setting `authMethod` to "SRP"
 2. Clearing any existing FIDO2 credentials
-3. Adding a `skipFido2` flag to the client metadata
 4. Preventing FIDO2 credential checks in both the main hook and user cache
 
 ### FIDO2 Authentication Flow

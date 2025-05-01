@@ -637,18 +637,11 @@ function _usePasswordless() {
       // Set auth method before authentication starts
       setAuthMethod("SRP");
 
-      // Add an anti-FIDO2 flag to the clientMetadata
-      const updatedClientMetadata = {
-        ...clientMetadata,
-        skipFido2: "true",
-      };
-
       const signinIn = authenticateWithSRP({
         username,
         password,
         smsMfaCode,
         otpMfaCode,
-        clientMetadata: updatedClientMetadata,
         statusCb: (status) => {
           setSigninInStatus(status);
           // Ensure authMethod remains SRP throughout the authentication process
