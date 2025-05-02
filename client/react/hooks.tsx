@@ -371,11 +371,11 @@ function _usePasswordless() {
             ? ("CHECKING" as const)
             : signingInStatus === "SIGNING_OUT"
               ? ("SIGNING_OUT" as const)
-              : signingInStatus === "SIGNED_IN_WITH_PASSWORD" || 
-                signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD" ||
-                signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" ||
-                signingInStatus === "SIGNED_IN_WITH_FIDO2" ||
-                signingInStatus === "SIGNED_IN_WITH_OTP"
+              : signingInStatus === "SIGNED_IN_WITH_PASSWORD" ||
+                  signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD" ||
+                  signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" ||
+                  signingInStatus === "SIGNED_IN_WITH_FIDO2" ||
+                  signingInStatus === "SIGNED_IN_WITH_OTP"
                 ? ("SIGNED_IN" as const)
                 : ("NOT_SIGNED_IN" as const);
   }, [

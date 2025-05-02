@@ -320,7 +320,7 @@ The more detailed `signingInStatus` property can have these values:
 
 - `"SIGNED_OUT"`: User is not authenticated
 - `"STARTING_SIGN_IN_WITH_FIDO2"`: Beginning FIDO2 authentication
-- `"COMPLETING_SIGN_IN_WITH_FIDO2"`: Completing FIDO2 authentication 
+- `"COMPLETING_SIGN_IN_WITH_FIDO2"`: Completing FIDO2 authentication
 - `"SIGNED_IN_WITH_FIDO2"`: Successfully authenticated with FIDO2
 - `"FIDO2_SIGNIN_FAILED"`: FIDO2 authentication failed
 - `"SIGNING_IN_WITH_PASSWORD"`: Authenticating with password
@@ -718,6 +718,7 @@ The library tracks authentication state through several variables:
 - `busy`: Whether an authentication operation is in progress
 
 The library uses specific status values to distinguish between different authentication methods:
+
 - SRP authentication uses "SIGNED_IN_WITH_SRP_PASSWORD" for successful authentication
 - Plaintext authentication uses "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" for successful authentication
 - FIDO2 authentication uses "SIGNED_IN_WITH_FIDO2" for successful authentication
