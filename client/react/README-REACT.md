@@ -316,6 +316,23 @@ The `signInStatus` property can have these values:
 - `"SIGNING_IN"`: Authentication in progress
 - `"SIGNING_OUT"`: Sign-out in progress
 
+The more detailed `signingInStatus` property can have these values:
+
+- `"SIGNED_OUT"`: User is not authenticated
+- `"STARTING_SIGN_IN_WITH_FIDO2"`: Beginning FIDO2 authentication
+- `"COMPLETING_SIGN_IN_WITH_FIDO2"`: Completing FIDO2 authentication 
+- `"SIGNED_IN_WITH_FIDO2"`: Successfully authenticated with FIDO2
+- `"FIDO2_SIGNIN_FAILED"`: FIDO2 authentication failed
+- `"SIGNING_IN_WITH_PASSWORD"`: Authenticating with password
+- `"SIGNED_IN_WITH_SRP_PASSWORD"`: Successfully authenticated with SRP
+- `"SIGNED_IN_WITH_PLAINTEXT_PASSWORD"`: Successfully authenticated with plaintext password
+- `"PASSWORD_SIGNIN_FAILED"`: Password authentication failed
+- `"SIGNING_IN_WITH_OTP"`: Authenticating with one-time password
+- `"SIGNED_IN_WITH_OTP"`: Successfully authenticated with OTP
+- `"SIGNIN_WITH_OTP_FAILED"`: OTP authentication failed
+- `"SIGNING_OUT"`: Sign-out in progress
+- `"AUTHENTICATING_WITH_DEVICE"`: Authenticating with a remembered device
+
 ### useLocalUserCache Hook
 
 This hook provides access to the list of recently signed-in users. To use it, enable the local user cache in the `PasswordlessContextProvider`:
@@ -696,9 +713,16 @@ sequenceDiagram
 The library tracks authentication state through several variables:
 
 - `signInStatus`: The overall auth status (e.g., "SIGNED_IN", "NOT_SIGNED_IN")
-- `signingInStatus`: Status of current auth action (e.g., "SIGNING_IN_WITH_PASSWORD")
+- `signingInStatus`: Status of current auth action (e.g., "SIGNING_IN_WITH_PASSWORD", "SIGNED_IN_WITH_SRP_PASSWORD", "SIGNED_IN_WITH_PLAINTEXT_PASSWORD")
 - `authMethod`: The method used for authentication ("SRP", "FIDO2", "PLAINTEXT")
 - `busy`: Whether an authentication operation is in progress
+
+The library uses specific status values to distinguish between different authentication methods:
+- SRP authentication uses "SIGNED_IN_WITH_SRP_PASSWORD" for successful authentication
+- Plaintext authentication uses "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" for successful authentication
+- FIDO2 authentication uses "SIGNED_IN_WITH_FIDO2" for successful authentication
+
+This distinction is important because it helps prevent operations specific to one authentication method (like FIDO2 credential listing) from running when another method is used. The `useLocalUserCache` hook maps these status values to the appropriate `authMethod` to maintain consistent behavior.
 
 This state management ensures that UI components can react appropriately to authentication events and prevent conflicting operations.
 
@@ -797,8 +821,10 @@ function AuthDecisionFlow({ username, password }) {
 **Solution**:
 
 1. Ensure each auth method properly sets the `authMethod` state
-2. Don't mix authentication methods in the same flow
-3. Wait for operations to complete before starting new ones
+2. Check the specific status values like "SIGNED_IN_WITH_SRP_PASSWORD" vs "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" to determine which authentication method was used
+3. Don't mix authentication methods in the same flow
+4. Wait for operations to complete before starting new ones
+5. If implementing custom authentication flows, ensure you're mapping the specific status values to the correct `authMethod` value
 
 #### FIDO2 Credential Prompts Appearing Unexpectedly
 

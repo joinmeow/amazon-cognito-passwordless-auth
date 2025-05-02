@@ -375,7 +375,7 @@ export function authenticateWithSRP({
         ? await tokensCb(tokens)
         : await defaultTokensCb({ tokens, abort: abort.signal });
 
-      statusCb?.("SIGNED_IN_WITH_PASSWORD");
+      statusCb?.("SIGNED_IN_WITH_SRP_PASSWORD");
       return tokens;
     } catch (err) {
       statusCb?.("PASSWORD_SIGNIN_FAILED");

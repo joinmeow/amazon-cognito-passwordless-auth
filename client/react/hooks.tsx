@@ -371,7 +371,13 @@ function _usePasswordless() {
             ? ("CHECKING" as const)
             : signingInStatus === "SIGNING_OUT"
               ? ("SIGNING_OUT" as const)
-              : ("NOT_SIGNED_IN" as const);
+              : signingInStatus === "SIGNED_IN_WITH_PASSWORD" || 
+                signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD" ||
+                signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" ||
+                signingInStatus === "SIGNED_IN_WITH_FIDO2" ||
+                signingInStatus === "SIGNED_IN_WITH_OTP"
+                ? ("SIGNED_IN" as const)
+                : ("NOT_SIGNED_IN" as const);
   }, [
     tokensParsed,
     isSchedulingRefresh,
@@ -405,6 +411,7 @@ function _usePasswordless() {
     // This prevents any FIDO2 operations when using SRP or other auth methods
     if (authMethod !== "FIDO2") {
       debug?.("Not using FIDO2 authentication, skipping credential listing");
+      setFido2Credentials(undefined);
       return () => {};
     }
 
@@ -698,7 +705,7 @@ function _usePasswordless() {
         statusCb: (status) => {
           setSigninInStatus(status);
           // Ensure authMethod remains SRP throughout the authentication process
-          if (status === "SIGNED_IN_WITH_PASSWORD") {
+          if (status === "SIGNED_IN_WITH_SRP_PASSWORD") {
             debug?.(
               "SRP authentication successful, reinforcing SRP auth method"
             );
@@ -867,8 +874,10 @@ function _useLocalUserCache() {
 
   // Keep our local authMethod in sync with the main one by watching signingInStatus
   useEffect(() => {
-    if (signingInStatus === "SIGNED_IN_WITH_PASSWORD") {
+    if (signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD") {
       setAuthMethodLocal("SRP");
+    } else if (signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD") {
+      setAuthMethodLocal("PLAINTEXT");
     } else if (signingInStatus === "SIGNED_IN_WITH_FIDO2") {
       setAuthMethodLocal("FIDO2");
     } else if (signingInStatus === "SIGNED_OUT") {
