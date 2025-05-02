@@ -303,7 +303,7 @@ export function authenticateWithSRP({
           CHALLENGE_NAME: "SRP_A",
         },
         clientMetadata,
-        deviceKey, // Include device key if provided
+        deviceKey,
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, challenge);

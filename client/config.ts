@@ -32,8 +32,8 @@ export interface Config {
   userPoolId?: string;
   /** TOTP MFA configuration */
   totp?: {
-    /** 
-     * The issuer name used in TOTP setup. 
+    /**
+     * The issuer name used in TOTP setup.
      * This appears in authenticator apps like Google Authenticator.
      * Required for TOTP MFA setup.
      */

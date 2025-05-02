@@ -435,16 +435,22 @@ function _usePasswordless() {
   // Fetch TOTP MFA status when the user is signed in
   useEffect(() => {
     if (!isSignedIn || !tokens?.accessToken) return;
-    
+
     const { debug } = configure();
     const abort = new AbortController();
-    
+
     getUser({ accessToken: tokens.accessToken, abort: abort.signal })
       .then((user) => {
-        if (user && typeof user === "object" && "UserMFASettingList" in user && "PreferredMfaSetting" in user) {
+        if (
+          user &&
+          typeof user === "object" &&
+          "UserMFASettingList" in user &&
+          "PreferredMfaSetting" in user
+        ) {
           debug?.("Retrieved user MFA settings");
           setTotpMfaStatus({
-            enabled: user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
+            enabled:
+              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
             preferred: user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA",
             availableMfaTypes: user.UserMFASettingList || [],
           });
@@ -465,7 +471,7 @@ function _usePasswordless() {
           availableMfaTypes: [],
         });
       });
-      
+
     return () => abort.abort();
   }, [isSignedIn, tokens?.accessToken]);
 
@@ -715,6 +721,7 @@ function _usePasswordless() {
             // Make doubly sure no FIDO2 credentials are cached
             setFido2Credentials(undefined);
           }),
+        clientMetadata: clientMetadata,
       });
 
       signinIn.signedIn
@@ -779,9 +786,15 @@ function _usePasswordless() {
       if (!tokens?.accessToken) return;
       try {
         const user = await getUser({ accessToken: tokens.accessToken });
-        if (user && typeof user === "object" && "UserMFASettingList" in user && "PreferredMfaSetting" in user) {
+        if (
+          user &&
+          typeof user === "object" &&
+          "UserMFASettingList" in user &&
+          "PreferredMfaSetting" in user
+        ) {
           setTotpMfaStatus({
-            enabled: user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
+            enabled:
+              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
             preferred: user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA",
             availableMfaTypes: user.UserMFASettingList || [],
           });
@@ -1059,7 +1072,8 @@ export function useAwaitableState<T>(state: T) {
 
 /** React hook to manage TOTP MFA setup and verification for a user */
 export function useTotpMfa() {
-  const { tokensParsed, totpMfaStatus, refreshTotpMfaStatus } = usePasswordless();
+  const { tokensParsed, totpMfaStatus, refreshTotpMfaStatus } =
+    usePasswordless();
   const [secretCode, setSecretCode] = useState<string>();
   const [qrCodeUrl, setQrCodeUrl] = useState<string>();
   const [setupStatus, setSetupStatus] = useState<
@@ -1101,33 +1115,36 @@ export function useTotpMfa() {
   }, [tokensParsed]);
 
   // Verify TOTP code to complete MFA setup
-  const verifySetup = useCallback(async (code: string, deviceName?: string) => {
-    setSetupStatus("VERIFYING");
-    setErrorMessage(undefined);
+  const verifySetup = useCallback(
+    async (code: string, deviceName?: string) => {
+      setSetupStatus("VERIFYING");
+      setErrorMessage(undefined);
 
-    try {
-      const result = (await verifySoftwareTokenForCurrentUserApi({
-        userCode: code,
-        friendlyDeviceName: deviceName,
-      })) as { Status: string };
+      try {
+        const result = (await verifySoftwareTokenForCurrentUserApi({
+          userCode: code,
+          friendlyDeviceName: deviceName,
+        })) as { Status: string };
 
-      setSetupStatus(result.Status === "SUCCESS" ? "VERIFIED" : "ERROR");
+        setSetupStatus(result.Status === "SUCCESS" ? "VERIFIED" : "ERROR");
 
-      if (result.Status !== "SUCCESS") {
-        setErrorMessage(`Verification failed with status: ${result.Status}`);
-        throw new Error(`Verification failed with status: ${result.Status}`);
+        if (result.Status !== "SUCCESS") {
+          setErrorMessage(`Verification failed with status: ${result.Status}`);
+          throw new Error(`Verification failed with status: ${result.Status}`);
+        }
+
+        // Refresh TOTP MFA status after successful verification
+        await refreshTotpMfaStatus();
+
+        return result;
+      } catch (error) {
+        setSetupStatus("ERROR");
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+        throw error;
       }
-
-      // Refresh TOTP MFA status after successful verification
-      await refreshTotpMfaStatus();
-      
-      return result;
-    } catch (error) {
-      setSetupStatus("ERROR");
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-      throw error;
-    }
-  }, [refreshTotpMfaStatus]);
+    },
+    [refreshTotpMfaStatus]
+  );
 
   // Reset the setup process
   const resetSetup = useCallback(() => {
