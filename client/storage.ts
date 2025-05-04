@@ -24,6 +24,7 @@ export interface TokensToStore {
   idToken: string;
   refreshToken?: string;
   expireAt: Date;
+  deviceKey?: string;
 }
 export interface TokensFromStorage {
   accessToken?: string;
@@ -31,6 +32,29 @@ export interface TokensFromStorage {
   refreshToken?: string;
   expireAt?: Date;
   username: string;
+  deviceKey?: string;
+}
+
+/**
+ * Store the device key separately from tokens so it persists even after logout
+ * @param deviceKey The device key to store
+ */
+export async function storeDeviceKey(deviceKey: string) {
+  if (!deviceKey) return;
+  const { clientId, storage, debug } = configure();
+  const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
+  debug?.(`Storing device key: ${deviceKey}`);
+  await storage.setItem(deviceKeyStorageKey, deviceKey);
+}
+
+/**
+ * Retrieve the stored device key
+ */
+export async function retrieveDeviceKey(): Promise<string | undefined> {
+  const { clientId, storage } = configure();
+  const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
+  const deviceKey = await storage.getItem(deviceKeyStorageKey);
+  return deviceKey || undefined;
 }
 
 export async function storeTokens(tokens: TokensToStore) {
@@ -65,6 +89,12 @@ export async function storeTokens(tokens: TokensToStore) {
       )
     );
   }
+
+  // If a device key is provided, store it separately so it persists after logout
+  if (tokens.deviceKey) {
+    promises.push(storeDeviceKey(tokens.deviceKey));
+  }
+
   promises.push(
     storage.setItem(
       `${amplifyKeyPrefix}.${username}.userData`,
@@ -109,11 +139,16 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
     storage.getItem(`${customKeyPrefix}.${username}.expireAt`),
   ]);
+
+  // Always get the device key separately, as it should persist across sessions
+  const deviceKey = await retrieveDeviceKey();
+
   return {
     idToken: idToken ?? undefined,
     accessToken: accessToken ?? undefined,
     refreshToken: refreshToken ?? undefined,
     expireAt: expireAt ? new Date(expireAt) : undefined,
     username,
+    deviceKey,
   };
 }

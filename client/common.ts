@@ -14,7 +14,7 @@
  */
 import { revokeToken } from "./cognito-api.js";
 import { configure } from "./config.js";
-import { retrieveTokens, storeTokens } from "./storage.js";
+import { retrieveTokens, storeTokens, storeDeviceKey } from "./storage.js";
 import {
   TokensFromRefresh,
   TokensFromSignIn,
@@ -35,6 +35,18 @@ export const defaultTokensCb = async ({
   const storeAndScheduleRefresh = async (
     tokens: TokensFromSignIn | TokensFromRefresh
   ) => {
+    // If this is a sign-in with a new device, extract the device key
+    if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
+      const { debug } = configure();
+      debug?.("Detected new device metadata with device key");
+
+      // Set the deviceKey field in tokens
+      tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
+
+      // Store the device key separately for persistence
+      await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
+    }
+
     await storeTokens(tokens);
     scheduleRefresh({
       abort,
@@ -51,6 +63,7 @@ export const defaultTokensCb = async ({
 /**
  * Sign the user out. This means: clear tokens from storage,
  * and revoke the refresh token from Amazon Cognito
+ * Note: The device key is preserved to enable device authentication on next login
  */
 export const signOut = (props?: {
   currentStatus?: BusyState | IdleState;
@@ -103,6 +116,7 @@ export const signOut = (props?: {
         storage.removeItem(
           `Passwordless.${clientId}.${tokens.username}.refreshingTokens`
         ),
+        // Note: We do NOT remove deviceKey - it should persist between sessions
       ]);
       props?.tokensRemovedLocallyCb?.();
 

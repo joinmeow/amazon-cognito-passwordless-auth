@@ -29,7 +29,13 @@ import {
 import { authenticateWithSRP } from "../srp.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
-import { retrieveTokens, storeTokens, TokensFromStorage } from "../storage.js";
+import {
+  retrieveTokens,
+  storeTokens,
+  TokensFromStorage,
+  retrieveDeviceKey,
+  storeDeviceKey,
+} from "../storage.js";
 import { BusyState, IdleState, busyState } from "../model.js";
 import { scheduleRefresh, refreshTokens } from "../refresh.js";
 import {
@@ -52,11 +58,6 @@ import React, {
   useMemo,
   useRef,
 } from "react";
-
-// Helper to safely access browser globals
-const isBrowser = () => typeof globalThis !== "undefined";
-const getLocalStorage = () =>
-  isBrowser() ? globalThis.localStorage : undefined;
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
@@ -168,9 +169,7 @@ function _usePasswordless() {
   const [creatingCredential, setCreatingCredential] = useState(false);
   const [fido2Credentials, setFido2Credentials] = useState<Fido2Credential[]>();
   const [deviceKey, setDeviceKey] = useState<string | null>(() => {
-    if (isBrowser() && getLocalStorage()) {
-      return getLocalStorage()?.getItem("deviceKey") || null;
-    }
+    // Will be populated when tokens are loaded during component initialization
     return null;
   });
   const updateFido2Credential = useCallback(
@@ -273,6 +272,7 @@ function _usePasswordless() {
 
   // At component mount, load tokens from storage
   useEffect(() => {
+    // First, retrieve tokens from storage
     retrieveTokens()
       .then(setTokens)
       .catch((err) => {
@@ -280,6 +280,18 @@ function _usePasswordless() {
         debug?.("Failed to retrieve tokens from storage:", err);
       })
       .finally(() => setInitiallyRetrievingTokensFromStorage(false));
+
+    // Also try to load device key separately
+    retrieveDeviceKey()
+      .then((key) => {
+        if (key) {
+          setDeviceKey(key);
+        }
+      })
+      .catch((err) => {
+        const { debug } = configure();
+        debug?.("Failed to retrieve device key from storage:", err);
+      });
   }, [setTokens]);
 
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
@@ -572,10 +584,15 @@ function _usePasswordless() {
         });
       }
 
+      // Ensure device key is stored in persistent storage
+      await storeDeviceKey(deviceKey);
+
       return result;
     },
     /**
      * Forget a device to stop using it for trusted device authentication
+     * Note that this is different from just clearing the local device key
+     * as it also removes the device from the user's account on the server
      */
     forgetDevice: async (deviceKeyToForget: string = deviceKey || "") => {
       if (!tokens?.accessToken) {
@@ -586,7 +603,7 @@ function _usePasswordless() {
         throw new Error("No device key provided");
       }
 
-      const { debug } = configure();
+      const { debug, storage, clientId } = configure();
       debug?.("Forgetting device:", deviceKeyToForget);
 
       await forgetDeviceApi({
@@ -596,15 +613,32 @@ function _usePasswordless() {
 
       // If forgetting the current device, clear it
       if (deviceKeyToForget === deviceKey) {
-        localStorage.removeItem("deviceKey");
+        // Remove the device key from storage
+        const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
+        const result = storage.removeItem(deviceKeyStorageKey);
+        if (result instanceof Promise) {
+          await result;
+        }
+        
+        // Clear deviceKey in state
         setDeviceKey(null);
       }
     },
     /**
-     * Clear the stored device key
+     * Clear the stored device key locally without removing it from the server
      */
     clearDeviceKey: () => {
-      localStorage.removeItem("deviceKey");
+      const { storage, clientId, debug } = configure();
+      const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
+      
+      const result = storage.removeItem(deviceKeyStorageKey);
+      if (result instanceof Promise) {
+        result.catch((err: Error) => {
+          debug?.("Failed to remove device key from storage:", err);
+        });
+      }
+      
+      // Clear deviceKey in state
       setDeviceKey(null);
     },
     /** Register a FIDO2 credential with the Relying Party */

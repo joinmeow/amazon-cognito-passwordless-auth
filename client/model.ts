@@ -22,12 +22,14 @@ export interface TokensFromSignIn {
     deviceKey: string;
     deviceGroupKey: string;
   };
+  deviceKey?: string;
 }
 export interface TokensFromRefresh {
   accessToken: string;
   idToken: string;
   expireAt: Date;
   username: string;
+  deviceKey?: string;
 }
 
 export const busyState = [

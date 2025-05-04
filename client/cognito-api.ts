@@ -820,6 +820,19 @@ export async function handleAuthResponse({
   const { debug } = configure();
   for (;;) {
     if (isAuthenticatedResponse(authResponse)) {
+      let deviceKey: string | undefined = undefined;
+
+      // Extract deviceKey if present in NewDeviceMetadata
+      if (authResponse.AuthenticationResult.NewDeviceMetadata?.DeviceKey) {
+        deviceKey =
+          authResponse.AuthenticationResult.NewDeviceMetadata.DeviceKey;
+        debug?.("Device key obtained from authentication result:", deviceKey);
+      } else if (deviceHandler?.deviceKey) {
+        // If we're using a device key for authentication, keep track of it
+        deviceKey = deviceHandler.deviceKey;
+        debug?.("Using device key from device handler:", deviceKey);
+      }
+
       return {
         idToken: authResponse.AuthenticationResult.IdToken,
         accessToken: authResponse.AuthenticationResult.AccessToken,
@@ -828,6 +841,16 @@ export async function handleAuthResponse({
         ),
         refreshToken: authResponse.AuthenticationResult.RefreshToken,
         username,
+        newDeviceMetadata: authResponse.AuthenticationResult.NewDeviceMetadata
+          ? {
+              deviceKey:
+                authResponse.AuthenticationResult.NewDeviceMetadata.DeviceKey,
+              deviceGroupKey:
+                authResponse.AuthenticationResult.NewDeviceMetadata
+                  .DeviceGroupKey,
+            }
+          : undefined,
+        deviceKey,
       };
     }
     const responseParameters: Record<string, string> = {};

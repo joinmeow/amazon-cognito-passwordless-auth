@@ -32,7 +32,10 @@ export async function scheduleRefresh(
 }
 
 type TokensForRefresh = Partial<
-  Pick<TokensFromStorage, "refreshToken" | "expireAt" | "username">
+  Pick<
+    TokensFromStorage,
+    "refreshToken" | "expireAt" | "username" | "deviceKey"
+  >
 >;
 
 let clearScheduledRefresh: ReturnType<typeof setTimeoutWallClock> | undefined =
@@ -110,7 +113,7 @@ async function _refreshTokens({
     if (!tokens) {
       tokens = await retrieveTokens();
     }
-    const { refreshToken, username } = tokens ?? {};
+    const { refreshToken, username, deviceKey } = tokens ?? {};
     if (!refreshToken || !username) {
       throw new Error("Cannot refresh without refresh token and username");
     }
@@ -118,19 +121,6 @@ async function _refreshTokens({
       throw new Error(
         `Will not attempt refresh using token that failed previously: ${refreshToken}`
       );
-    }
-
-    // Check if device key is available from localStorage
-    let deviceKey: string | undefined = undefined;
-    try {
-      if (typeof localStorage !== "undefined") {
-        const storedDeviceKey = localStorage.getItem("deviceKey");
-        if (storedDeviceKey) {
-          deviceKey = storedDeviceKey;
-        }
-      }
-    } catch (err) {
-      debug?.("Failed to access localStorage for deviceKey:", err);
     }
 
     debug?.("Refreshing tokens using refresh token ...");
@@ -147,12 +137,14 @@ async function _refreshTokens({
     const authResult = await initiateAuth({
       authflow: "REFRESH_TOKEN_AUTH",
       authParameters,
-      deviceKey, // Also pass deviceKey parameter to initiateAuth
+      deviceKey,
       abort,
     }).catch((err) => {
       invalidRefreshTokens.add(refreshToken);
       throw err;
     });
+
+    // Create token response with username
     const tokensFromRefresh: TokensFromRefresh = {
       accessToken: authResult.AuthenticationResult.AccessToken,
       idToken: authResult.AuthenticationResult.IdToken,
@@ -160,7 +152,10 @@ async function _refreshTokens({
         Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
       ),
       username,
+      // Preserve the device key
+      deviceKey,
     };
+
     await tokensCb?.(tokensFromRefresh);
     return tokensFromRefresh;
   } finally {
