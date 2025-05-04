@@ -619,7 +619,7 @@ function _usePasswordless() {
         if (result instanceof Promise) {
           await result;
         }
-        
+
         // Clear deviceKey in state
         setDeviceKey(null);
       }
@@ -630,14 +630,14 @@ function _usePasswordless() {
     clearDeviceKey: () => {
       const { storage, clientId, debug } = configure();
       const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
-      
+
       const result = storage.removeItem(deviceKeyStorageKey);
       if (result instanceof Promise) {
         result.catch((err: Error) => {
           debug?.("Failed to remove device key from storage:", err);
         });
       }
-      
+
       // Clear deviceKey in state
       setDeviceKey(null);
     },
