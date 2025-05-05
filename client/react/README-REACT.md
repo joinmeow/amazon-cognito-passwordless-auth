@@ -650,7 +650,7 @@ sequenceDiagram
 
     C->>W: Call refreshTokens()
     W->>W: Set isRefreshingTokens=true
-    W->>A: InitiateAuth (REFRESH_TOKEN_AUTH)
+    W->>A: InitiateAuth (REFRESH_TOKEN)
     A->>W: New tokens
     W->>W: Store tokens
     W->>W: Update token state

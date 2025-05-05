@@ -135,7 +135,7 @@ async function _refreshTokens({
     }
 
     const authResult = await initiateAuth({
-      authflow: "REFRESH_TOKEN_AUTH",
+      authflow: "REFRESH_TOKEN",
       authParameters,
       deviceKey,
       abort,

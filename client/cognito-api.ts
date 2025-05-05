@@ -175,7 +175,7 @@ export function assertIsSignInResponse(
 export async function initiateAuth<
   T extends
     | "CUSTOM_AUTH"
-    | "REFRESH_TOKEN_AUTH"
+    | "REFRESH_TOKEN"
     | "USER_SRP_AUTH"
     | "USER_PASSWORD_AUTH",
 >({
@@ -203,7 +203,7 @@ export async function initiateAuth<
   // Enhance with security context data if it's an authentication flow and a username is provided
   let userContextData;
 
-  if (authflow !== "REFRESH_TOKEN_AUTH" && authParameters.USERNAME) {
+  if (authflow !== "REFRESH_TOKEN" && authParameters.USERNAME) {
     try {
       // Use our security provider to get encoded data
       const securityProvider = CognitoSecurityProvider.getInstance();
@@ -937,19 +937,19 @@ export async function handleAuthResponse({
 function extractInitiateAuthResponse<
   T extends
     | "CUSTOM_AUTH"
-    | "REFRESH_TOKEN_AUTH"
+    | "REFRESH_TOKEN"
     | "USER_SRP_AUTH"
     | "USER_PASSWORD_AUTH",
 >(authflow: T) {
   return async (res: MinimalResponse) => {
     await throwIfNot2xx(res);
     const body = await res.json();
-    if (authflow === "REFRESH_TOKEN_AUTH") {
+    if (authflow === "REFRESH_TOKEN") {
       assertIsAuthenticatedResponse(body);
     } else {
       assertIsSignInResponse(body);
     }
-    return body as T extends "REFRESH_TOKEN_AUTH"
+    return body as T extends "REFRESH_TOKEN"
       ? RefreshResponse
       : AuthenticatedResponse | ChallengeResponse;
   };
