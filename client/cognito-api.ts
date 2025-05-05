@@ -95,6 +95,20 @@ interface GetUserResponse {
   Username: string;
 }
 
+interface GetTokensFromRefreshTokenResponse {
+  AuthenticationResult: {
+    AccessToken: string;
+    IdToken: string;
+    RefreshToken?: string;
+    ExpiresIn: number;
+    TokenType: string;
+    NewDeviceMetadata?: {
+      DeviceKey: string;
+      DeviceGroupKey: string;
+    };
+  };
+}
+
 export function isErrorResponse(obj: unknown): obj is ErrorResponse {
   return (
     !!obj && typeof obj === "object" && "__type" in obj && "message" in obj
@@ -436,6 +450,83 @@ export async function revokeToken({
       signal: abort,
     }
   ).then(throwIfNot2xx);
+}
+
+export async function getTokensFromRefreshToken({
+  refreshToken,
+  deviceKey,
+  clientMetadata,
+  abort,
+}: {
+  refreshToken: string;
+  deviceKey?: string;
+  clientMetadata?: Record<string, string>;
+  abort?: AbortSignal;
+}) {
+  const {
+    fetch,
+    cognitoIdpEndpoint,
+    proxyApiHeaders,
+    clientId,
+    clientSecret,
+    debug,
+  } = configure();
+
+  debug?.(
+    "Getting tokens using refresh token with GetTokensFromRefreshToken API"
+  );
+
+  // Build the request body
+  const requestBody: {
+    ClientId: string;
+    RefreshToken: string;
+    DeviceKey?: string;
+    ClientMetadata?: Record<string, string>;
+    ClientSecret?: string;
+  } = {
+    ClientId: clientId,
+    RefreshToken: refreshToken,
+  };
+
+  // Add optional parameters if provided
+  if (deviceKey) {
+    requestBody.DeviceKey = deviceKey;
+  }
+
+  if (clientMetadata) {
+    requestBody.ClientMetadata = clientMetadata;
+  }
+
+  if (clientSecret) {
+    requestBody.ClientSecret = clientSecret;
+  }
+
+  const response = await fetch(
+    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      : cognitoIdpEndpoint,
+    {
+      signal: abort,
+      headers: {
+        "x-amz-target":
+          "AWSCognitoIdentityProviderService.GetTokensFromRefreshToken",
+        "content-type": "application/x-amz-json-1.1",
+        ...proxyApiHeaders,
+      },
+      method: "POST",
+      body: JSON.stringify(requestBody),
+    }
+  );
+
+  const json = await throwIfNot2xx(response);
+  assertIsNotErrorResponse(json);
+
+  // Ensure we have a valid AuthenticationResult
+  if (!json || typeof json !== "object" || !("AuthenticationResult" in json)) {
+    throw new Error("Invalid response from GetTokensFromRefreshToken");
+  }
+
+  return json as GetTokensFromRefreshTokenResponse;
 }
 
 export async function getId({

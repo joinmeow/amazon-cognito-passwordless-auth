@@ -281,3 +281,21 @@ For more detailed documentation about the available API methods and components, 
 ## License
 
 Apache-2.0
+
+## Configuration
+
+Configure the following properties:
+
+```typescript
+import { configure } from "amazon-cognito-passwordless-auth";
+
+configure({
+  clientId: "...",
+  cognitoIdpEndpoint: "...",
+  // ... other config properties
+
+  // Whether to use the new GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN.
+  // When true, uses the new API. When false (default), uses the legacy approach.
+  useGetTokensFromRefreshToken: false, // (default: false)
+});
+```

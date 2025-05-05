@@ -109,6 +109,12 @@ export interface Config {
    * Overriding history implementation. Default: globalThis.history
    */
   history?: MinimalHistory;
+  /**
+   * Whether to use the new GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN.
+   * When true, uses the new API. When false (default), uses the legacy approach.
+   * @default false
+   */
+  useGetTokensFromRefreshToken?: boolean;
 }
 
 export type ConfigWithDefaults = Config &
@@ -141,6 +147,14 @@ export function configure(config?: ConfigInput) {
       },
     };
     config_.debug?.("Configuration loaded:", config);
+
+    // Add new configuration property with default
+    if (config.useGetTokensFromRefreshToken !== undefined) {
+      config_.useGetTokensFromRefreshToken =
+        config.useGetTokensFromRefreshToken;
+    } else if (config_.useGetTokensFromRefreshToken === undefined) {
+      config_.useGetTokensFromRefreshToken = false;
+    }
   } else {
     if (!config_) {
       throw new Error("Call configure(config) first");

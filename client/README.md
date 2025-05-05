@@ -139,3 +139,41 @@ const now = timeAgo(Date.now(), new Date()); // Just now
 const seconds = timeAgo(Date.now(), new Date(Date.now() - 30 * 1000)); // 30 seconds ago
 const hours = timeAgo(Date.now(), newDate(Date.now() - 2 * 3600 * 1000)); // 2 hours ago
 ```
+
+## Refresh Token Rotation
+
+This library supports the new GetTokensFromRefreshToken API that was introduced by AWS Cognito. This API supports refresh token rotation, which enhances security by automatically invalidating used refresh tokens after a grace period when enabled in your user pool.
+
+### Enabling GetTokensFromRefreshToken Support
+
+To use the new API, set the `useGetTokensFromRefreshToken` flag in your configuration:
+
+```typescript
+import { configure } from "amazon-cognito-passwordless-auth";
+
+configure({
+  // ...your other configuration options
+  useGetTokensFromRefreshToken: true, // Default is false
+});
+```
+
+When enabled:
+
+- The library will use the GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN flow
+- Any new refresh tokens returned as part of token refresh (when refresh token rotation is enabled in your user pool) will be automatically stored and used for future refresh operations
+- Debug logs will show when refresh token rotation occurs
+
+When disabled (default):
+
+- The library will continue using the InitiateAuth API with REFRESH_TOKEN flow as before
+
+### Configuring Refresh Token Rotation in Your User Pool
+
+To enable refresh token rotation in your Cognito User Pool client:
+
+1. Go to the AWS Console and navigate to Amazon Cognito > User Pools > [Your User Pool] > App integration > App clients and analytics
+2. Select the app client you want to modify
+3. Under "Refresh token expiration", set the desired rotation type and token validity period
+4. Set an appropriate grace period for token reuse during which both the old and new refresh tokens will be valid
+
+For more information, see the [AWS documentation on RefreshTokenRotationType](https://docs.aws.amazon.com/cognito-idp/latest/APIReference/API_GetTokensFromRefreshToken.html).

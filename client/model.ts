@@ -30,6 +30,7 @@ export interface TokensFromRefresh {
   expireAt: Date;
   username: string;
   deviceKey?: string;
+  refreshToken?: string;
 }
 
 export const busyState = [

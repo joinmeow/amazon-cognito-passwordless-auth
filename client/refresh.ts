@@ -14,8 +14,8 @@
  */
 import { configure } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import { retrieveTokens, TokensFromStorage } from "./storage.js";
-import { initiateAuth } from "./cognito-api.js";
+import { retrieveTokens, TokensFromStorage, storeTokens } from "./storage.js";
+import { initiateAuth, getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 
 let schedulingRefresh: ReturnType<typeof _scheduleRefresh> | undefined =
@@ -69,9 +69,23 @@ async function _scheduleRefresh({
     );
     clearScheduledRefresh = setTimeoutWallClock(
       () =>
-        refreshTokens({ abort, tokensCb, isRefreshingCb, tokens }).catch(
-          (err) => debug?.("Failed to refresh tokens:", err)
-        ),
+        refreshTokens({
+          abort,
+          tokensCb: async (refreshedTokens) => {
+            // Check if we have a new refresh token (refresh token rotation)
+            if (
+              refreshedTokens.refreshToken &&
+              refreshedTokens.refreshToken !== tokens?.refreshToken
+            ) {
+              debug?.("Refresh token has been rotated with a new token");
+            }
+
+            // Call the original tokensCb if provided
+            await tokensCb?.(refreshedTokens);
+          },
+          isRefreshingCb,
+          tokens,
+        }).catch((err) => debug?.("Failed to refresh tokens:", err)),
       refreshIn
     );
     abort?.addEventListener("abort", clearScheduledRefresh);
@@ -109,7 +123,7 @@ async function _refreshTokens({
 }): Promise<TokensFromRefresh> {
   isRefreshingCb?.(true);
   try {
-    const { debug } = configure();
+    const { debug, useGetTokensFromRefreshToken } = configure();
     if (!tokens) {
       tokens = await retrieveTokens();
     }
@@ -123,40 +137,90 @@ async function _refreshTokens({
       );
     }
 
-    debug?.("Refreshing tokens using refresh token ...");
-    const authParameters: Record<string, string> = {
-      REFRESH_TOKEN: refreshToken,
-    };
+    debug?.(
+      `Refreshing tokens using refresh token (using ${useGetTokensFromRefreshToken ? "GetTokensFromRefreshToken" : "InitiateAuth"})...`
+    );
 
-    // Add device key to auth parameters if available
-    if (deviceKey) {
-      debug?.("Including device key in refresh token flow");
-      authParameters.DEVICE_KEY = deviceKey;
+    let tokensFromRefresh: TokensFromRefresh;
+
+    if (useGetTokensFromRefreshToken) {
+      // Use the new GetTokensFromRefreshToken API
+      const authResult = await getTokensFromRefreshToken({
+        refreshToken,
+        deviceKey,
+        abort,
+      }).catch((err) => {
+        invalidRefreshTokens.add(refreshToken);
+        throw err;
+      });
+
+      // Create token response with username
+      tokensFromRefresh = {
+        accessToken: authResult.AuthenticationResult.AccessToken,
+        idToken: authResult.AuthenticationResult.IdToken,
+        expireAt: new Date(
+          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+        ),
+        username,
+        // Include refreshToken if provided in the response (refresh token rotation)
+        ...(authResult.AuthenticationResult.RefreshToken && {
+          refreshToken: authResult.AuthenticationResult.RefreshToken,
+        }),
+        // Preserve the device key
+        deviceKey,
+      };
+    } else {
+      // Use the legacy InitiateAuth with REFRESH_TOKEN flow
+      const authParameters: Record<string, string> = {
+        REFRESH_TOKEN: refreshToken,
+      };
+
+      // Add device key to auth parameters if available
+      if (deviceKey) {
+        debug?.("Including device key in refresh token flow");
+        authParameters.DEVICE_KEY = deviceKey;
+      }
+
+      const authResult = await initiateAuth({
+        authflow: "REFRESH_TOKEN",
+        authParameters,
+        deviceKey,
+        abort,
+      }).catch((err) => {
+        invalidRefreshTokens.add(refreshToken);
+        throw err;
+      });
+
+      // Create token response with username
+      tokensFromRefresh = {
+        accessToken: authResult.AuthenticationResult.AccessToken,
+        idToken: authResult.AuthenticationResult.IdToken,
+        expireAt: new Date(
+          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+        ),
+        username,
+        // Preserve the device key
+        deviceKey,
+      };
     }
 
-    const authResult = await initiateAuth({
-      authflow: "REFRESH_TOKEN",
-      authParameters,
-      deviceKey,
-      abort,
-    }).catch((err) => {
-      invalidRefreshTokens.add(refreshToken);
-      throw err;
-    });
+    // Define a default tokensCb if none was provided
+    // This will ensure tokens get stored properly
+    const finalTokensCb =
+      tokensCb ??
+      (async (tokens: TokensFromRefresh) => {
+        // Store the tokens
+        await storeTokens({
+          accessToken: tokens.accessToken,
+          idToken: tokens.idToken,
+          refreshToken: tokens.refreshToken,
+          expireAt: tokens.expireAt,
+          deviceKey: tokens.deviceKey,
+          username: tokens.username,
+        });
+      });
 
-    // Create token response with username
-    const tokensFromRefresh: TokensFromRefresh = {
-      accessToken: authResult.AuthenticationResult.AccessToken,
-      idToken: authResult.AuthenticationResult.IdToken,
-      expireAt: new Date(
-        Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-      ),
-      username,
-      // Preserve the device key
-      deviceKey,
-    };
-
-    await tokensCb?.(tokensFromRefresh);
+    await finalTokensCb(tokensFromRefresh);
     return tokensFromRefresh;
   } finally {
     isRefreshingCb?.(false);

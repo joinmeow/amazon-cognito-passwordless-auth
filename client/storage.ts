@@ -25,6 +25,7 @@ export interface TokensToStore {
   refreshToken?: string;
   expireAt: Date;
   deviceKey?: string;
+  username?: string;
 }
 export interface TokensFromStorage {
   accessToken?: string;
@@ -59,11 +60,20 @@ export async function retrieveDeviceKey(): Promise<string | undefined> {
 
 export async function storeTokens(tokens: TokensToStore) {
   const { clientId, storage } = configure();
-  const {
-    sub,
-    email,
-    "cognito:username": username,
-  } = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
+
+  // Extract username from tokens or from the id token
+  let username = tokens.username;
+  if (!username) {
+    const payload = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
+    username = payload["cognito:username"];
+
+    // Verify we have a username
+    if (!username) {
+      throw new Error("Could not determine username when storing tokens");
+    }
+  }
+
+  // Get the payload of the access token to extract the scope
   const { scope } = parseJwtPayload<CognitoAccessTokenPayload>(
     tokens.accessToken
   );
@@ -95,6 +105,8 @@ export async function storeTokens(tokens: TokensToStore) {
     promises.push(storeDeviceKey(tokens.deviceKey));
   }
 
+  // Also store user data from the id token
+  const payload = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
   promises.push(
     storage.setItem(
       `${amplifyKeyPrefix}.${username}.userData`,
@@ -102,11 +114,11 @@ export async function storeTokens(tokens: TokensToStore) {
         UserAttributes: [
           {
             Name: "sub",
-            Value: sub,
+            Value: payload.sub,
           },
           {
             Name: "email",
-            Value: email,
+            Value: payload.email,
           },
         ],
         Username: username,
