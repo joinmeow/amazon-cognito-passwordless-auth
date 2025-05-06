@@ -21,7 +21,7 @@ import {
   isAuthenticatedResponse,
   handleAuthResponse,
 } from "./cognito-api.js";
-import { defaultTokensCb } from "./common.js";
+import { processTokens } from "./common.js";
 import { bufferFromBase64, bufferToBase64 } from "./util.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
@@ -371,12 +371,19 @@ export function authenticateWithSRP({
         );
       }
 
-      tokensCb
-        ? await tokensCb(tokens)
-        : await defaultTokensCb({ tokens, abort: abort.signal });
+      // Always process tokens first - this handles device confirmation, storage, and refresh scheduling
+      const processedTokens = (await processTokens(
+        tokens,
+        abort.signal
+      )) as TokensFromSignIn;
+
+      // Then call the custom tokensCb if provided (for application-specific needs only)
+      if (tokensCb) {
+        await tokensCb(processedTokens);
+      }
 
       statusCb?.("SIGNED_IN_WITH_SRP_PASSWORD");
-      return tokens;
+      return processedTokens;
     } catch (err) {
       statusCb?.("PASSWORD_SIGNIN_FAILED");
       throw err;

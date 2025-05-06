@@ -228,11 +228,9 @@ function _usePasswordless() {
       const abort = new AbortController();
       scheduleRefresh({
         abort: abort.signal,
+        // Just update component state - processTokens handles storage
         tokensCb: (newTokens) =>
-          newTokens &&
-          storeTokens(newTokens).then(() =>
-            setTokens((tokens) => ({ ...tokens, ...newTokens }))
-          ),
+          newTokens && setTokens((tokens) => ({ ...tokens, ...newTokens })),
         isRefreshingCb: setIsRefreshingTokens,
       })
         .catch((err) => {
@@ -259,11 +257,9 @@ function _usePasswordless() {
     const { debug } = configure();
     debug?.("Detected incomplete tokens, attempting refresh");
     refreshTokens({
+      // Just update component state - processTokens handles storage
       tokensCb: (newTokens) =>
-        newTokens &&
-        storeTokens(newTokens).then(() =>
-          setTokens((tokens) => ({ ...tokens, ...newTokens }))
-        ),
+        newTokens && setTokens((tokens) => ({ ...tokens, ...newTokens })),
       isRefreshingCb: setIsRefreshingTokens,
     }).catch(() => {
       setTokens(undefined);
@@ -718,8 +714,7 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) =>
-          storeTokens(newTokens).then(() => setTokens(newTokens)),
+        tokensCb: (newTokens) => setTokens(newTokens),
       });
       signinIn.signedIn.catch((error: Error) => {
         // If authentication fails, make sure to clean up properly
@@ -773,20 +768,17 @@ function _usePasswordless() {
             setFido2Credentials(undefined);
           }
         },
-        tokensCb: (newTokens) =>
-          storeTokens(newTokens).then(() => {
-            // Explicitly set tokens in state after successful authentication
-            // This helps prevent race conditions where token state isn't updated before other operations
-            setTokens(newTokens);
+        tokensCb: (newTokens) => {
+          // Just update component state - processTokens handles storage and refresh
+          setTokens(newTokens);
 
-            // Double check auth method is set correctly and no FIDO2 operations should happen
-            debug?.(
-              "Authentication tokens stored, ensuring SRP auth method is preserved"
-            );
-            setAuthMethod("SRP");
-            // Make doubly sure no FIDO2 credentials are cached
-            setFido2Credentials(undefined);
-          }),
+          // Keep SRP-specific behavior for auth method
+          debug?.(
+            "Authentication completed, ensuring SRP auth method is preserved"
+          );
+          setAuthMethod("SRP");
+          setFido2Credentials(undefined);
+        },
         clientMetadata: clientMetadata,
       });
 
@@ -832,8 +824,7 @@ function _usePasswordless() {
         otpMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) =>
-          storeTokens(newTokens).then(() => setTokens(newTokens)),
+        tokensCb: (newTokens) => setTokens(newTokens),
       });
       signinIn.signedIn.catch((error: Error) => setLastError(error));
       return signinIn;

@@ -53,12 +53,11 @@ function getDeviceName(): string {
 }
 
 /**
- * Automatically handle device confirmation when NewDeviceMetadata is present in tokens.
- * This should be called after successful authentication when NewDeviceMetadata is available.
- * Note: This only confirms the device. If UserConfirmationNecessary is true, the application
- * should ask the user if they want to remember the device and call updateDeviceStatus separately.
+ * Automatically handle device confirmation for authentication flows when NewDeviceMetadata is present.
+ * This confirms the device using the device key provided in the authentication response.
+ * We NEVER generate a device key - only use what Cognito provides.
  *
- * @param tokens The tokens from sign-in that contain NewDeviceMetadata
+ * @param tokens The tokens from sign-in with newDeviceMetadata
  * @param deviceName Optional device name, defaults to auto-detected device type
  * @returns The updated tokens with deviceKey set and a userConfirmationNecessary flag
  */
@@ -68,14 +67,14 @@ export async function handleDeviceConfirmation(
 ): Promise<TokensFromSignIn & { userConfirmationNecessary?: boolean }> {
   const { debug, crypto } = configure();
 
-  // Check if we have NewDeviceMetadata with deviceKey
+  // We MUST have newDeviceMetadata with a deviceKey to confirm a device
   if (!tokens.newDeviceMetadata?.deviceKey) {
     debug?.("No new device metadata present, skipping device confirmation");
     return tokens;
   }
 
   const deviceKey = tokens.newDeviceMetadata.deviceKey;
-  debug?.("Confirming new device with key:", deviceKey);
+  debug?.("Confirming device with key:", deviceKey);
 
   if (!tokens.accessToken) {
     throw new Error("Missing access token required for device confirmation");
@@ -113,9 +112,6 @@ export async function handleDeviceConfirmation(
     debug?.("Device confirmation result:", result);
 
     // Note whether user confirmation is necessary
-    // Important: We DO NOT automatically call updateDeviceStatus here anymore
-    // The application should ask the user if they want to remember the device
-    // and call updateDeviceStatus separately if they say yes
     if (result.UserConfirmationNecessary) {
       debug?.(
         "User confirmation necessary for device. Application should ask user if they want to remember this device."
@@ -145,63 +141,66 @@ export async function handleDeviceConfirmation(
   }
 }
 
-/** The default tokens callback stores tokens in storage and reschedules token refresh */
-export const defaultTokensCb = async ({
-  tokens,
-  abort,
-}: {
-  tokens: TokensFromSignIn | TokensFromRefresh;
-  abort?: AbortSignal;
-}) => {
-  const storeAndScheduleRefresh = async (
-    tokens: TokensFromSignIn | TokensFromRefresh
-  ) => {
-    // If this is a sign-in with a new device, extract the device key
-    if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
-      const { debug } = configure();
-      debug?.("Detected new device metadata with device key");
+/**
+ * Process tokens after authentication or refresh.
+ * This function handles ALL required operations:
+ * 1. Device confirmation
+ * 2. Token storage
+ * 3. Scheduling token refresh
+ *
+ * This MUST be called for all auth flows before any custom callbacks.
+ *
+ * @param tokens The tokens to process
+ * @param abort Optional abort signal
+ * @returns The processed tokens (with device key and other metadata)
+ */
+export async function processTokens(
+  tokens: TokensFromSignIn | TokensFromRefresh,
+  abort?: AbortSignal
+): Promise<TokensFromSignIn | TokensFromRefresh> {
+  const { debug } = configure();
 
-      // Complete device confirmation if this is a sign-in (has accessToken)
-      if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
-        // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
-        tokens = await handleDeviceConfirmation(tokens);
-      } else {
-        // Set the deviceKey field in tokens
-        tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
+  // 1. Process device confirmation if needed
+  if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
+    debug?.("Detected new device metadata with device key");
 
-        // Store the device key separately for persistence
-        await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
-      }
+    // Complete device confirmation if this is a sign-in (has accessToken)
+    if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
+      // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
+      tokens = await handleDeviceConfirmation(tokens);
+    } else {
+      // Set the deviceKey field in tokens
+      tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
+
+      // Store the device key separately for persistence
+      await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
     }
+  }
+  // We only confirm devices when NewDeviceMetadata is provided by Cognito
+  // Never attempt to generate a device key or confirm without explicit metadata
 
-    await storeTokens(tokens);
+  // 2. Store tokens for persistence
+  await storeTokens(tokens);
+
+  // 3. Schedule refresh if we have a refresh token
+  if (tokens.refreshToken) {
     scheduleRefresh({
       abort,
       tokensCb: (newTokens) => {
         if (!newTokens) return;
 
-        // Create combined tokens object, preserving important fields
-        const combinedTokens = {
-          ...tokens,
-          ...newTokens,
-          // Ensure deviceKey persists (newTokens from refresh won't have it)
-          deviceKey: tokens.deviceKey || newTokens.deviceKey,
-          // Preserve userConfirmationNecessary if present
-          userConfirmationNecessary:
-            "userConfirmationNecessary" in tokens
-              ? tokens.userConfirmationNecessary
-              : undefined,
-        };
+        // We don't need to store tokens here because processTokens will be called
+        // for the refresh tokens too, and it will store them.
 
-        return storeAndScheduleRefresh(combinedTokens);
+        return Promise.resolve();
       },
     }).catch((err) => {
-      const { debug } = configure();
-      debug?.("Failed to store and refresh tokens:", err);
+      debug?.("Failed to schedule token refresh:", err);
     });
-  };
-  await storeAndScheduleRefresh(tokens);
-};
+  }
+
+  return tokens;
+}
 
 /**
  * Sign the user out. This means: clear tokens from storage,

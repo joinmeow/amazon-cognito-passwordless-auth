@@ -14,9 +14,10 @@
  */
 import { configure } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import { retrieveTokens, TokensFromStorage, storeTokens } from "./storage.js";
+import { retrieveTokens, TokensFromStorage } from "./storage.js";
 import { initiateAuth, getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
+import { processTokens } from "./common.js";
 
 let schedulingRefresh: ReturnType<typeof _scheduleRefresh> | undefined =
   undefined;
@@ -204,24 +205,15 @@ async function _refreshTokens({
       };
     }
 
-    // Define a default tokensCb if none was provided
-    // This will ensure tokens get stored properly
-    const finalTokensCb =
-      tokensCb ??
-      (async (tokens: TokensFromRefresh) => {
-        // Store the tokens
-        await storeTokens({
-          accessToken: tokens.accessToken,
-          idToken: tokens.idToken,
-          refreshToken: tokens.refreshToken,
-          expireAt: tokens.expireAt,
-          deviceKey: tokens.deviceKey,
-          username: tokens.username,
-        });
-      });
+    // First process tokens to handle storage and device confirmation
+    const processedTokens = await processTokens(tokensFromRefresh, abort);
 
-    await finalTokensCb(tokensFromRefresh);
-    return tokensFromRefresh;
+    // Then invoke the callback if provided
+    if (tokensCb) {
+      await tokensCb(processedTokens as TokensFromRefresh);
+    }
+
+    return processedTokens as TokensFromRefresh;
   } finally {
     isRefreshingCb?.(false);
   }
