@@ -910,6 +910,11 @@ export async function handleAuthResponse({
   abort?: AbortSignal;
 }) {
   const { debug } = configure();
+
+  // Initialize MFA tracking - assume no MFA by default
+  // We'll set this to true if an MFA challenge is encountered
+  await storeMfaUsedInAuth(false);
+
   for (;;) {
     if (isAuthenticatedResponse(authResponse)) {
       let deviceKey: string | undefined = undefined;
@@ -924,8 +929,6 @@ export async function handleAuthResponse({
         deviceKey = deviceHandler.deviceKey;
         debug?.("Using device key from device handler:", deviceKey);
       }
-
-      await storeMfaUsedInAuth(false);
 
       return {
         idToken: authResponse.AuthenticationResult.IdToken,

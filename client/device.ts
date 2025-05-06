@@ -174,7 +174,10 @@ export async function handleDeviceConfirmation(
 
     // Store the device key and remembered status
     await storeDeviceKey(deviceKey);
-    await storeDeviceRememberedStatus(deviceKey, !result.UserConfirmationNecessary);
+    await storeDeviceRememberedStatus(
+      deviceKey,
+      !result.UserConfirmationNecessary
+    );
 
     debug?.("Device confirmation completed successfully");
     return {
