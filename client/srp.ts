@@ -23,7 +23,6 @@ import {
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
 import { bufferFromBase64, bufferToBase64 } from "./util.js";
-import { isDeviceRemembered } from "./storage.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {
@@ -337,19 +336,11 @@ export function authenticateWithSRP({
         PASSWORD_CLAIM_SIGNATURE: passwordClaimSignature,
       };
 
-      // Only include the device key if it's remembered
+      // Include the device key if it's available, regardless of remembered status
+      // AWS documentation indicates the device key should be provided if available
       if (deviceKey) {
-        const remembered = await isDeviceRemembered(deviceKey);
-        if (remembered) {
-          debug?.(
-            `Including remembered device key in authentication: ${deviceKey}`
-          );
-          challengeResponses.DEVICE_KEY = deviceKey;
-        } else {
-          debug?.(
-            `Device key exists but is not remembered, skipping: ${deviceKey}`
-          );
-        }
+        debug?.(`Including device key in authentication: ${deviceKey}`);
+        challengeResponses.DEVICE_KEY = deviceKey;
       }
 
       const authResult = await respondToAuthChallenge({

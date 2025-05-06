@@ -20,7 +20,6 @@ import {
   storeDeviceKey,
   isDeviceRemembered,
   storeDeviceRememberedStatus,
-  wasMfaUsedInAuth,
 } from "./storage.js";
 import {
   TokensFromRefresh,
@@ -57,26 +56,15 @@ export async function processTokens(
 
     // Complete device confirmation if this is a sign-in (has accessToken)
     if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
-      // Only confirm device if MFA was used in this authentication flow
-      const mfaUsed = await wasMfaUsedInAuth();
-      if (mfaUsed) {
-        debug?.(
-          "MFA was used in authentication, proceeding with device confirmation"
-        );
-        // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
-        tokens = await handleDeviceConfirmation(tokens);
-      } else {
-        debug?.(
-          "MFA was not used in authentication, skipping device confirmation"
-        );
-        // Still set the deviceKey in tokens but don't confirm or remember the device
-        tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
-        await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
-        await storeDeviceRememberedStatus(
-          tokens.newDeviceMetadata.deviceKey,
-          false
-        );
-      }
+      // According to AWS docs, we should always confirm a device after successful auth
+      // The purpose of device confirmation is to prepare for future MFA bypass,
+      // not to require MFA for confirmation
+      debug?.(
+        "Proceeding with device confirmation after successful authentication"
+      );
+
+      // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
+      tokens = await handleDeviceConfirmation(tokens);
     } else {
       // Set the deviceKey field in tokens
       tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
@@ -85,7 +73,7 @@ export async function processTokens(
       await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
 
       // By default, device is not remembered unless explicitly confirmed
-      // through MFA and handleDeviceConfirmation
+      // through handleDeviceConfirmation
       await storeDeviceRememberedStatus(
         tokens.newDeviceMetadata.deviceKey,
         false
@@ -105,20 +93,38 @@ export async function processTokens(
   await storeTokens(tokens);
 
   // 3. Schedule refresh if we have a refresh token
-  if (tokens.refreshToken) {
+  // But only if this is NOT a fresh login (indicated by newDeviceMetadata)
+  // This prevents immediate refresh scheduling right after login
+  if (tokens.refreshToken && !("newDeviceMetadata" in tokens)) {
     scheduleRefresh({
       abort,
       tokensCb: (newTokens) => {
         if (!newTokens) return;
-
         // We don't need to store tokens here because processTokens will be called
         // for the refresh tokens too, and it will store them.
-
         return Promise.resolve();
       },
     }).catch((err) => {
       debug?.("Failed to schedule token refresh:", err);
     });
+  } else if (tokens.refreshToken) {
+    // For fresh logins, we'll still schedule a refresh but with a significant delay
+    // This ensures tokens don't expire while the user is active, but doesn't cause
+    // immediate refreshes after login
+    debug?.("Fresh login detected, deferring token refresh scheduling");
+
+    // Delay scheduling by 2 minutes to avoid multiple refreshes during app initialization
+    setTimeout(() => {
+      scheduleRefresh({
+        abort,
+        tokensCb: (newTokens) => {
+          if (!newTokens) return;
+          return Promise.resolve();
+        },
+      }).catch((err) => {
+        debug?.("Failed to schedule delayed token refresh:", err);
+      });
+    }, 120000); // 2 minutes delay
   }
 
   return tokens;

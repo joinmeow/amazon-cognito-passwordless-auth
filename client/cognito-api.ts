@@ -16,7 +16,7 @@ import { parseJwtPayload, throwIfNot2xx, bufferToBase64 } from "./util.js";
 import { configure, MinimalResponse } from "./config.js";
 import { retrieveTokens } from "./storage.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
-import { storeMfaUsedInAuth } from "./storage.js";
+import { createDeviceSrpAuthHandler } from "./device.js";
 
 const AWS_REGION_REGEXP = /^[a-z]{2}-[a-z]+-\d$/;
 
@@ -238,8 +238,15 @@ export async function initiateAuth<
     }
   }
 
-  // Add device key to auth parameters if provided
-  if (deviceKey) {
+  // Add device key to auth parameters if provided and it's a valid authentication flow for device
+  if (
+    deviceKey &&
+    (authflow === "REFRESH_TOKEN" ||
+      authflow === "USER_PASSWORD_AUTH" ||
+      authflow === "USER_SRP_AUTH" ||
+      authflow === "CUSTOM_AUTH")
+  ) {
+    debug?.(`Including device key ${deviceKey} in ${authflow} flow`);
     authParameters.DEVICE_KEY = deviceKey;
   }
 
@@ -911,10 +918,6 @@ export async function handleAuthResponse({
 }) {
   const { debug } = configure();
 
-  // Initialize MFA tracking - assume no MFA by default
-  // We'll set this to true if an MFA challenge is encountered
-  await storeMfaUsedInAuth(false);
-
   for (;;) {
     if (isAuthenticatedResponse(authResponse)) {
       let deviceKey: string | undefined = undefined;
@@ -954,8 +957,6 @@ export async function handleAuthResponse({
     if (authResponse.ChallengeName === "SMS_MFA") {
       if (!smsMfaCode) throw new Error("Missing MFA Code");
       responseParameters.SMS_MFA_CODE = await smsMfaCode();
-      // Flag that MFA was used in this authentication
-      await storeMfaUsedInAuth(true);
     } else if (authResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
       if (!newPassword) throw new Error("Missing new password");
       responseParameters.NEW_PASSWORD = await newPassword();
@@ -966,56 +967,98 @@ export async function handleAuthResponse({
     } else if (authResponse.ChallengeName === "SOFTWARE_TOKEN_MFA") {
       if (!otpMfaCode) throw new Error("Missing Software MFA Code");
       responseParameters.SOFTWARE_TOKEN_MFA_CODE = await otpMfaCode();
-      // Flag that MFA was used in this authentication
-      await storeMfaUsedInAuth(true);
     } else if (authResponse.ChallengeName === "DEVICE_SRP_AUTH") {
-      if (!deviceHandler)
-        throw new Error("Missing device handler for DEVICE_SRP_AUTH");
-
       // Get challenge parameters
       const srpB = authResponse.ChallengeParameters.SRP_B;
       const secretBlock = authResponse.ChallengeParameters.SECRET_BLOCK;
+      const deviceKey = authResponse.ChallengeParameters.DEVICE_KEY;
 
       debug?.("Handling DEVICE_SRP_AUTH challenge");
 
-      // Let the device handler generate the response
-      const {
-        deviceGroupKey,
-        passwordVerifier,
-        passwordClaimSecretBlock,
-        timestamp,
-      } = await deviceHandler.handleDeviceSrpAuth(srpB, secretBlock);
+      // If a device handler was provided, use it
+      let deviceSrpResult;
 
-      // Add the response parameters
-      responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
-      responseParameters.DEVICE_GROUP_KEY = deviceGroupKey;
-      responseParameters.PASSWORD_CLAIM_SIGNATURE = passwordVerifier;
-      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK = passwordClaimSecretBlock;
-      responseParameters.TIMESTAMP = timestamp;
+      if (deviceHandler) {
+        debug?.("Using provided device handler for SRP auth");
+        deviceSrpResult = await deviceHandler.handleDeviceSrpAuth(
+          srpB,
+          secretBlock
+        );
+        responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
+      } else {
+        // Try to create a handler for this device
+        debug?.("Creating device handler for SRP auth");
+        const createdHandler = await createDeviceSrpAuthHandler(
+          username,
+          deviceKey
+        );
+
+        if (!createdHandler) {
+          throw new Error(
+            "Failed to create device SRP handler - device password may be missing"
+          );
+        }
+
+        deviceSrpResult = await createdHandler.handleDeviceSrpAuth(
+          srpB,
+          secretBlock
+        );
+        responseParameters.DEVICE_KEY = createdHandler.deviceKey;
+      }
+
+      // Add the response parameters from SRP calculation
+      responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
+      responseParameters.PASSWORD_CLAIM_SIGNATURE =
+        deviceSrpResult.passwordVerifier;
+      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK =
+        deviceSrpResult.passwordClaimSecretBlock;
+      responseParameters.TIMESTAMP = deviceSrpResult.timestamp;
     } else if (authResponse.ChallengeName === "DEVICE_PASSWORD_VERIFIER") {
-      if (!deviceHandler)
-        throw new Error("Missing device handler for DEVICE_PASSWORD_VERIFIER");
-
       // Get challenge parameters
       const srpB = authResponse.ChallengeParameters.SRP_B;
       const secretBlock = authResponse.ChallengeParameters.SECRET_BLOCK;
+      const deviceKey = authResponse.ChallengeParameters.DEVICE_KEY;
 
       debug?.("Handling DEVICE_PASSWORD_VERIFIER challenge");
 
-      // Let the device handler generate the response
-      const {
-        deviceGroupKey,
-        passwordVerifier,
-        passwordClaimSecretBlock,
-        timestamp,
-      } = await deviceHandler.handleDeviceSrpAuth(srpB, secretBlock);
+      // Similar approach as DEVICE_SRP_AUTH
+      let deviceSrpResult;
 
-      // Add the response parameters
-      responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
-      responseParameters.DEVICE_GROUP_KEY = deviceGroupKey;
-      responseParameters.PASSWORD_CLAIM_SIGNATURE = passwordVerifier;
-      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK = passwordClaimSecretBlock;
-      responseParameters.TIMESTAMP = timestamp;
+      if (deviceHandler) {
+        debug?.("Using provided device handler for password verifier");
+        deviceSrpResult = await deviceHandler.handleDeviceSrpAuth(
+          srpB,
+          secretBlock
+        );
+        responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
+      } else {
+        // Try to create a handler for this device
+        debug?.("Creating device handler for password verifier");
+        const createdHandler = await createDeviceSrpAuthHandler(
+          username,
+          deviceKey
+        );
+
+        if (!createdHandler) {
+          throw new Error(
+            "Failed to create device SRP handler - device password may be missing"
+          );
+        }
+
+        deviceSrpResult = await createdHandler.handleDeviceSrpAuth(
+          srpB,
+          secretBlock
+        );
+        responseParameters.DEVICE_KEY = createdHandler.deviceKey;
+      }
+
+      // Add the response parameters from SRP calculation
+      responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
+      responseParameters.PASSWORD_CLAIM_SIGNATURE =
+        deviceSrpResult.passwordVerifier;
+      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK =
+        deviceSrpResult.passwordClaimSecretBlock;
+      responseParameters.TIMESTAMP = deviceSrpResult.timestamp;
     } else {
       throw new Error(`Unsupported challenge: ${authResponse.ChallengeName}`);
     }

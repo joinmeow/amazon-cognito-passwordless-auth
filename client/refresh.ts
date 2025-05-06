@@ -17,7 +17,8 @@ import { TokensFromRefresh } from "./model.js";
 import {
   retrieveTokens,
   TokensFromStorage,
-  isDeviceRemembered,
+  storeRefreshScheduleInfo,
+  getRefreshScheduleInfo,
 } from "./storage.js";
 import { initiateAuth, getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
@@ -28,11 +29,20 @@ let schedulingRefresh: ReturnType<typeof _scheduleRefresh> | undefined =
 export async function scheduleRefresh(
   ...args: Parameters<typeof _scheduleRefresh>
 ) {
-  if (!schedulingRefresh) {
-    schedulingRefresh = _scheduleRefresh(...args).finally(
-      () => (schedulingRefresh = undefined)
+  const { debug } = configure();
+
+  // Skip scheduling if already in progress
+  if (schedulingRefresh) {
+    debug?.(
+      "Refresh scheduling already in progress, returning existing promise"
     );
+    return schedulingRefresh;
   }
+
+  schedulingRefresh = _scheduleRefresh(...args).finally(
+    () => (schedulingRefresh = undefined)
+  );
+
   return schedulingRefresh;
 }
 
@@ -55,25 +65,74 @@ async function _scheduleRefresh({
   isRefreshingCb?: (isRefreshing: boolean) => unknown;
 }) {
   const { debug } = configure();
-  clearScheduledRefresh?.();
+
+  // Clean up any existing scheduled refresh
+  if (clearScheduledRefresh) {
+    clearScheduledRefresh();
+    clearScheduledRefresh = undefined;
+    // Clear the scheduled state to make sure we're in a clean state
+    await storeRefreshScheduleInfo({ isScheduled: false });
+  }
+
+  // Get current tokens
   const tokens = await retrieveTokens();
   if (abort?.aborted) return;
-  // Refresh 30 seconds before expiry
-  // Add some jitter, to spread scheduled refreshes might they be
-  // requested multiple times (e.g. in multiple components)
+
+  if (!tokens?.expireAt) {
+    debug?.(
+      "No valid tokens or expiry time found, skipping refresh scheduling"
+    );
+    return;
+  }
+
+  const tokenExpiryTime = tokens.expireAt.valueOf();
+
+  // Check if a refresh is already scheduled for this token expiry (or a more recent one)
+  const { isScheduled, expiryTime } = await getRefreshScheduleInfo();
+  if (isScheduled && expiryTime && expiryTime >= tokenExpiryTime) {
+    debug?.(
+      "A refresh is already scheduled for this token expiry or later, skipping"
+    );
+    return;
+  }
+
+  // Refresh 60 seconds before expiry
+  // Add some jitter, to spread scheduled refreshes
   const refreshIn = Math.max(
     0,
-    (tokens?.expireAt ?? new Date()).valueOf() -
+    tokenExpiryTime -
       Date.now() -
-      30 * 1000 -
-      (Math.random() - 0.5) * 30 * 1000
+      // Base refresh time: 60 seconds before expiry
+      60 * 1000 -
+      // Add jitter of ±15 seconds to prevent thundering herd
+      (Math.random() * 30 - 15) * 1000
   );
-  if (refreshIn >= 1000) {
+
+  // Calculate token lifetime in minutes for better logging
+  const tokenLifetimeMinutes = Math.round(
+    (tokenExpiryTime - Date.now()) / (60 * 1000)
+  );
+
+  // Only schedule refresh if tokens will expire in more than 5 minutes
+  // This avoids refreshing tokens that were just obtained
+  if (refreshIn >= 300000) {
+    // 5 minutes in milliseconds
     debug?.(
-      `Scheduling refresh of tokens in ${(refreshIn / 1000).toFixed(1)} seconds`
+      `Scheduling refresh for token that expires in ${tokenLifetimeMinutes} minutes (refresh in ${Math.round(refreshIn / 1000)} seconds)`
     );
-    clearScheduledRefresh = setTimeoutWallClock(
-      () =>
+
+    // Mark that we have a refresh scheduled
+    await storeRefreshScheduleInfo({
+      isScheduled: true,
+      expiryTime: tokenExpiryTime,
+    });
+
+    clearScheduledRefresh = setTimeoutWallClock(() => {
+      // When this runs, we no longer have a scheduled refresh
+      (async () => {
+        // Update the scheduled state in storage
+        await storeRefreshScheduleInfo({ isScheduled: false });
+
         refreshTokens({
           abort,
           tokensCb: async (refreshedTokens) => {
@@ -87,18 +146,110 @@ async function _scheduleRefresh({
 
             // Call the original tokensCb if provided
             await tokensCb?.(refreshedTokens);
+
+            // Schedule the next refresh
+            scheduleRefresh({
+              abort,
+              tokensCb,
+              isRefreshingCb,
+            }).catch((err) => debug?.("Failed to schedule next refresh:", err));
           },
           isRefreshingCb,
           tokens,
-        }).catch((err) => debug?.("Failed to refresh tokens:", err)),
-      refreshIn
+        }).catch((err) => {
+          debug?.("Failed to refresh tokens:", err);
+
+          // Get a backoff time based on token expiry time
+          // If tokens expire soon, retry quickly (within 30 sec)
+          // If tokens expire later, we can wait longer
+          const tokenExpiryTime = tokens?.expireAt?.valueOf() ?? 0;
+          const timeUntilExpiry = Math.max(0, tokenExpiryTime - Date.now());
+
+          // Backoff time: min 5 seconds, max 5 minutes, based on 10% of time until expiry
+          const backoffMs = Math.min(
+            300000, // 5 min max
+            Math.max(
+              5000, // 5 sec min
+              timeUntilExpiry * 0.1 // 10% of remaining time
+            )
+          );
+
+          debug?.(
+            `Will retry refresh after backoff of ${Math.round(backoffMs / 1000)} seconds`
+          );
+
+          // Schedule retry with backoff
+          setTimeout(() => {
+            // Even if refresh failed, we should still try to schedule next refresh
+            scheduleRefresh({
+              abort,
+              tokensCb,
+              isRefreshingCb,
+            }).catch((err) =>
+              debug?.("Failed to schedule next refresh after error:", err)
+            );
+          }, backoffMs);
+        });
+      })().catch((err) => debug?.("Error updating refresh state:", err));
+    }, refreshIn);
+
+    abort?.addEventListener("abort", () => {
+      if (clearScheduledRefresh) {
+        clearScheduledRefresh();
+        clearScheduledRefresh = undefined;
+
+        // Make sure to update the scheduled state when aborted
+        storeRefreshScheduleInfo({ isScheduled: false }).catch((err) =>
+          debug?.("Error clearing refresh state on abort:", err)
+        );
+
+        debug?.("Refresh scheduling aborted");
+      }
+    });
+  } else if (refreshIn > 0 && refreshIn < 30000) {
+    // If less than 30 seconds until expiry but more than 0
+    // Refresh immediately to prevent token expiration
+    debug?.(
+      `Token expires in ${Math.round(refreshIn / 1000)} seconds - refreshing immediately`
     );
-    abort?.addEventListener("abort", clearScheduledRefresh);
+
+    await storeRefreshScheduleInfo({
+      isScheduled: true,
+      expiryTime: tokenExpiryTime,
+    });
+
+    // Start immediate refresh
+    refreshTokens({
+      abort,
+      tokensCb,
+      isRefreshingCb,
+      tokens,
+    })
+      .then((refreshedTokens) => {
+        debug?.("Successfully refreshed token that was about to expire");
+        return refreshedTokens;
+      })
+      .catch((err) => {
+        debug?.("Failed to refresh token that was about to expire:", err);
+        // If the token is very close to expiry (< 10 seconds), warn about potential auth issues
+        if (refreshIn < 10000) {
+          debug?.("WARNING: Token may expire before next refresh attempt");
+        }
+      })
+      .finally(() => {
+        // Make sure to update the scheduled state when finished
+        storeRefreshScheduleInfo({ isScheduled: false }).catch((err) =>
+          debug?.("Error clearing refresh state after immediate refresh:", err)
+        );
+      });
+  } else if (refreshIn <= 0) {
+    debug?.("Token already expired, not scheduling refresh");
   } else {
-    refreshTokens({ abort, tokensCb, isRefreshingCb, tokens }).catch((err) =>
-      debug?.("Failed to refresh tokens:", err)
+    debug?.(
+      `Token expires in ${tokenLifetimeMinutes} minutes but was recently obtained, not scheduling refresh yet`
     );
   }
+
   return clearScheduledRefresh;
 }
 
@@ -106,15 +257,23 @@ let refreshingTokens: ReturnType<typeof _refreshTokens> | undefined = undefined;
 export async function refreshTokens(
   ...args: Parameters<typeof _refreshTokens>
 ) {
-  if (!refreshingTokens) {
-    refreshingTokens = _refreshTokens(...args).finally(
-      () => (refreshingTokens = undefined)
-    );
+  // If already refreshing, return the existing promise
+  if (refreshingTokens) {
+    return refreshingTokens;
   }
+
+  refreshingTokens = _refreshTokens(...args).finally(
+    () => (refreshingTokens = undefined)
+  );
+
   return refreshingTokens;
 }
 
-const invalidRefreshTokens = new Set<string>();
+// Maintain a set of failed refresh tokens to avoid retrying them
+// We include a max size and timestamps for cleanup
+const invalidRefreshTokens = new Map<string, number>();
+const MAX_INVALID_TOKENS = 100;
+
 async function _refreshTokens({
   abort,
   tokensCb,
@@ -136,15 +295,38 @@ async function _refreshTokens({
     if (!refreshToken || !username) {
       throw new Error("Cannot refresh without refresh token and username");
     }
+
+    // Check if this token has failed previously
     if (invalidRefreshTokens.has(refreshToken)) {
-      throw new Error(
-        `Will not attempt refresh using token that failed previously: ${refreshToken}`
-      );
+      const errorMessage = `Will not attempt refresh using token that failed previously: ${refreshToken.substring(0, 10)}...`;
+      debug?.(errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    // Periodically clean up old invalid tokens
+    if (invalidRefreshTokens.size > MAX_INVALID_TOKENS) {
+      debug?.("Cleaning up invalid refresh token cache");
+      const now = Date.now();
+      // Clean tokens older than 1 hour
+      const ONE_HOUR = 60 * 60 * 1000;
+      for (const [token, timestamp] of invalidRefreshTokens.entries()) {
+        if (now - timestamp > ONE_HOUR) {
+          invalidRefreshTokens.delete(token);
+        }
+      }
     }
 
     debug?.(
       `Refreshing tokens using refresh token (using ${useGetTokensFromRefreshToken ? "GetTokensFromRefreshToken" : "InitiateAuth"})...`
     );
+
+    // Always include device key if available - AWS documentation indicates device keys
+    // should be included in all auth flows if available
+    let useDeviceKey: string | undefined = undefined;
+    if (deviceKey) {
+      debug?.("Including device key in refresh token flow");
+      useDeviceKey = deviceKey;
+    }
 
     let tokensFromRefresh: TokensFromRefresh;
 
@@ -152,13 +334,10 @@ async function _refreshTokens({
       // Use the new GetTokensFromRefreshToken API
       const authResult = await getTokensFromRefreshToken({
         refreshToken,
-        deviceKey:
-          deviceKey && (await isDeviceRemembered(deviceKey))
-            ? deviceKey
-            : undefined,
+        deviceKey: useDeviceKey,
         abort,
       }).catch((err) => {
-        invalidRefreshTokens.add(refreshToken);
+        invalidRefreshTokens.set(refreshToken, Date.now());
         throw err;
       });
 
@@ -174,8 +353,8 @@ async function _refreshTokens({
         ...(authResult.AuthenticationResult.RefreshToken && {
           refreshToken: authResult.AuthenticationResult.RefreshToken,
         }),
-        // Preserve the device key
-        deviceKey,
+        // Always include the device key if available (consistent with AWS docs)
+        ...(useDeviceKey && { deviceKey: useDeviceKey }),
       };
     } else {
       // Use the legacy InitiateAuth with REFRESH_TOKEN flow
@@ -184,25 +363,17 @@ async function _refreshTokens({
       };
 
       // Add device key to auth parameters if available
-      if (deviceKey) {
-        const remembered = await isDeviceRemembered(deviceKey);
-        if (remembered) {
-          debug?.("Including remembered device key in refresh token flow");
-          authParameters.DEVICE_KEY = deviceKey;
-        } else {
-          debug?.(
-            "Device key exists but is not remembered, skipping in refresh flow"
-          );
-        }
+      if (useDeviceKey) {
+        authParameters.DEVICE_KEY = useDeviceKey;
       }
 
       const authResult = await initiateAuth({
         authflow: "REFRESH_TOKEN",
         authParameters,
-        deviceKey,
+        deviceKey: useDeviceKey,
         abort,
       }).catch((err) => {
-        invalidRefreshTokens.add(refreshToken);
+        invalidRefreshTokens.set(refreshToken, Date.now());
         throw err;
       });
 
@@ -214,8 +385,8 @@ async function _refreshTokens({
           Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
         ),
         username,
-        // Preserve the device key
-        deviceKey,
+        // Always include the device key if available (consistent with AWS docs)
+        ...(useDeviceKey && { deviceKey: useDeviceKey }),
       };
     }
 

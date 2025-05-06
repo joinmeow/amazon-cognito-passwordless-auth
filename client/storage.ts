@@ -195,23 +195,83 @@ export async function isDeviceRemembered(deviceKey?: string): Promise<boolean> {
 }
 
 /**
- * Store whether MFA was used during this authentication
- * @param used Whether MFA was used
+ * Store information about scheduled token refresh operations
+ * This ensures consistency across hook remounts and even browser refreshes
  */
-export async function storeMfaUsedInAuth(used: boolean) {
+export async function storeRefreshScheduleInfo({
+  isScheduled,
+  expiryTime,
+}: {
+  isScheduled: boolean;
+  expiryTime?: number;
+}) {
   const { clientId, storage, debug } = configure();
-  const mfaUsedKey = `Passwordless.${clientId}.mfaUsedInAuth`;
-  debug?.(`Setting MFA used in auth: ${used}`);
-  await storage.setItem(mfaUsedKey, used.toString());
+  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
+  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
+
+  debug?.(
+    `Setting refresh scheduled status: ${isScheduled}, expiry: ${expiryTime}`
+  );
+  await storage.setItem(scheduledKey, isScheduled.toString());
+
+  if (expiryTime) {
+    await storage.setItem(expiryKey, expiryTime.toString());
+  } else if (isScheduled === false) {
+    // Clear expiry time when scheduling is disabled
+    await storage.removeItem(expiryKey);
+  }
 }
 
 /**
- * Check if MFA was used during this authentication
- * @returns Whether MFA was used
+ * Check if a token refresh is already scheduled
+ * @returns Object containing scheduling status and expiry time
  */
-export async function wasMfaUsedInAuth(): Promise<boolean> {
+export async function getRefreshScheduleInfo(): Promise<{
+  isScheduled: boolean;
+  expiryTime?: number;
+}> {
   const { clientId, storage } = configure();
-  const mfaUsedKey = `Passwordless.${clientId}.mfaUsedInAuth`;
-  const used = await storage.getItem(mfaUsedKey);
-  return used === "true";
+  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
+  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
+
+  const [isScheduledStr, expiryTimeStr] = await Promise.all([
+    storage.getItem(scheduledKey),
+    storage.getItem(expiryKey),
+  ]);
+
+  return {
+    isScheduled: isScheduledStr === "true",
+    expiryTime: expiryTimeStr ? parseInt(expiryTimeStr, 10) : undefined,
+  };
+}
+
+/**
+ * Store device password for device authentication
+ * @param deviceKey The device key
+ * @param devicePassword The device password to store
+ */
+export async function storeDevicePassword(
+  deviceKey: string,
+  devicePassword: string
+) {
+  if (!deviceKey) return;
+  const { clientId, storage, debug } = configure();
+  const devicePasswordKey = `Passwordless.${clientId}.devicePassword.${deviceKey}`;
+  debug?.(`Storing password for device: ${deviceKey}`);
+  await storage.setItem(devicePasswordKey, devicePassword);
+}
+
+/**
+ * Retrieve stored device password
+ * @param deviceKey The device key to retrieve the password for
+ * @returns The device password if found, otherwise undefined
+ */
+export async function retrieveDevicePassword(
+  deviceKey?: string
+): Promise<string | undefined> {
+  if (!deviceKey) return undefined;
+  const { clientId, storage } = configure();
+  const devicePasswordKey = `Passwordless.${clientId}.devicePassword.${deviceKey}`;
+  const password = await storage.getItem(devicePasswordKey);
+  return password || undefined;
 }
