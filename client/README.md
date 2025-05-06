@@ -5,7 +5,7 @@
 To use the library, you need to first configure it:
 
 ```javascript
-import { Passwordless } from "amazon-cognito-passwordless-auth/react";
+import { Passwordless } from "@joinmeow/cognito-passwordless-auth/react";
 
 Passwordless.configure({
   cognitoIdpEndpoint: "us-east-2", // you can also use the full endpoint URL, potentially to use a proxy
@@ -42,6 +42,8 @@ Passwordless.configure({
     "<header 2>": "<value 2>",
   },
   storage: localStorage, // Optional, default to localStorage
+  // Whether to use the new GetTokensFromRefreshToken API
+  useGetTokensFromRefreshToken: false, // Default is false
 });
 ```
 
@@ -50,7 +52,7 @@ Passwordless.configure({
 If your User Pool is enabled for self sign-up, users can sign up like so:
 
 ```javascript
-import { signUp } from "amazon-cognito-passwordless-auth/cognito-api";
+import { signUp } from "@joinmeow/cognito-passwordless-auth/cognito-api";
 
 export default function YourComponent() {
   // Sample form that allows the user to sign up
@@ -86,7 +88,7 @@ export default function YourComponent() {
 To update your Cognito User Attributes you can use the `updateUserAttributes` function:
 
 ```javascript
-import { updateUserAttributes } from "amazon-cognito-passwordless-auth/cognito-api";
+import { updateUserAttributes } from "@joinmeow/cognito-passwordless-auth/cognito-api";
 
 await updateUserAttributes({
   userAttributes: [
@@ -103,7 +105,7 @@ await updateUserAttributes({
 To receive a code via email or SMS to verify the `email` or `phone_number` respectively, use the `getUserAttributeVerificationCode` function:
 
 ```javascript
-import { getUserAttributeVerificationCode } from "amazon-cognito-passwordless-auth/cognito-api";
+import { getUserAttributeVerificationCode } from "@joinmeow/cognito-passwordless-auth/cognito-api";
 
 await getUserAttributeVerificationCode({
   attributeName: "email",
@@ -118,7 +120,7 @@ await getUserAttributeVerificationCode({
 To verify `email` or `phone_number` attributes, use the `verifyUserAttribute` function
 
 ```javascript
-import { verifyUserAttribute } from "amazon-cognito-passwordless-auth/cognito-api";
+import { verifyUserAttribute } from "@joinmeow/cognito-passwordless-auth/cognito-api";
 
 await verifyUserAttribute({
   attributeName: "phone_number",
@@ -133,7 +135,7 @@ await verifyUserAttribute({
 A helper function that returns a human friendly string indicating how much time passed from the `from` Date to the `now` timestamp
 
 ```javascript
-import { timeAgo } from "amazon-cognito-passwordless-auth/util";
+import { timeAgo } from "@joinmeow/cognito-passwordless-auth/util";
 
 const now = timeAgo(Date.now(), new Date()); // Just now
 const seconds = timeAgo(Date.now(), new Date(Date.now() - 30 * 1000)); // 30 seconds ago
@@ -149,7 +151,7 @@ This library supports the new GetTokensFromRefreshToken API that was introduced 
 To use the new API, set the `useGetTokensFromRefreshToken` flag in your configuration:
 
 ```typescript
-import { configure } from "amazon-cognito-passwordless-auth";
+import { configure } from "@joinmeow/cognito-passwordless-auth";
 
 configure({
   // ...your other configuration options
@@ -177,3 +179,149 @@ To enable refresh token rotation in your Cognito User Pool client:
 4. Set an appropriate grace period for token reuse during which both the old and new refresh tokens will be valid
 
 For more information, see the [AWS documentation on RefreshTokenRotationType](https://docs.aws.amazon.com/cognito-idp/latest/APIReference/API_GetTokensFromRefreshToken.html).
+
+## Device Authentication
+
+When a user signs in for the first time on a new device, this library automatically handles device authentication with Amazon Cognito, allowing users to bypass MFA on subsequent sign-ins from remembered devices.
+
+### How Device Authentication Works
+
+The device authentication flow has two distinct steps:
+
+1. **Device Confirmation** (automatic): When a user signs in on a new device, the library:
+
+   - Detects the `NewDeviceMetadata` from Cognito
+   - Automatically registers the device with Cognito using the `ConfirmDevice` API
+   - Returns a `userConfirmationNecessary` flag to indicate if user input is needed
+
+2. **Device Remembering** (requires user consent): Based on your User Pool settings, the user may need to be asked if they want to remember the device.
+   - If `userConfirmationNecessary` is `true`, your application should ask the user
+   - Based on the user's choice, your application calls `updateDeviceStatus`
+
+Here's a diagram of the flow:
+
+```
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│  User signs │       │   Library   │       │ Application │
+│     in      │──────▶│  confirms   │──────▶│ asks user to│
+│             │       │   device    │       │ remember?   │
+└─────────────┘       └─────────────┘       └──────┬──────┘
+                                                   │
+                                                   ▼
+                                            ┌─────────────┐
+                                            │  Update     │
+                                            │  device     │
+                                            │  status     │
+                                            └─────────────┘
+```
+
+### Implementation Example
+
+```javascript
+// Web example:
+import {
+  authenticateWithSRP,
+  updateDeviceStatus,
+} from "@joinmeow/cognito-passwordless-auth";
+
+// Sign in with username and password
+const { signedIn } = await authenticateWithSRP({
+  username: "user@example.com",
+  password: "password123",
+});
+
+// Wait for sign-in to complete and get tokens
+const tokens = await signedIn;
+
+// Check if we need to ask the user to remember the device
+if (tokens.userConfirmationNecessary) {
+  // Ask user if they want to remember this device
+  const rememberDevice = confirm(
+    "Remember this device? You won't need MFA next time."
+  );
+
+  // Call updateDeviceStatus based on their choice
+  if (tokens.deviceKey) {
+    await updateDeviceStatus({
+      accessToken: tokens.accessToken,
+      deviceKey: tokens.deviceKey,
+      deviceRememberedStatus: rememberDevice ? "remembered" : "not_remembered",
+    });
+  }
+}
+```
+
+### React Example
+
+```jsx
+import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
+import { useState, useEffect } from "react";
+
+function Login() {
+  const { authenticateWithSRP, tokens, updateDeviceStatus } = usePasswordless();
+  const [showRememberPrompt, setShowRememberPrompt] = useState(false);
+
+  useEffect(() => {
+    // Check if we need to ask the user to remember device
+    if (tokens?.userConfirmationNecessary) {
+      setShowRememberPrompt(true);
+    }
+  }, [tokens]);
+
+  const handleRememberDevice = async (remember) => {
+    if (tokens?.deviceKey && tokens?.accessToken) {
+      await updateDeviceStatus({
+        accessToken: tokens.accessToken,
+        deviceKey: tokens.deviceKey,
+        deviceRememberedStatus: remember ? "remembered" : "not_remembered",
+      });
+      setShowRememberPrompt(false);
+    }
+  };
+
+  return (
+    <div>
+      {/* Login form */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          authenticateWithSRP({
+            username: e.target.username.value,
+            password: e.target.password.value,
+          });
+        }}
+      >
+        <input name="username" placeholder="Username" />
+        <input name="password" type="password" placeholder="Password" />
+        <button type="submit">Sign In</button>
+      </form>
+
+      {/* Remember device prompt */}
+      {showRememberPrompt && (
+        <div className="remember-device-prompt">
+          <p>
+            Do you want to remember this device? You won't need MFA next time.
+          </p>
+          <button onClick={() => handleRememberDevice(true)}>
+            Yes, remember
+          </button>
+          <button onClick={() => handleRememberDevice(false)}>
+            No, don't remember
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Subsequent Authentication
+
+On subsequent sign-ins from a remembered device:
+
+1. The library automatically includes the stored device key in authentication requests
+2. Cognito sends a `DEVICE_SRP_AUTH` challenge instead of an MFA challenge
+3. The library automatically handles this challenge
+4. The user is signed in without needing to provide an MFA code
+
+This creates a seamless experience for users on their trusted devices while maintaining security.

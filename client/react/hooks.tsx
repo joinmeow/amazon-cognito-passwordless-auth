@@ -590,6 +590,31 @@ function _usePasswordless() {
       return result;
     },
     /**
+     * Update the status of a device (remembered or not_remembered).
+     * Use this after getting userConfirmationNecessary=true in tokens
+     * to set the device as remembered based on user choice.
+     */
+    updateDeviceStatus: async ({
+      deviceKey,
+      deviceRememberedStatus,
+    }: {
+      deviceKey: string;
+      deviceRememberedStatus: "remembered" | "not_remembered";
+    }) => {
+      if (!tokens?.accessToken) {
+        throw new Error("User must be signed in to update device status");
+      }
+
+      const { debug } = configure();
+      debug?.(`Setting device ${deviceKey} as ${deviceRememberedStatus}`);
+
+      await updateDeviceStatus({
+        accessToken: tokens.accessToken,
+        deviceKey,
+        deviceRememberedStatus,
+      });
+    },
+    /**
      * Forget a device to stop using it for trusted device authentication
      * Note that this is different from just clearing the local device key
      * as it also removes the device from the user's account on the server

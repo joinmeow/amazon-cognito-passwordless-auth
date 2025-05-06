@@ -23,6 +23,12 @@ export interface TokensFromSignIn {
     deviceGroupKey: string;
   };
   deviceKey?: string;
+  /**
+   * Indicates if the user needs to be asked if they want to remember this device.
+   * - If true: Your app should ask the user and call updateDeviceStatus API
+   * - If false: Device is already remembered based on user pool settings
+   */
+  userConfirmationNecessary?: boolean;
 }
 export interface TokensFromRefresh {
   accessToken: string;

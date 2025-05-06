@@ -74,8 +74,6 @@ await signedIn;
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "password123",
-  // Use device authentication if available
-  deviceKey: localStorage.getItem("deviceKey"),
 });
 
 // Sign out
@@ -104,17 +102,55 @@ function YourApp() {
     signInStatus,
     authenticateWithFido2,
     authenticateWithSRP,
-    deviceKey,
-    confirmDevice,
-    forgetDevice,
+    tokens,
+    updateDeviceStatus,
   } = usePasswordless();
+  const [showRememberDevice, setShowRememberDevice] = useState(false);
+
+  // Check if we need to ask the user about remembering this device
+  useEffect(() => {
+    if (tokens?.userConfirmationNecessary) {
+      setShowRememberDevice(true);
+    }
+  }, [tokens]);
+
+  // Handle user's choice about remembering the device
+  const handleRememberDevice = async (remember) => {
+    if (tokens?.deviceKey && tokens?.accessToken) {
+      await updateDeviceStatus({
+        accessToken: tokens.accessToken,
+        deviceKey: tokens.deviceKey,
+        deviceRememberedStatus: remember ? "remembered" : "not_remembered",
+      });
+      setShowRememberDevice(false);
+    }
+  };
 
   // For TOTP MFA setup
   const { setupStatus, secretCode, qrCodeUrl, beginSetup, verifySetup } =
     useTotpMfa();
 
   if (signInStatus === "SIGNED_IN") {
-    return <Dashboard />;
+    return (
+      <div>
+        <Dashboard />
+
+        {/* Device remembering prompt */}
+        {showRememberDevice && (
+          <div className="remember-device-prompt">
+            <p>
+              Do you want to remember this device? You won't need MFA next time.
+            </p>
+            <button onClick={() => handleRememberDevice(true)}>
+              Yes, remember
+            </button>
+            <button onClick={() => handleRememberDevice(false)}>
+              No, don't remember
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -130,8 +166,6 @@ function YourApp() {
           authenticateWithSRP({
             username: form.username.value,
             password: form.password.value,
-            // Use saved device key for faster authentication
-            deviceKey,
           });
         }}
       >
@@ -176,10 +210,10 @@ const { signedIn } = await authenticateWithSRP({
 
 ### Device Authentication Flow
 
-The device authentication flow eliminates the need for MFA on subsequent sign-ins from the same device:
+Device authentication allows users to bypass MFA on subsequent sign-ins from the same device. The library handles most of this automatically:
 
 ```javascript
-// 1. User signs in with SRP or plaintext password
+// 1. User signs in with SRP or another method
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "securePassword123",
@@ -188,43 +222,32 @@ const { signedIn } = await authenticateWithSRP({
 // 2. Wait for the sign-in to complete
 const tokens = await signedIn;
 
-// 3. If the sign-in response includes new device metadata, register the device
-if (tokens.newDeviceMetadata?.deviceKey) {
-  // Store device key for future authentications
-  localStorage.setItem("deviceKey", tokens.newDeviceMetadata.deviceKey);
+// 3. Check if the user needs to be asked about remembering the device
+if (tokens.userConfirmationNecessary) {
+  // Ask the user if they want to remember this device
+  const rememberDevice = confirm(
+    "Remember this device? You won't need MFA next time."
+  );
 
-  // Generate SRP salt and verifier for the device
-  const deviceVerifierConfig = generateDeviceVerifier();
-
-  // 4. Confirm the device with server
-  const result = await confirmDevice("My Device", deviceVerifierConfig);
-
-  // 5. If user confirmation is required, mark as remembered (this step is handled by the library)
-  if (result.UserConfirmationNecessary) {
-    await updateDeviceStatus({
-      deviceKey: tokens.newDeviceMetadata.deviceKey,
-      deviceRememberedStatus: "remembered",
-    });
-  }
+  // Update device status based on user's choice
+  await updateDeviceStatus({
+    accessToken: tokens.accessToken,
+    deviceKey: tokens.deviceKey,
+    deviceRememberedStatus: rememberDevice ? "remembered" : "not_remembered",
+  });
 }
 
-// 6. On subsequent sign-ins, include the device key
-const { signedIn } = await authenticateWithSRP({
-  username: "user@example.com",
-  password: "securePassword123",
-  deviceKey: localStorage.getItem("deviceKey"),
-});
-
-// 7. When using a remembered device, Cognito will send DEVICE_SRP_AUTH challenge
-// instead of MFA challenge, which the library handles automatically
+// 4. On subsequent sign-ins, the library automatically uses the remembered device
+// and handles the DEVICE_SRP_AUTH challenge instead of requiring MFA
 ```
 
-When a user signs in with a remembered device:
+How device authentication works:
 
-1. The library includes the device key in the authentication request
-2. Amazon Cognito sends a DEVICE_SRP_AUTH challenge instead of an MFA challenge
-3. The library automatically responds to the device challenge
-4. The user is signed in without needing to provide an additional MFA code
+1. **Device Confirmation** (automatic): When a user signs in on a new device, the library automatically registers the device with Cognito.
+
+2. **Device Remembering** (user choice): Your app should ask users if they want to remember the device when `tokens.userConfirmationNecessary` is true.
+
+3. **Subsequent Sign-ins**: On remembered devices, users bypass MFA automatically.
 
 ### TOTP MFA Setup
 
@@ -274,20 +297,12 @@ await confirmForgotPassword({
 // 3. User can now sign in with the new password
 ```
 
-## Documentation
-
-For more detailed documentation about the available API methods and components, check the client source code.
-
-## License
-
-Apache-2.0
-
 ## Configuration
 
 Configure the following properties:
 
 ```typescript
-import { configure } from "amazon-cognito-passwordless-auth";
+import { configure } from "@joinmeow/cognito-passwordless-auth";
 
 configure({
   clientId: "...",
@@ -299,3 +314,11 @@ configure({
   useGetTokensFromRefreshToken: false, // (default: false)
 });
 ```
+
+## Documentation
+
+For more detailed documentation about the available API methods and components, check the client source code.
+
+## License
+
+Apache-2.0
