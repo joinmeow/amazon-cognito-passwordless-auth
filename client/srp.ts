@@ -394,3 +394,13 @@ export function authenticateWithSRP({
     abort: () => abort.abort(),
   };
 }
+
+// Helper functions that need to be exported
+export {
+  modPow,
+  getConstants,
+  padHex,
+  hexToArrayBuffer,
+  arrayBufferToHex,
+  arrayBufferToBigInt,
+};
