@@ -23,6 +23,7 @@ import {
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
 import { bufferFromBase64, bufferToBase64 } from "./util.js";
+import { isDeviceRemembered } from "./storage.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {
@@ -330,14 +331,25 @@ export function authenticateWithSRP({
 
       // Include device key in challenge response if available
       const challengeResponses: Record<string, string> = {
-        USERNAME: username,
+        USERNAME: userIdForSrp,
         PASSWORD_CLAIM_SECRET_BLOCK: secretBlockB64,
         TIMESTAMP: timestamp,
         PASSWORD_CLAIM_SIGNATURE: passwordClaimSignature,
       };
 
+      // Only include the device key if it's remembered
       if (deviceKey) {
-        challengeResponses.DEVICE_KEY = deviceKey;
+        const remembered = await isDeviceRemembered(deviceKey);
+        if (remembered) {
+          debug?.(
+            `Including remembered device key in authentication: ${deviceKey}`
+          );
+          challengeResponses.DEVICE_KEY = deviceKey;
+        } else {
+          debug?.(
+            `Device key exists but is not remembered, skipping: ${deviceKey}`
+          );
+        }
       }
 
       const authResult = await respondToAuthChallenge({

@@ -164,3 +164,54 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     deviceKey,
   };
 }
+
+/**
+ * Store device remembered status
+ * @param deviceKey The device key
+ * @param isRemembered Whether the device should be remembered
+ */
+export async function storeDeviceRememberedStatus(
+  deviceKey: string,
+  isRemembered: boolean
+) {
+  if (!deviceKey) return;
+  const { clientId, storage, debug } = configure();
+  const deviceRememberedKey = `Passwordless.${clientId}.deviceRemembered.${deviceKey}`;
+  debug?.(`Setting device ${deviceKey} remembered status: ${isRemembered}`);
+  await storage.setItem(deviceRememberedKey, isRemembered.toString());
+}
+
+/**
+ * Check if a device is remembered
+ * @param deviceKey The device key to check
+ * @returns Whether the device is remembered
+ */
+export async function isDeviceRemembered(deviceKey?: string): Promise<boolean> {
+  if (!deviceKey) return false;
+  const { clientId, storage } = configure();
+  const deviceRememberedKey = `Passwordless.${clientId}.deviceRemembered.${deviceKey}`;
+  const remembered = await storage.getItem(deviceRememberedKey);
+  return remembered === "true";
+}
+
+/**
+ * Store whether MFA was used during this authentication
+ * @param used Whether MFA was used
+ */
+export async function storeMfaUsedInAuth(used: boolean) {
+  const { clientId, storage, debug } = configure();
+  const mfaUsedKey = `Passwordless.${clientId}.mfaUsedInAuth`;
+  debug?.(`Setting MFA used in auth: ${used}`);
+  await storage.setItem(mfaUsedKey, used.toString());
+}
+
+/**
+ * Check if MFA was used during this authentication
+ * @returns Whether MFA was used
+ */
+export async function wasMfaUsedInAuth(): Promise<boolean> {
+  const { clientId, storage } = configure();
+  const mfaUsedKey = `Passwordless.${clientId}.mfaUsedInAuth`;
+  const used = await storage.getItem(mfaUsedKey);
+  return used === "true";
+}

@@ -24,6 +24,7 @@ import {
   padHex,
 } from "./srp.js";
 import { TokensFromSignIn } from "./model.js";
+import { storeDeviceKey, storeDeviceRememberedStatus } from "./storage.js";
 import { confirmDevice } from "./cognito-api.js";
 
 // Helper function to get device info for naming
@@ -76,7 +77,13 @@ export async function handleDeviceConfirmation(
 
   const deviceKey = tokens.newDeviceMetadata.deviceKey;
   const deviceGroupKey = tokens.newDeviceMetadata.deviceGroupKey;
-  debug?.("Confirming device with metadata:", tokens.newDeviceMetadata);
+  debug?.(
+    "Device metadata received:",
+    JSON.stringify({
+      deviceKey,
+      deviceGroupKey,
+    })
+  );
 
   if (!tokens.accessToken) {
     throw new Error("Missing access token required for device confirmation");
@@ -151,7 +158,7 @@ export async function handleDeviceConfirmation(
       deviceSecretVerifierConfig: deviceVerifierConfig,
     });
 
-    debug?.("Device confirmation result:", result);
+    debug?.("Device confirmation successful, result:", JSON.stringify(result));
 
     // Note whether user confirmation is necessary
     if (result.UserConfirmationNecessary) {
@@ -164,6 +171,10 @@ export async function handleDeviceConfirmation(
 
     // Set the deviceKey in the tokens
     tokens.deviceKey = deviceKey;
+
+    // Store the device key and remembered status
+    await storeDeviceKey(deviceKey);
+    await storeDeviceRememberedStatus(deviceKey, !result.UserConfirmationNecessary);
 
     debug?.("Device confirmation completed successfully");
     return {

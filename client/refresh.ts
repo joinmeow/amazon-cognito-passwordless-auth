@@ -14,7 +14,11 @@
  */
 import { configure } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import { retrieveTokens, TokensFromStorage } from "./storage.js";
+import {
+  retrieveTokens,
+  TokensFromStorage,
+  isDeviceRemembered,
+} from "./storage.js";
 import { initiateAuth, getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
@@ -148,7 +152,10 @@ async function _refreshTokens({
       // Use the new GetTokensFromRefreshToken API
       const authResult = await getTokensFromRefreshToken({
         refreshToken,
-        deviceKey,
+        deviceKey:
+          deviceKey && (await isDeviceRemembered(deviceKey))
+            ? deviceKey
+            : undefined,
         abort,
       }).catch((err) => {
         invalidRefreshTokens.add(refreshToken);
@@ -178,8 +185,15 @@ async function _refreshTokens({
 
       // Add device key to auth parameters if available
       if (deviceKey) {
-        debug?.("Including device key in refresh token flow");
-        authParameters.DEVICE_KEY = deviceKey;
+        const remembered = await isDeviceRemembered(deviceKey);
+        if (remembered) {
+          debug?.("Including remembered device key in refresh token flow");
+          authParameters.DEVICE_KEY = deviceKey;
+        } else {
+          debug?.(
+            "Device key exists but is not remembered, skipping in refresh flow"
+          );
+        }
       }
 
       const authResult = await initiateAuth({

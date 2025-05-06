@@ -16,6 +16,7 @@ import { parseJwtPayload, throwIfNot2xx, bufferToBase64 } from "./util.js";
 import { configure, MinimalResponse } from "./config.js";
 import { retrieveTokens } from "./storage.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
+import { storeMfaUsedInAuth } from "./storage.js";
 
 const AWS_REGION_REGEXP = /^[a-z]{2}-[a-z]+-\d$/;
 
@@ -924,6 +925,8 @@ export async function handleAuthResponse({
         debug?.("Using device key from device handler:", deviceKey);
       }
 
+      await storeMfaUsedInAuth(false);
+
       return {
         idToken: authResponse.AuthenticationResult.IdToken,
         accessToken: authResponse.AuthenticationResult.AccessToken,
@@ -948,6 +951,8 @@ export async function handleAuthResponse({
     if (authResponse.ChallengeName === "SMS_MFA") {
       if (!smsMfaCode) throw new Error("Missing MFA Code");
       responseParameters.SMS_MFA_CODE = await smsMfaCode();
+      // Flag that MFA was used in this authentication
+      await storeMfaUsedInAuth(true);
     } else if (authResponse.ChallengeName === "NEW_PASSWORD_REQUIRED") {
       if (!newPassword) throw new Error("Missing new password");
       responseParameters.NEW_PASSWORD = await newPassword();
@@ -958,6 +963,8 @@ export async function handleAuthResponse({
     } else if (authResponse.ChallengeName === "SOFTWARE_TOKEN_MFA") {
       if (!otpMfaCode) throw new Error("Missing Software MFA Code");
       responseParameters.SOFTWARE_TOKEN_MFA_CODE = await otpMfaCode();
+      // Flag that MFA was used in this authentication
+      await storeMfaUsedInAuth(true);
     } else if (authResponse.ChallengeName === "DEVICE_SRP_AUTH") {
       if (!deviceHandler)
         throw new Error("Missing device handler for DEVICE_SRP_AUTH");

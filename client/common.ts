@@ -14,7 +14,7 @@
  */
 import { revokeToken } from "./cognito-api.js";
 import { configure } from "./config.js";
-import { retrieveTokens, storeTokens, storeDeviceKey } from "./storage.js";
+import { retrieveTokens, storeTokens, storeDeviceKey, isDeviceRemembered, storeDeviceRememberedStatus, wasMfaUsedInAuth } from "./storage.js";
 import {
   TokensFromRefresh,
   TokensFromSignIn,
@@ -50,15 +50,32 @@ export async function processTokens(
 
     // Complete device confirmation if this is a sign-in (has accessToken)
     if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
-      // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
-      tokens = await handleDeviceConfirmation(tokens);
+      // Only confirm device if MFA was used in this authentication flow
+      const mfaUsed = await wasMfaUsedInAuth();
+      if (mfaUsed) {
+        debug?.("MFA was used in authentication, proceeding with device confirmation");
+        // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
+        tokens = await handleDeviceConfirmation(tokens);
+      } else {
+        debug?.("MFA was not used in authentication, skipping device confirmation");
+        // Still set the deviceKey in tokens but don't confirm or remember the device
+        tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
+      }
     } else {
       // Set the deviceKey field in tokens
       tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
 
       // Store the device key separately for persistence
       await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
+      
+      // By default, device is not remembered unless explicitly confirmed
+      // through MFA and handleDeviceConfirmation
+      await storeDeviceRememberedStatus(tokens.newDeviceMetadata.deviceKey, false);
     }
+  } else if (tokens.deviceKey) {
+    // If we have a device key but no new metadata, check if it's remembered
+    const remembered = await isDeviceRemembered(tokens.deviceKey);
+    debug?.(`Using existing device key ${tokens.deviceKey}, remembered: ${remembered}`);
   }
   // We only confirm devices when NewDeviceMetadata is provided by Cognito
   // Never attempt to generate a device key or confirm without explicit metadata
