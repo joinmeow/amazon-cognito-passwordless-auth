@@ -30,9 +30,9 @@ function getDeviceName(): string {
   if (typeof navigator === "undefined") {
     return "Unknown Device";
   }
-  
+
   const ua = navigator.userAgent;
-  
+
   // Get OS type
   let os = "Unknown";
   if (ua.includes("iPhone")) os = "iPhone";
@@ -41,14 +41,14 @@ function getDeviceName(): string {
   else if (ua.includes("Windows")) os = "Windows";
   else if (ua.includes("Mac")) os = "Mac";
   else if (ua.includes("Linux")) os = "Linux";
-  
+
   // Get browser type
   let browser = "";
   if (ua.includes("Chrome") && !ua.includes("Edg")) browser = "Chrome";
   else if (ua.includes("Firefox")) browser = "Firefox";
   else if (ua.includes("Safari") && !ua.includes("Chrome")) browser = "Safari";
   else if (ua.includes("Edg")) browser = "Edge";
-  
+
   return browser ? `${os} ${browser}` : os;
 }
 
