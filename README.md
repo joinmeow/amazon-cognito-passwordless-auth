@@ -243,11 +243,13 @@ if (tokens.userConfirmationNecessary) {
 
 How device authentication works:
 
-1. **Device Confirmation** (automatic): When a user signs in on a new device, the library automatically registers the device with Cognito.
+1. **Device Confirmation** (automatic): When a user signs in with MFA on a new device, the library automatically registers the device with Cognito.
 
 2. **Device Remembering** (user choice): Your app should ask users if they want to remember the device when `tokens.userConfirmationNecessary` is true.
 
 3. **Subsequent Sign-ins**: On remembered devices, users bypass MFA automatically.
+
+Important: Device confirmation now only happens when MFA is used during authentication. This ensures that device authentication maintains proper security by only allowing devices to be remembered after the user has successfully completed an MFA challenge.
 
 ### TOTP MFA Setup
 

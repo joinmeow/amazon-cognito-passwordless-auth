@@ -188,11 +188,13 @@ When a user signs in for the first time on a new device, this library automatica
 
 The device authentication flow has two distinct steps:
 
-1. **Device Confirmation** (automatic): When a user signs in on a new device, the library:
+1. **Device Confirmation** (automatic): When a user signs in with MFA on a new device, the library:
 
    - Detects the `NewDeviceMetadata` from Cognito
    - Automatically registers the device with Cognito using the `ConfirmDevice` API
    - Returns a `userConfirmationNecessary` flag to indicate if user input is needed
+
+   Important: Device confirmation only happens when MFA is used during authentication. This ensures that device authentication maintains proper security by only allowing devices to be remembered after the user has successfully completed an MFA challenge.
 
 2. **Device Remembering** (requires user consent): Based on your User Pool settings, the user may need to be asked if they want to remember the device.
    - If `userConfirmationNecessary` is `true`, your application should ask the user
@@ -203,7 +205,7 @@ Here's a diagram of the flow:
 ```
 ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
 │  User signs │       │   Library   │       │ Application │
-│     in      │──────▶│  confirms   │──────▶│ asks user to│
+│  in with MFA│──────▶│  confirms   │──────▶│ asks user to│
 │             │       │   device    │       │ remember?   │
 └─────────────┘       └─────────────┘       └──────┬──────┘
                                                    │

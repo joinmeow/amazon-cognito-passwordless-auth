@@ -690,7 +690,7 @@ sequenceDiagram
     participant W as Hook (usePasswordless)
     participant A as AWS Cognito
 
-    Note over C,A: After successful authentication
+    Note over C,A: After successful authentication with MFA
     C->>W: Check for newDeviceMetadata in tokens
 
     alt newDeviceMetadata Present
@@ -707,6 +707,8 @@ sequenceDiagram
         Note over C,W: No device confirmation needed
     end
 ```
+
+Important: Device confirmation only happens when MFA is used during authentication. This ensures that device authentication maintains proper security by only allowing devices to be remembered after the user has successfully completed an MFA challenge.
 
 ### Authentication Status Management
 
