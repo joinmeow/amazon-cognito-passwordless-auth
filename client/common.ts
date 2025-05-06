@@ -25,6 +25,33 @@ import {
 import { scheduleRefresh } from "./refresh.js";
 import { bufferToBase64 } from "./util.js";
 
+// Helper function to get device info for naming
+function getDeviceName(): string {
+  if (typeof navigator === "undefined") {
+    return "Unknown Device";
+  }
+  
+  const ua = navigator.userAgent;
+  
+  // Get OS type
+  let os = "Unknown";
+  if (ua.includes("iPhone")) os = "iPhone";
+  else if (ua.includes("iPad")) os = "iPad";
+  else if (ua.includes("Android")) os = "Android";
+  else if (ua.includes("Windows")) os = "Windows";
+  else if (ua.includes("Mac")) os = "Mac";
+  else if (ua.includes("Linux")) os = "Linux";
+  
+  // Get browser type
+  let browser = "";
+  if (ua.includes("Chrome") && !ua.includes("Edg")) browser = "Chrome";
+  else if (ua.includes("Firefox")) browser = "Firefox";
+  else if (ua.includes("Safari") && !ua.includes("Chrome")) browser = "Safari";
+  else if (ua.includes("Edg")) browser = "Edge";
+  
+  return browser ? `${os} ${browser}` : os;
+}
+
 /**
  * Automatically handle device confirmation when NewDeviceMetadata is present in tokens.
  * This should be called after successful authentication when NewDeviceMetadata is available.
@@ -32,12 +59,12 @@ import { bufferToBase64 } from "./util.js";
  * should ask the user if they want to remember the device and call updateDeviceStatus separately.
  *
  * @param tokens The tokens from sign-in that contain NewDeviceMetadata
- * @param deviceName Optional device name, defaults to "My Device"
+ * @param deviceName Optional device name, defaults to auto-detected device type
  * @returns The updated tokens with deviceKey set and a userConfirmationNecessary flag
  */
 export async function handleDeviceConfirmation(
   tokens: TokensFromSignIn,
-  deviceName: string = "My Device"
+  deviceName?: string
 ): Promise<TokensFromSignIn & { userConfirmationNecessary?: boolean }> {
   const { debug, crypto } = configure();
 
@@ -53,6 +80,10 @@ export async function handleDeviceConfirmation(
   if (!tokens.accessToken) {
     throw new Error("Missing access token required for device confirmation");
   }
+
+  // Use provided name or detect device type
+  const finalDeviceName = deviceName || getDeviceName();
+  debug?.("Using device name:", finalDeviceName);
 
   try {
     // Generate a random salt
@@ -75,7 +106,7 @@ export async function handleDeviceConfirmation(
     const result = await confirmDevice({
       accessToken: tokens.accessToken,
       deviceKey,
-      deviceName,
+      deviceName: finalDeviceName,
       deviceSecretVerifierConfig: deviceVerifierConfig,
     });
 
