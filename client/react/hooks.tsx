@@ -35,9 +35,19 @@ import {
   TokensFromStorage,
   retrieveDeviceKey,
   storeDeviceKey,
+  TokensToStore,
 } from "../storage.js";
-import { BusyState, IdleState, busyState } from "../model.js";
-import { scheduleRefresh, refreshTokens } from "../refresh.js";
+import {
+  BusyState,
+  IdleState,
+  busyState,
+  TokensFromRefresh,
+} from "../model.js";
+import {
+  scheduleRefresh,
+  refreshTokens,
+  forceRefreshTokens,
+} from "../refresh.js";
 import {
   CognitoAccessTokenPayload,
   CognitoIdTokenPayload,
@@ -516,6 +526,38 @@ function _usePasswordless() {
           ),
         isRefreshingCb: setIsRefreshingTokens,
       }),
+    /** Force an immediate token refresh regardless of current token state */
+    forceRefreshTokens: (abort?: AbortSignal) =>
+      forceRefreshTokens({
+        abort,
+        tokensCb: (newTokens: TokensFromRefresh) => {
+          if (newTokens) {
+            return storeTokens(newTokens as TokensToStore).then(() =>
+              setTokens((tokens) => ({ ...tokens, ...newTokens }))
+            );
+          }
+          return Promise.resolve();
+        },
+        isRefreshingCb: setIsRefreshingTokens,
+      }),
+    /** Mark the user as active to potentially trigger token refresh */
+    markUserActive: () => {
+      // Schedule a refresh if tokens exist but only if we're not currently refreshing
+      if (tokens && !isRefreshingTokens) {
+        // Using void to properly handle the promise
+        void scheduleRefresh({
+          tokensCb: (newTokens) => {
+            if (newTokens) {
+              return storeTokens(newTokens as TokensToStore).then(() =>
+                setTokens((tokens) => ({ ...tokens, ...newTokens }))
+              );
+            }
+            return Promise.resolve();
+          },
+          isRefreshingCb: setIsRefreshingTokens,
+        });
+      }
+    },
     /** Last error that occured */
     lastError,
     /** The status of the most recent sign-in attempt */

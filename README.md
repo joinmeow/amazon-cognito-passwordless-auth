@@ -314,6 +314,19 @@ configure({
   // Whether to use the new GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN.
   // When true, uses the new API. When false (default), uses the legacy approach.
   useGetTokensFromRefreshToken: false, // (default: false)
+
+  // Token refresh configuration
+  tokenRefresh: {
+    // Time (in milliseconds) after which a user is considered inactive
+    // Default: 30 minutes (1,800,000 ms)
+    inactivityThreshold: 30 * 60 * 1000,
+
+    // Whether to base token refreshes on user activity
+    // When true, tokens are refreshed intelligently based on user interactions
+    // When false, tokens are refreshed based on wall-clock time
+    // Default: true
+    useActivityTracking: true,
+  },
 });
 ```
 
@@ -324,3 +337,38 @@ For more detailed documentation about the available API methods and components, 
 ## License
 
 Apache-2.0
+
+## Token Refresh Configuration
+
+The library provides configurable token refresh behavior to optimize for both security and efficiency:
+
+```javascript
+Passwordless.configure({
+  // ... other configuration options
+
+  // Token refresh configuration
+  tokenRefresh: {
+    // Time (in milliseconds) after which a user is considered inactive
+    // Default: 30 minutes (1,800,000 ms)
+    inactivityThreshold: 30 * 60 * 1000,
+
+    // Whether to base token refreshes on user activity
+    // When true, tokens are refreshed intelligently based on user interactions
+    // When false, tokens are refreshed based on wall-clock time
+    // Default: true
+    useActivityTracking: true,
+  },
+});
+```
+
+### Activity-Based Token Refresh
+
+When `useActivityTracking` is enabled (default), the library will:
+
+1. Track user interactions with the page (mouse, keyboard, touch events)
+2. Refresh tokens more aggressively when the user is actively using the application
+3. Postpone non-critical token refreshes when a user is inactive
+4. Immediately check if a refresh is needed when a user returns to the app
+5. Always refresh tokens before they expire, regardless of activity status
+
+This approach provides a better balance between security, user experience, and resource efficiency. Active users never experience authentication interruptions, while inactive sessions consume fewer resources.

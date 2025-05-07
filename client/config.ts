@@ -39,6 +39,23 @@ export interface Config {
      */
     issuer: string;
   };
+  /** Token refresh configuration */
+  tokenRefresh?: {
+    /**
+     * The time in milliseconds after which a user is considered inactive.
+     * Inactive users may have token refreshes postponed to save resources.
+     * Default: 30 minutes (1,800,000 ms)
+     */
+    inactivityThreshold?: number;
+
+    /**
+     * Whether to base token refreshes on user activity.
+     * When true, tokens are refreshed based on user interactions.
+     * When false, tokens are refreshed based on wall-clock time.
+     * Default: true
+     */
+    useActivityTracking?: boolean;
+  };
   /** FIDO2 (WebAuthn) configuration */
   fido2?: {
     /** The base URL (i.e. the URL with path "/") of your FIDO2 API */
@@ -144,6 +161,11 @@ export function configure(config?: ConfigInput) {
       history: config.history ?? Defaults.history,
       totp: config.totp ?? {
         issuer: "YourApp",
+      },
+      tokenRefresh: {
+        inactivityThreshold:
+          config.tokenRefresh?.inactivityThreshold ?? 30 * 60 * 1000, // 30 minutes
+        useActivityTracking: config.tokenRefresh?.useActivityTracking ?? true,
       },
     };
     config_.debug?.("Configuration loaded:", config);
