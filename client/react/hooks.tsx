@@ -451,26 +451,34 @@ function _usePasswordless() {
   useEffect(() => {
     if (!isSignedIn || !tokens?.accessToken) return;
 
-    const { debug } = configure();
     const abort = new AbortController();
 
+    // Just try to get MFA settings, but don't make a big deal if they're not there
     getUser({ accessToken: tokens.accessToken, abort: abort.signal })
       .then((user) => {
-        if (
-          user &&
-          typeof user === "object" &&
-          "UserMFASettingList" in user &&
-          "PreferredMfaSetting" in user
-        ) {
-          debug?.("Retrieved user MFA settings");
-          setTotpMfaStatus({
-            enabled:
-              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
-            preferred: user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA",
-            availableMfaTypes: user.UserMFASettingList || [],
-          });
-        } else {
-          debug?.("Failed to retrieve MFA settings from user object");
+        try {
+          // If we have a valid user object with MFA settings, use them
+          if (user && typeof user === "object" && !("__type" in user)) {
+            const hasMfa =
+              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false;
+            const preferredMfa =
+              user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
+
+            setTotpMfaStatus({
+              enabled: hasMfa,
+              preferred: preferredMfa,
+              availableMfaTypes: user.UserMFASettingList || [],
+            });
+          } else {
+            // Default to no MFA settings
+            setTotpMfaStatus({
+              enabled: false,
+              preferred: false,
+              availableMfaTypes: [],
+            });
+          }
+        } catch (e) {
+          // Just suppress errors and use default values
           setTotpMfaStatus({
             enabled: false,
             preferred: false,
@@ -478,8 +486,8 @@ function _usePasswordless() {
           });
         }
       })
-      .catch((error) => {
-        debug?.("Error fetching user MFA settings:", error);
+      .catch(() => {
+        // If anything fails, just default to no MFA settings
         setTotpMfaStatus({
           enabled: false,
           preferred: false,
@@ -841,24 +849,37 @@ function _usePasswordless() {
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
       if (!tokens?.accessToken) return;
+
       try {
         const user = await getUser({ accessToken: tokens.accessToken });
-        if (
-          user &&
-          typeof user === "object" &&
-          "UserMFASettingList" in user &&
-          "PreferredMfaSetting" in user
-        ) {
+
+        // Simple approach - if we have a valid user with MFA settings, use them
+        if (user && typeof user === "object" && !("__type" in user)) {
+          const hasMfa =
+            user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false;
+          const preferredMfa =
+            user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
+
           setTotpMfaStatus({
-            enabled:
-              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false,
-            preferred: user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA",
+            enabled: hasMfa,
+            preferred: preferredMfa,
             availableMfaTypes: user.UserMFASettingList || [],
+          });
+        } else {
+          // Default to no MFA
+          setTotpMfaStatus({
+            enabled: false,
+            preferred: false,
+            availableMfaTypes: [],
           });
         }
       } catch (error) {
-        const { debug } = configure();
-        debug?.("Error refreshing TOTP MFA status:", error);
+        // Just default to no MFA on any error
+        setTotpMfaStatus({
+          enabled: false,
+          preferred: false,
+          availableMfaTypes: [],
+        });
       }
     },
   };
@@ -1144,12 +1165,25 @@ export function useTotpMfa() {
   const beginSetup = useCallback(async () => {
     setSetupStatus("GENERATING");
     setErrorMessage(undefined);
+    const { debug } = configure();
 
     try {
+      debug?.("Beginning TOTP MFA setup");
       const result = (await associateSoftwareTokenForCurrentUserApi()) as {
         SecretCode: string;
       };
+
+      // Verify we got a valid secret code back
+      if (!result || !result.SecretCode) {
+        const errorMsg = "Failed to obtain secret code for TOTP setup";
+        debug?.(errorMsg);
+        setErrorMessage(errorMsg);
+        setSetupStatus("ERROR");
+        return null;
+      }
+
       setSecretCode(result.SecretCode);
+      debug?.("Secret code successfully obtained for TOTP MFA");
 
       // Generate QR code URL if we have a username from tokensParsed
       if (tokensParsed?.idToken && result.SecretCode) {
@@ -1162,13 +1196,20 @@ export function useTotpMfa() {
         const issuer = totp?.issuer || "YourApp";
         const url = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(username)}?secret=${encodeURIComponent(result.SecretCode)}&issuer=${encodeURIComponent(issuer)}`;
         setQrCodeUrl(url);
+        debug?.("QR code URL generated successfully");
+      } else {
+        debug?.(
+          "Could not generate QR code URL - missing token or username information"
+        );
       }
 
       setSetupStatus("READY");
       return result;
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      debug?.("Error starting TOTP MFA setup:", errorMsg);
       setSetupStatus("ERROR");
-      setErrorMessage(error instanceof Error ? error.message : String(error));
+      setErrorMessage(errorMsg);
       throw error;
     }
   }, [tokensParsed]);
@@ -1178,27 +1219,53 @@ export function useTotpMfa() {
     async (code: string, deviceName?: string) => {
       setSetupStatus("VERIFYING");
       setErrorMessage(undefined);
+      const { debug } = configure();
 
       try {
+        debug?.(
+          `Verifying TOTP code${deviceName ? ` for device "${deviceName}"` : ""}`
+        );
+
+        if (!code || code.length < 6) {
+          const errorMsg = "Invalid TOTP code format";
+          debug?.(errorMsg);
+          setErrorMessage(errorMsg);
+          setSetupStatus("ERROR");
+          throw new Error(errorMsg);
+        }
+
         const result = (await verifySoftwareTokenForCurrentUserApi({
           userCode: code,
           friendlyDeviceName: deviceName,
         })) as { Status: string };
 
+        debug?.(`TOTP verification result: ${result?.Status || "Unknown"}`);
+
+        if (!result || !result.Status) {
+          const errorMsg = "Verification returned an invalid response";
+          setErrorMessage(errorMsg);
+          setSetupStatus("ERROR");
+          throw new Error(errorMsg);
+        }
+
         setSetupStatus(result.Status === "SUCCESS" ? "VERIFIED" : "ERROR");
 
         if (result.Status !== "SUCCESS") {
-          setErrorMessage(`Verification failed with status: ${result.Status}`);
-          throw new Error(`Verification failed with status: ${result.Status}`);
+          const errorMsg = `Verification failed with status: ${result.Status}`;
+          setErrorMessage(errorMsg);
+          throw new Error(errorMsg);
         }
 
         // Refresh TOTP MFA status after successful verification
+        debug?.("TOTP verification successful, refreshing MFA status");
         await refreshTotpMfaStatus();
 
         return result;
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        debug?.("Error during TOTP verification:", errorMsg);
         setSetupStatus("ERROR");
-        setErrorMessage(error instanceof Error ? error.message : String(error));
+        setErrorMessage(errorMsg);
         throw error;
       }
     },
@@ -1207,6 +1274,8 @@ export function useTotpMfa() {
 
   // Reset the setup process
   const resetSetup = useCallback(() => {
+    const { debug } = configure();
+    debug?.("Resetting TOTP MFA setup state");
     setSecretCode(undefined);
     setQrCodeUrl(undefined);
     setSetupStatus("IDLE");
