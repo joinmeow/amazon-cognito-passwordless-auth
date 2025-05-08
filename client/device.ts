@@ -267,16 +267,20 @@ export async function handleDeviceConfirmation(
 ): Promise<TokensFromSignIn & { userConfirmationNecessary?: boolean }> {
   const { debug, userPoolId } = configure();
 
+  debug?.("🔍 [Device Confirmation] Starting device confirmation process");
+
   // We MUST have newDeviceMetadata with a deviceKey to confirm a device
   if (!tokens.newDeviceMetadata?.deviceKey) {
-    debug?.("No new device metadata present, skipping device confirmation");
+    debug?.(
+      "🔍 [Device Confirmation] No new device metadata present, skipping device confirmation"
+    );
     return tokens;
   }
 
   const deviceKey = tokens.newDeviceMetadata.deviceKey;
   const deviceGroupKey = tokens.newDeviceMetadata.deviceGroupKey;
   debug?.(
-    "Device metadata received:",
+    "🔍 [Device Confirmation] Device metadata received:",
     JSON.stringify({
       deviceKey,
       deviceGroupKey,
@@ -284,24 +288,33 @@ export async function handleDeviceConfirmation(
   );
 
   if (!tokens.accessToken) {
+    debug?.(
+      "❌ [Device Confirmation] Missing access token required for device confirmation"
+    );
     throw new Error("Missing access token required for device confirmation");
   }
 
   if (!userPoolId) {
+    debug?.(
+      "❌ [Device Confirmation] UserPoolId must be configured for device confirmation"
+    );
     throw new Error("UserPoolId must be configured for device confirmation");
   }
 
   // Use provided name or detect device type
   const finalDeviceName = deviceName || getDeviceName();
-  debug?.("Using device name:", finalDeviceName);
+  debug?.("🔍 [Device Confirmation] Using device name:", finalDeviceName);
 
   try {
+    debug?.("🔍 [Device Confirmation] Generating device password");
     // Generate a device password and store it for future device auth
     const devicePassword = await generateDevicePassword();
 
+    debug?.("🔍 [Device Confirmation] Storing device password");
     // Store the device password - we'll need this for device auth later
     await storeDevicePassword(deviceKey, devicePassword);
 
+    debug?.("🔍 [Device Confirmation] Calculating device verifier using SRP");
     // Calculate device verifier using SRP
     const deviceVerifierConfig = await calculateDeviceVerifier(
       tokens.username,
@@ -310,9 +323,17 @@ export async function handleDeviceConfirmation(
       devicePassword
     );
 
-    debug?.("Device verifier config created using SRP calculation");
-    debug?.("Device verifier config:", deviceVerifierConfig);
+    debug?.(
+      "🔍 [Device Confirmation] Device verifier config created using SRP calculation"
+    );
+    debug?.(
+      "🔍 [Device Confirmation] Device verifier config:",
+      deviceVerifierConfig
+    );
 
+    debug?.(
+      "🔍 [Device Confirmation] Calling confirmDevice API with the device key"
+    );
     // Call confirmDevice with the device key
     const result = await confirmDevice({
       accessToken: tokens.accessToken,
@@ -321,20 +342,28 @@ export async function handleDeviceConfirmation(
       deviceSecretVerifierConfig: deviceVerifierConfig,
     });
 
-    debug?.("Device confirmation successful, result:", JSON.stringify(result));
+    debug?.(
+      "✅ [Device Confirmation] Device confirmation successful, result:",
+      JSON.stringify(result)
+    );
 
     // Note whether user confirmation is necessary
     if (result.UserConfirmationNecessary) {
       debug?.(
-        "User confirmation necessary for device. Application should ask user if they want to remember this device."
+        "🔍 [Device Confirmation] User confirmation necessary for device. Application should ask user if they want to remember this device."
       );
     } else {
-      debug?.("Device automatically remembered based on user pool settings.");
+      debug?.(
+        "🔍 [Device Confirmation] Device automatically remembered based on user pool settings."
+      );
     }
 
     // Set the deviceKey in the tokens
     tokens.deviceKey = deviceKey;
 
+    debug?.(
+      "🔍 [Device Confirmation] Storing device key and remembered status"
+    );
     // Store the device key and remembered status
     await storeDeviceKey(deviceKey);
     await storeDeviceRememberedStatus(
@@ -342,13 +371,18 @@ export async function handleDeviceConfirmation(
       !result.UserConfirmationNecessary
     );
 
-    debug?.("Device confirmation completed successfully");
+    debug?.(
+      "✅ [Device Confirmation] Device confirmation completed successfully"
+    );
     return {
       ...tokens,
       userConfirmationNecessary: result.UserConfirmationNecessary,
     };
   } catch (error) {
-    debug?.("Error during device confirmation:", error);
+    debug?.(
+      "❌ [Device Confirmation] Error during device confirmation:",
+      error
+    );
     // If device confirmation fails, we still set the deviceKey on the tokens object
     // for the current session, but DON'T store it in persistent storage
     // as it may be invalid for future authentication attempts

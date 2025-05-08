@@ -50,9 +50,14 @@ export async function processTokens(
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
   const { debug } = configure();
 
+  debug?.("🔄 [Process Tokens] Starting token processing after authentication");
+
   // 1. Process device confirmation if needed
   if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
-    debug?.("Detected new device metadata with device key");
+    debug?.(
+      "🔄 [Process Tokens] Detected new device metadata with device key:",
+      tokens.newDeviceMetadata.deviceKey
+    );
 
     // Complete device confirmation if this is a sign-in (has accessToken)
     if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
@@ -60,12 +65,25 @@ export async function processTokens(
       // The purpose of device confirmation is to prepare for future MFA bypass,
       // not to require MFA for confirmation
       debug?.(
-        "Proceeding with device confirmation after successful authentication"
+        "🔄 [Process Tokens] Proceeding with device confirmation after successful authentication"
       );
 
-      // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
-      tokens = await handleDeviceConfirmation(tokens);
+      try {
+        // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
+        tokens = await handleDeviceConfirmation(tokens);
+        debug?.(
+          "✅ [Process Tokens] Device confirmation completed in processTokens"
+        );
+      } catch (err) {
+        debug?.(
+          "❌ [Process Tokens] Error during device confirmation in processTokens:",
+          err
+        );
+      }
     } else {
+      debug?.(
+        "🔄 [Process Tokens] Setting deviceKey without full device confirmation (no accessToken)"
+      );
       // Set the deviceKey field in tokens
       tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
 
@@ -83,19 +101,23 @@ export async function processTokens(
     // If we have a device key but no new metadata, check if it's remembered
     const remembered = await isDeviceRemembered(tokens.deviceKey);
     debug?.(
-      `Using existing device key ${tokens.deviceKey}, remembered: ${remembered}`
+      `🔄 [Process Tokens] Using existing device key ${tokens.deviceKey}, remembered: ${remembered}`
     );
+  } else {
+    debug?.("🔄 [Process Tokens] No device key available in tokens");
   }
   // We only confirm devices when NewDeviceMetadata is provided by Cognito
   // Never attempt to generate a device key or confirm without explicit metadata
 
   // 2. Store tokens for persistence
+  debug?.("🔄 [Process Tokens] Storing tokens for persistence");
   await storeTokens(tokens);
 
   // 3. Schedule refresh if we have a refresh token
   // But only if this is NOT a fresh login (indicated by newDeviceMetadata)
   // This prevents immediate refresh scheduling right after login
   if (tokens.refreshToken && !("newDeviceMetadata" in tokens)) {
+    debug?.("🔄 [Process Tokens] Scheduling token refresh (not a fresh login)");
     scheduleRefresh({
       abort,
       tokensCb: (newTokens) => {
@@ -105,16 +127,19 @@ export async function processTokens(
         return Promise.resolve();
       },
     }).catch((err) => {
-      debug?.("Failed to schedule token refresh:", err);
+      debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
     });
   } else if (tokens.refreshToken) {
     // For fresh logins, we'll still schedule a refresh but with a significant delay
     // This ensures tokens don't expire while the user is active, but doesn't cause
     // immediate refreshes after login
-    debug?.("Fresh login detected, deferring token refresh scheduling");
+    debug?.(
+      "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
+    );
 
     // Delay scheduling by 2 minutes to avoid multiple refreshes during app initialization
     setTimeout(() => {
+      debug?.("🔄 [Process Tokens] Executing delayed token refresh schedule");
       scheduleRefresh({
         abort,
         tokensCb: (newTokens) => {
@@ -122,11 +147,19 @@ export async function processTokens(
           return Promise.resolve();
         },
       }).catch((err) => {
-        debug?.("Failed to schedule delayed token refresh:", err);
+        debug?.(
+          "❌ [Process Tokens] Failed to schedule delayed token refresh:",
+          err
+        );
       });
     }, 120000); // 2 minutes delay
+  } else {
+    debug?.(
+      "🔄 [Process Tokens] No refresh token available, skipping refresh scheduling"
+    );
   }
 
+  debug?.("✅ [Process Tokens] Token processing completed successfully");
   return tokens;
 }
 

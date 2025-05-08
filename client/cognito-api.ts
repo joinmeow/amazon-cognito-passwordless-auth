@@ -1617,35 +1617,48 @@ export async function confirmDevice({
   };
   abort?: AbortSignal;
 }) {
-  const { fetch, cognitoIdpEndpoint, proxyApiHeaders } = configure();
+  const { fetch, cognitoIdpEndpoint, proxyApiHeaders, debug } = configure();
 
-  return fetch(
-    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
-      : cognitoIdpEndpoint,
-    {
-      headers: {
-        "x-amz-target": "AWSCognitoIdentityProviderService.ConfirmDevice",
-        "content-type": "application/x-amz-json-1.1",
-        ...proxyApiHeaders,
-      },
-      method: "POST",
-      body: JSON.stringify({
-        AccessToken: accessToken,
-        DeviceKey: deviceKey,
-        ...(deviceName && { DeviceName: deviceName }),
-        DeviceSecretVerifierConfig: {
-          PasswordVerifier: deviceSecretVerifierConfig.passwordVerifier,
-          Salt: deviceSecretVerifierConfig.salt,
+  debug?.("📱 [Confirm Device] Initiating device confirmation API call");
+  debug?.("📱 [Confirm Device] Device key:", deviceKey);
+  debug?.("📱 [Confirm Device] Device name:", deviceName || "Not provided");
+
+  try {
+    const response = await fetch(
+      cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+        ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+        : cognitoIdpEndpoint,
+      {
+        headers: {
+          "x-amz-target": "AWSCognitoIdentityProviderService.ConfirmDevice",
+          "content-type": "application/x-amz-json-1.1",
+          ...proxyApiHeaders,
         },
-      }),
-      signal: abort,
-    }
-  )
-    .then(throwIfNot2xx)
-    .then(
-      (res) => res.json() as Promise<{ UserConfirmationNecessary: boolean }>
+        method: "POST",
+        body: JSON.stringify({
+          AccessToken: accessToken,
+          DeviceKey: deviceKey,
+          DeviceSecretVerifierConfig: {
+            PasswordVerifier: deviceSecretVerifierConfig.passwordVerifier,
+            Salt: deviceSecretVerifierConfig.salt,
+          },
+          ...(deviceName && { DeviceName: deviceName }),
+        }),
+        signal: abort,
+      }
     );
+
+    const json = await throwIfNot2xx(response);
+    assertIsNotErrorResponse(json);
+
+    debug?.("✅ [Confirm Device] Device confirmation API call successful");
+    debug?.("📱 [Confirm Device] Response:", JSON.stringify(json));
+
+    return json as { UserConfirmationNecessary?: boolean };
+  } catch (error) {
+    debug?.("❌ [Confirm Device] Device confirmation API call failed:", error);
+    throw error;
+  }
 }
 
 /**
