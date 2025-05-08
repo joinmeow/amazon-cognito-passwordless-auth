@@ -36,12 +36,14 @@ import {
   retrieveDeviceKey,
   storeDeviceKey,
   TokensToStore,
+  storeDeviceRememberedStatus,
 } from "../storage.js";
 import {
   BusyState,
   IdleState,
   busyState,
   TokensFromRefresh,
+  TokensFromSignIn,
 } from "../model.js";
 import {
   scheduleRefresh,
@@ -780,6 +782,7 @@ function _usePasswordless() {
       smsMfaCode,
       otpMfaCode,
       clientMetadata,
+      rememberDevice,
     }: {
       /**
        * Username, or alias (e-mail, phone number)
@@ -789,6 +792,14 @@ function _usePasswordless() {
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
       clientMetadata?: Record<string, string>;
+      /**
+       * Provide a callback that resolves to "true" if the user elected to remember
+       * this device (e.g. after entering the MFA code). The function is only invoked
+       * **after** Cognito tells us `UserConfirmationNecessary === true`.
+       * Similar to `otpMfaCode`, returning a promise lets you prompt the user
+       * during the authentication flow.
+       */
+      rememberDevice?: () => Promise<boolean>;
     }) => {
       const { debug } = configure();
       debug?.("Starting SRP authentication process");
@@ -818,7 +829,7 @@ function _usePasswordless() {
             setFido2Credentials(undefined);
           }
         },
-        tokensCb: (newTokens) => {
+        tokensCb: (newTokens: TokensFromSignIn) => {
           // Just update component state - processTokens handles storage and refresh
           setTokens(newTokens);
 
@@ -828,6 +839,49 @@ function _usePasswordless() {
           );
           setAuthMethod("SRP");
           setFido2Credentials(undefined);
+
+          // Ensure device key is updated if present
+          if (newTokens.deviceKey) {
+            setDeviceKey(newTokens.deviceKey);
+          }
+
+          // Force sign-in status update after setting tokens
+          setSigninInStatus("SIGNED_IN_WITH_SRP_PASSWORD");
+
+          // After successful authentication, handle remembered device flag if provided
+          if (
+            rememberDevice &&
+            typeof rememberDevice === "function" &&
+            newTokens.userConfirmationNecessary &&
+            newTokens.deviceKey &&
+            newTokens.accessToken
+          ) {
+            (async () => {
+              try {
+                const shouldRemember = await rememberDevice();
+                if (!shouldRemember) {
+                  debug?.("User opted NOT to remember this device");
+                  return;
+                }
+                const dKey = newTokens.deviceKey!;
+                const accTok = newTokens.accessToken!;
+                debug?.(`Automatically remembering device ${dKey}`);
+                await updateDeviceStatus({
+                  accessToken: accTok,
+                  deviceKey: dKey,
+                  deviceRememberedStatus: "remembered",
+                });
+
+                // Persist remembered status locally as well
+                await storeDeviceRememberedStatus(dKey, true);
+              } catch (err) {
+                debug?.(
+                  "Failed to automatically update device remembered status:",
+                  err
+                );
+              }
+            })();
+          }
         },
         clientMetadata: clientMetadata,
       });
@@ -855,6 +909,7 @@ function _usePasswordless() {
       smsMfaCode,
       otpMfaCode,
       clientMetadata,
+      rememberDevice,
     }: {
       /**
        * Username, or alias (e-mail, phone number)
@@ -864,6 +919,7 @@ function _usePasswordless() {
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
       clientMetadata?: Record<string, string>;
+      rememberDevice?: () => Promise<boolean>;
     }) => {
       setLastError(undefined);
       setAuthMethod("PLAINTEXT");
@@ -874,7 +930,38 @@ function _usePasswordless() {
         otpMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) => setTokens(newTokens),
+        tokensCb: (newTokens: TokensFromSignIn) => {
+          setTokens(newTokens);
+
+          // If rememberDevice callback requested and Cognito needs confirmation
+          if (
+            rememberDevice &&
+            typeof rememberDevice === "function" &&
+            newTokens.userConfirmationNecessary &&
+            newTokens.deviceKey &&
+            newTokens.accessToken
+          ) {
+            (async () => {
+              try {
+                const shouldRemember = await rememberDevice();
+                if (!shouldRemember) return;
+                const dKey = newTokens.deviceKey!;
+                const accTok = newTokens.accessToken!;
+                const { debug } = configure();
+                debug?.(`Automatically remembering device ${dKey} (PLAINTEXT)`);
+                await updateDeviceStatus({
+                  accessToken: accTok,
+                  deviceKey: dKey,
+                  deviceRememberedStatus: "remembered",
+                });
+                await storeDeviceRememberedStatus(dKey, true);
+              } catch (err) {
+                const { debug } = configure();
+                debug?.("Failed to remember device automatically:", err);
+              }
+            })();
+          }
+        },
       });
       signinIn.signedIn.catch((error: Error) => setLastError(error));
       return signinIn;
