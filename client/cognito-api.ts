@@ -498,43 +498,146 @@ export async function getTokensFromRefreshToken({
 
   // Add optional parameters if provided
   if (deviceKey) {
+    debug?.(`Including device key in refresh token request: ${deviceKey}`);
     requestBody.DeviceKey = deviceKey;
   }
 
   if (clientMetadata) {
+    debug?.(
+      `Including client metadata in refresh token request: ${JSON.stringify(clientMetadata)}`
+    );
     requestBody.ClientMetadata = clientMetadata;
   }
 
   if (clientSecret) {
+    debug?.(
+      `Including client secret in refresh token request (length: ${clientSecret.length})`
+    );
     requestBody.ClientSecret = clientSecret;
   }
 
-  const response = await fetch(
-    cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
-      : cognitoIdpEndpoint,
-    {
-      signal: abort,
-      headers: {
-        "x-amz-target":
-          "AWSCognitoIdentityProviderService.GetTokensFromRefreshToken",
-        "content-type": "application/x-amz-json-1.1",
-        ...proxyApiHeaders,
-      },
-      method: "POST",
-      body: JSON.stringify(requestBody),
-    }
+  debug?.(`Requesting tokens from endpoint: ${cognitoIdpEndpoint}`);
+  debug?.(
+    `Request body structure: ${JSON.stringify({
+      hasClientId: !!clientId,
+      refreshTokenLength: refreshToken.length,
+      hasDeviceKey: !!deviceKey,
+      hasClientMetadata: !!clientMetadata,
+      hasClientSecret: !!clientSecret,
+    })}`
   );
 
-  const json = await throwIfNot2xx(response);
-  assertIsNotErrorResponse(json);
+  try {
+    const response = await fetch(
+      cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
+        ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+        : cognitoIdpEndpoint,
+      {
+        signal: abort,
+        headers: {
+          "x-amz-target":
+            "AWSCognitoIdentityProviderService.GetTokensFromRefreshToken",
+          "content-type": "application/x-amz-json-1.1",
+          ...proxyApiHeaders,
+        },
+        method: "POST",
+        body: JSON.stringify(requestBody),
+      }
+    );
 
-  // Ensure we have a valid AuthenticationResult
-  if (!json || typeof json !== "object" || !("AuthenticationResult" in json)) {
-    throw new Error("Invalid response from GetTokensFromRefreshToken");
+    // Parse response JSON
+    const resOk = await throwIfNot2xx(response);
+    const json = await resOk.json();
+
+    assertIsNotErrorResponse(json);
+
+    // Ensure we have a valid AuthenticationResult
+    if (!json || typeof json !== "object") {
+      debug?.(`Invalid response - not an object: ${typeof json}`);
+      throw new Error("Invalid response from GetTokensFromRefreshToken");
+    }
+
+    if (!("AuthenticationResult" in json)) {
+      debug?.(
+        `Invalid response - missing AuthenticationResult property. Keys: ${Object.keys(json).join(", ")}`
+      );
+      throw new Error("Invalid response from GetTokensFromRefreshToken");
+    }
+
+    // Explicitly validate and construct a properly typed response
+    const authResult = json.AuthenticationResult as {
+      AccessToken: string;
+      IdToken: string;
+      RefreshToken?: string;
+      ExpiresIn: number;
+      TokenType: string;
+      NewDeviceMetadata?: {
+        DeviceKey: string;
+        DeviceGroupKey: string;
+      };
+    };
+
+    if (!authResult.AccessToken || typeof authResult.AccessToken !== "string") {
+      debug?.(`Invalid response - missing or invalid AccessToken`);
+      throw new Error(
+        "Invalid response from GetTokensFromRefreshToken: missing AccessToken"
+      );
+    }
+
+    if (!authResult.IdToken || typeof authResult.IdToken !== "string") {
+      debug?.(`Invalid response - missing or invalid IdToken`);
+      throw new Error(
+        "Invalid response from GetTokensFromRefreshToken: missing IdToken"
+      );
+    }
+
+    if (!authResult.ExpiresIn || typeof authResult.ExpiresIn !== "number") {
+      debug?.(`Invalid response - missing or invalid ExpiresIn`);
+      throw new Error(
+        "Invalid response from GetTokensFromRefreshToken: missing ExpiresIn"
+      );
+    }
+
+    if (!authResult.TokenType || typeof authResult.TokenType !== "string") {
+      debug?.(`Invalid response - missing or invalid TokenType`);
+      throw new Error(
+        "Invalid response from GetTokensFromRefreshToken: missing TokenType"
+      );
+    }
+
+    // Create a properly typed response object
+    const typedResponse: GetTokensFromRefreshTokenResponse = {
+      AuthenticationResult: {
+        AccessToken: authResult.AccessToken,
+        IdToken: authResult.IdToken,
+        RefreshToken: authResult.RefreshToken,
+        ExpiresIn: authResult.ExpiresIn,
+        TokenType: authResult.TokenType,
+        NewDeviceMetadata: authResult.NewDeviceMetadata,
+      },
+    };
+
+    debug?.(
+      `AuthenticationResult structure: ${JSON.stringify({
+        hasAccessToken: !!authResult.AccessToken,
+        hasIdToken: !!authResult.IdToken,
+        hasRefreshToken: !!authResult.RefreshToken,
+        hasExpiresIn: !!authResult.ExpiresIn,
+        hasTokenType: !!authResult.TokenType,
+        hasNewDeviceMetadata: !!authResult.NewDeviceMetadata,
+      })}`
+    );
+
+    return typedResponse;
+  } catch (error) {
+    debug?.(
+      `Error in getTokensFromRefreshToken: ${error instanceof Error ? error.message : String(error)}`
+    );
+    debug?.(
+      `Error stack: ${error instanceof Error ? error.stack : "No stack available"}`
+    );
+    throw error;
   }
-
-  return json as GetTokensFromRefreshTokenResponse;
 }
 
 export async function getId({
@@ -1712,8 +1815,10 @@ export async function confirmDevice({
       }
     );
 
-    // Use throwIfNot2xx to handle non-2xx status codes
-    const json = await throwIfNot2xx(response);
+    // Parse response JSON
+    const resOk = await throwIfNot2xx(response);
+    const json = await resOk.json();
+
     assertIsNotErrorResponse(json);
 
     debug?.("✅ [Confirm Device] Device confirmation API call successful");
