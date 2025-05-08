@@ -918,6 +918,9 @@ export async function handleAuthResponse({
 }) {
   const { debug } = configure();
 
+  // IMPORTANT: Log the username being used for challenges
+  debug?.(`Using username "${username}" for all auth challenges`);
+
   for (;;) {
     if (isAuthenticatedResponse(authResponse)) {
       let deviceKey: string | undefined = undefined;
@@ -967,6 +970,11 @@ export async function handleAuthResponse({
     } else if (authResponse.ChallengeName === "SOFTWARE_TOKEN_MFA") {
       if (!otpMfaCode) throw new Error("Missing Software MFA Code");
       responseParameters.SOFTWARE_TOKEN_MFA_CODE = await otpMfaCode();
+
+      // Log the MFA challenge response
+      debug?.(
+        `Responding to SOFTWARE_TOKEN_MFA challenge with USERNAME "${username}"`
+      );
     } else if (authResponse.ChallengeName === "DEVICE_SRP_AUTH") {
       // Get challenge parameters
       const srpB = authResponse.ChallengeParameters.SRP_B;
@@ -1066,7 +1074,7 @@ export async function handleAuthResponse({
     const nextAuthResult = await respondToAuthChallenge({
       challengeName: authResponse.ChallengeName,
       challengeResponses: {
-        USERNAME: username,
+        USERNAME: username, // Always use the same username (USER_ID_FOR_SRP) from the initial auth
         ...responseParameters,
       },
       clientMetadata,
@@ -1623,7 +1631,71 @@ export async function confirmDevice({
   debug?.("📱 [Confirm Device] Device key:", deviceKey);
   debug?.("📱 [Confirm Device] Device name:", deviceName || "Not provided");
 
+  // Validate device key format before making the API call
+  if (!deviceKey.includes("_")) {
+    debug?.(
+      "❌ [Confirm Device] Invalid device key format (missing underscore):",
+      deviceKey
+    );
+    throw new Error("Invalid device key format: missing region_uuid format");
+  }
+
+  const [region, uuid] = deviceKey.split("_");
+  if (!region || !uuid) {
+    debug?.("❌ [Confirm Device] Device key missing region or UUID part");
+    throw new Error("Invalid device key: missing region or UUID part");
+  }
+
+  // Check that UUID looks like a valid UUID (basic validation)
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      uuid
+    )
+  ) {
+    debug?.(
+      "❌ [Confirm Device] Device key contains invalid UUID format:",
+      uuid
+    );
+    throw new Error("Invalid device key: UUID part has invalid format");
+  }
+
+  // Log verifier details for debugging
+  debug?.(
+    "📱 [Confirm Device] Password verifier length:",
+    deviceSecretVerifierConfig.passwordVerifier.length
+  );
+  debug?.(
+    "📱 [Confirm Device] Salt length:",
+    deviceSecretVerifierConfig.salt.length
+  );
+
   try {
+    debug?.(
+      "📱 [Confirm Device] Sending API request to ConfirmDevice endpoint"
+    );
+
+    const requestBody = {
+      AccessToken: accessToken,
+      DeviceKey: deviceKey,
+      DeviceSecretVerifierConfig: {
+        PasswordVerifier: deviceSecretVerifierConfig.passwordVerifier,
+        Salt: deviceSecretVerifierConfig.salt,
+      },
+      ...(deviceName && { DeviceName: deviceName }),
+    };
+
+    debug?.(
+      "📱 [Confirm Device] Request structure:",
+      JSON.stringify({
+        hasAccessToken: !!accessToken,
+        accessTokenLength: accessToken.length,
+        deviceKey,
+        hasDeviceName: !!deviceName,
+        verifierLength: deviceSecretVerifierConfig.passwordVerifier.length,
+        saltLength: deviceSecretVerifierConfig.salt.length,
+      })
+    );
+
     const response = await fetch(
       cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
         ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
@@ -1635,19 +1707,12 @@ export async function confirmDevice({
           ...proxyApiHeaders,
         },
         method: "POST",
-        body: JSON.stringify({
-          AccessToken: accessToken,
-          DeviceKey: deviceKey,
-          DeviceSecretVerifierConfig: {
-            PasswordVerifier: deviceSecretVerifierConfig.passwordVerifier,
-            Salt: deviceSecretVerifierConfig.salt,
-          },
-          ...(deviceName && { DeviceName: deviceName }),
-        }),
+        body: JSON.stringify(requestBody),
         signal: abort,
       }
     );
 
+    // Use throwIfNot2xx to handle non-2xx status codes
     const json = await throwIfNot2xx(response);
     assertIsNotErrorResponse(json);
 
@@ -1657,6 +1722,11 @@ export async function confirmDevice({
     return json as { UserConfirmationNecessary?: boolean };
   } catch (error) {
     debug?.("❌ [Confirm Device] Device confirmation API call failed:", error);
+
+    // Add detailed error message
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    debug?.("❌ [Confirm Device] Error details:", errorMessage);
+
     throw error;
   }
 }

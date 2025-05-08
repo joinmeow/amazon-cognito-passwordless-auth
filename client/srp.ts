@@ -314,6 +314,12 @@ export function authenticateWithSRP({
         SECRET_BLOCK: secretBlockB64,
         USER_ID_FOR_SRP: userIdForSrp,
       } = challenge.ChallengeParameters;
+
+      // CRITICAL: Store the USER_ID_FOR_SRP value to use throughout the entire auth flow
+      debug?.(
+        `Using USER_ID_FOR_SRP (${userIdForSrp}) for all authentication challenges`
+      );
+
       const { passwordClaimSignature, timestamp } = await calculateSrpSignature(
         {
           smallA,
@@ -330,7 +336,7 @@ export function authenticateWithSRP({
 
       // Include device key in challenge response if available
       const challengeResponses: Record<string, string> = {
-        USERNAME: userIdForSrp,
+        USERNAME: userIdForSrp, // Use userIdForSrp instead of the original username
         PASSWORD_CLAIM_SECRET_BLOCK: secretBlockB64,
         TIMESTAMP: timestamp,
         PASSWORD_CLAIM_SIGNATURE: passwordClaimSignature,
@@ -353,9 +359,10 @@ export function authenticateWithSRP({
       debug?.(`Response from respondToAuthChallenge:`, authResult);
 
       // Handle any authentication challenges
+      // Pass userIdForSrp instead of original username to fix device confirmation
       const tokens = await handleAuthResponse({
         authResponse: authResult,
-        username,
+        username: userIdForSrp, // Use userIdForSrp instead of the original username
         smsMfaCode,
         otpMfaCode,
         newPassword,

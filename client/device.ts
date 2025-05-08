@@ -287,6 +287,32 @@ export async function handleDeviceConfirmation(
     })
   );
 
+  // Validate device key format
+  if (!deviceKey.includes("_")) {
+    debug?.(
+      "❌ [Device Confirmation] Invalid device key format (missing underscore): " +
+        deviceKey
+    );
+    // Just return tokens without attempting confirmation
+    tokens.deviceKey = deviceKey;
+    return tokens;
+  }
+
+  // Extract and validate the region and UUID parts
+  const [region, uuid] = deviceKey.split("_");
+  debug?.(
+    "🔍 [Device Confirmation] Device key components: region=" +
+      region +
+      ", uuid=" +
+      uuid
+  );
+
+  if (!region || !uuid) {
+    debug?.("❌ [Device Confirmation] Device key missing region or UUID part");
+    tokens.deviceKey = deviceKey;
+    return tokens;
+  }
+
   if (!tokens.accessToken) {
     debug?.(
       "❌ [Device Confirmation] Missing access token required for device confirmation"
@@ -334,6 +360,17 @@ export async function handleDeviceConfirmation(
     debug?.(
       "🔍 [Device Confirmation] Calling confirmDevice API with the device key"
     );
+    debug?.(
+      `🔍 [Device Confirmation] Access token length: ${tokens.accessToken.length}`
+    );
+    debug?.(`🔍 [Device Confirmation] Request details: 
+      - deviceKey: ${deviceKey}
+      - deviceName: ${finalDeviceName}
+      - passwordVerifier length: ${deviceVerifierConfig.passwordVerifier.length}
+      - salt length: ${deviceVerifierConfig.salt.length}
+      - username: ${tokens.username}
+    `);
+
     // Call confirmDevice with the device key
     const result = await confirmDevice({
       accessToken: tokens.accessToken,
@@ -383,6 +420,8 @@ export async function handleDeviceConfirmation(
       "❌ [Device Confirmation] Error during device confirmation:",
       error
     );
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    debug?.(`❌ [Device Confirmation] Error details: ${errorMsg}`);
     // If device confirmation fails, we still set the deviceKey on the tokens object
     // for the current session, but DON'T store it in persistent storage
     // as it may be invalid for future authentication attempts
