@@ -501,8 +501,6 @@ async function verifyDeviceSrp({
   });
 
   return {
-    deviceGroupKey,
-    srpAHex,
     passwordVerifier: passwordClaimSignature,
     passwordClaimSecretBlock: secretBlock,
     timestamp,

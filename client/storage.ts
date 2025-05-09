@@ -275,3 +275,31 @@ export async function retrieveDevicePassword(
   const password = await storage.getItem(devicePasswordKey);
   return password || undefined;
 }
+
+/**
+ * Store the device group key so it can be used during DEVICE_PASSWORD_VERIFIER.
+ * The key is stored per-deviceKey and persists across sessions/logouts.
+ */
+export async function storeDeviceGroupKey(
+  deviceKey: string,
+  deviceGroupKey: string
+) {
+  if (!deviceKey || !deviceGroupKey) return;
+  const { clientId, storage, debug } = configure();
+  const key = `Passwordless.${clientId}.deviceGroupKey.${deviceKey}`;
+  debug?.(`Storing device group key for device ${deviceKey}: ${deviceGroupKey}`);
+  await storage.setItem(key, deviceGroupKey);
+}
+
+/**
+ * Retrieve the stored device group key for a given device key.
+ */
+export async function retrieveDeviceGroupKey(
+  deviceKey?: string
+): Promise<string | undefined> {
+  if (!deviceKey) return undefined;
+  const { clientId, storage } = configure();
+  const key = `Passwordless.${clientId}.deviceGroupKey.${deviceKey}`;
+  const val = await storage.getItem(key);
+  return val || undefined;
+}

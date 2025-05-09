@@ -1126,9 +1126,6 @@ export async function handleAuthResponse({
         authResponse.ChallengeParameters.SALT
       );
       responseParameters.DEVICE_KEY = currentDeviceHandler.deviceKey;
-
-      // Add the response parameters from SRP calculation
-      responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
       responseParameters.PASSWORD_CLAIM_SIGNATURE =
         deviceSrpResult.passwordVerifier;
       responseParameters.PASSWORD_CLAIM_SECRET_BLOCK =

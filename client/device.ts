@@ -38,6 +38,8 @@ import {
   storeDeviceRememberedStatus,
   storeDevicePassword,
   retrieveDevicePassword,
+  storeDeviceGroupKey,
+  retrieveDeviceGroupKey,
 } from "./storage.js";
 import { confirmDevice } from "./cognito-api.js";
 
@@ -137,8 +139,6 @@ async function calculateDeviceVerifier(
 
 // Result of SRP calculations for a device challenge
 export interface DeviceSrpAuthResult {
-  deviceGroupKey: string;
-  srpAHex: string;
   passwordVerifier: string;
   passwordClaimSecretBlock: string;
   timestamp: string;
@@ -171,7 +171,7 @@ export async function createDeviceSrpAuthHandler(
     }
   | undefined
 > {
-  const { debug, crypto } = configure();
+  const { debug } = configure();
 
   // Retrieve the device password - without this, we can't do device auth
   const devicePassword = await retrieveDevicePassword(deviceKey);
@@ -182,8 +182,13 @@ export async function createDeviceSrpAuthHandler(
     return undefined;
   }
 
-  // The device group key is typically the first part of the device key
-  const deviceGroupKey = deviceKey.split("_")[0];
+  // Prefer the stored deviceGroupKey; fall back to deriving from deviceKey if
+  // not yet stored (older sessions).
+  let deviceGroupKey = await retrieveDeviceGroupKey(deviceKey);
+  if (!deviceGroupKey) {
+    debug?.("❌ [Device SRP] No device group key stored for device key ${deviceKey}, cannot create SRP handler");
+    return undefined;
+  }
 
   // state kept between the two steps
   let smallA = generateSmallA();
@@ -311,6 +316,9 @@ export async function handleDeviceConfirmation(
   debug?.("🔍 [Device Confirmation] Using device name:", finalDeviceName);
 
   try {
+    debug?.("🔍 [Device Confirmation] Storing device group key");
+    await storeDeviceGroupKey(deviceKey, deviceGroupKey);
+
     debug?.("🔍 [Device Confirmation] Generating device password");
     // Generate a device password and store it for future device auth
     const devicePassword = await generateDevicePassword();
