@@ -23,6 +23,7 @@ import {
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
 import { bufferFromBase64, bufferToBase64 } from "./util.js";
+import { retrieveDeviceKey } from "./storage.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {
@@ -290,6 +291,13 @@ export function authenticateWithSRP({
   const signedIn = (async () => {
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
+
+      // Ensure we have a device key. If none was provided by the caller yet, try
+      // to load it from storage so that remembered-device auth works even when
+      // the hook's `deviceKey` state hasn't been hydrated before the user
+      // clicks the sign-in button.
+      const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
+
       const smallA = generateSmallA();
       const largeAHex = await calculateLargeAHex(smallA);
       debug?.(`Invoking initiateAuth ...`);
@@ -303,7 +311,7 @@ export function authenticateWithSRP({
           CHALLENGE_NAME: "SRP_A",
         },
         clientMetadata,
-        deviceKey,
+        deviceKey: actualDeviceKey,
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, challenge);
@@ -344,9 +352,9 @@ export function authenticateWithSRP({
 
       // Include the device key if it's available, regardless of remembered status
       // AWS documentation indicates the device key should be provided if available
-      if (deviceKey) {
-        debug?.(`Including device key in authentication: ${deviceKey}`);
-        challengeResponses.DEVICE_KEY = deviceKey;
+      if (actualDeviceKey) {
+        debug?.(`Including device key in authentication: ${actualDeviceKey}`);
+        challengeResponses.DEVICE_KEY = actualDeviceKey;
       }
 
       const authResult = await respondToAuthChallenge({

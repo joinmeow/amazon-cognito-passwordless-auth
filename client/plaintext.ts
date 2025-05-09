@@ -20,6 +20,7 @@ import {
   isAuthenticatedResponse,
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
+import { retrieveDeviceKey } from "./storage.js";
 
 export function authenticateWithPlaintextPassword({
   username,
@@ -57,6 +58,12 @@ export function authenticateWithPlaintextPassword({
   const signedIn = (async () => {
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
+
+      // Ensure we have a device key. If none was supplied, attempt to load it
+      // from storage so remembered-device auth works even if the caller didn't
+      // provide one.
+      const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
+
       debug?.(`Invoking initiateAuth ...`);
 
       // Create auth parameters with optional device key
@@ -65,15 +72,15 @@ export function authenticateWithPlaintextPassword({
         PASSWORD: password,
       };
 
-      if (deviceKey) {
-        authParameters.DEVICE_KEY = deviceKey;
-        debug?.(`Including device key in authentication: ${deviceKey}`);
+      if (actualDeviceKey) {
+        authParameters.DEVICE_KEY = actualDeviceKey;
+        debug?.(`Including device key in authentication: ${actualDeviceKey}`);
       }
 
       const authResponse = await initiateAuth({
         authflow: "USER_PASSWORD_AUTH",
         authParameters,
-        deviceKey, // Also pass device key to the initiateAuth function
+        deviceKey: actualDeviceKey, // Also pass device key to the initiateAuth function
         clientMetadata,
         abort: abort.signal,
       });
