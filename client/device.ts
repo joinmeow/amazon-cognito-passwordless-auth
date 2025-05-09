@@ -14,7 +14,11 @@
  */
 import { configure } from "./config.js";
 
-import { bufferToBase64, bufferFromBase64, bufferFromBase64Url } from "./util.js";
+import {
+  bufferToBase64,
+  bufferFromBase64,
+  bufferFromBase64Url,
+} from "./util.js";
 import {
   modPow,
   getConstants,
@@ -22,6 +26,7 @@ import {
   arrayBufferToHex,
   arrayBufferToBigInt,
   padHex,
+  formatDate,
 } from "./srp.js";
 import { TokensFromSignIn } from "./model.js";
 import {
@@ -187,7 +192,11 @@ export async function createDeviceSrpAuthHandler(
       const aBytes = new Uint8Array(128);
       crypto.getRandomValues(aBytes);
       smallA = arrayBufferToBigInt(aBytes) % (await getConstants()).N;
-      const A = modPow((await getConstants()).g, smallA, (await getConstants()).N);
+      const A = modPow(
+        (await getConstants()).g,
+        smallA,
+        (await getConstants()).N
+      );
       srpAHexCache = padHex(A.toString(16));
       debug?.("🚀 [Device SRP] Generated SRP_A", srpAHexCache.slice(0, 40));
       return { srpAHex: srpAHexCache };
@@ -198,7 +207,7 @@ export async function createDeviceSrpAuthHandler(
       }
       // Reuse helper but inject pre-computed smallA & srpAHex
       // We'll call generateDevicePasswordVerifier but need biga? we changed earlier doesn't take smallA param.
-    
+
       const result = await generateDevicePasswordVerifier({
         deviceGroupKey,
         deviceKey,
@@ -401,7 +410,8 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
     b64 += "===".slice(0, (4 - (b64.length % 4)) % 4);
   }
 
-  return (hasUrlSafeChars ? bufferFromBase64Url(b64) : bufferFromBase64(b64)).buffer;
+  return (hasUrlSafeChars ? bufferFromBase64Url(b64) : bufferFromBase64(b64))
+    .buffer;
 }
 
 /**
@@ -488,8 +498,8 @@ async function generateDevicePasswordVerifier({
   const SHex = padHex(S.toString(16));
   const K = await crypto.subtle.digest("SHA-256", hexToArrayBuffer(SHex));
 
-  // 7. Timestamp (same format used in normal SRP helper)
-  const timestamp = new Date().toISOString();
+  // 7. Timestamp in Cognito SRP format: EEE MMM d HH:mm:ss z yyyy
+  const timestamp = formatDate(new Date());
 
   // 8. Build message and signature
   const message = deviceGroupKey + deviceKey + secretBlock + timestamp;

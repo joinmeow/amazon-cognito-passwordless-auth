@@ -428,4 +428,5 @@ export {
   hexToArrayBuffer,
   arrayBufferToHex,
   arrayBufferToBigInt,
+  formatDate,
 };
