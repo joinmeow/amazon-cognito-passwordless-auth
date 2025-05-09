@@ -126,6 +126,15 @@ async function calculateDeviceVerifier(
   };
 }
 
+// Result of SRP calculations for a device challenge
+export interface DeviceSrpAuthResult {
+  deviceGroupKey: string;
+  srpAHex: string;
+  passwordVerifier: string;
+  passwordClaimSecretBlock: string;
+  timestamp: string;
+}
+
 /**
  * Create a device handler for SRP authentication with a device
  * Used for DEVICE_SRP_AUTH and DEVICE_PASSWORD_VERIFIER challenges
@@ -139,12 +148,7 @@ export async function createDeviceSrpAuthHandler(
       handleDeviceSrpAuth: (
         srpB: string,
         secretBlock: string
-      ) => Promise<{
-        deviceGroupKey: string;
-        passwordVerifier: string;
-        passwordClaimSecretBlock: string;
-        timestamp: string;
-      }>;
+      ) => Promise<DeviceSrpAuthResult>;
     }
   | undefined
 > {
@@ -186,13 +190,22 @@ export async function createDeviceSrpAuthHandler(
 
         // Calculate A = g^a % N
         const A = modPow(g, a, N);
+        const srpAHex = padHex(A.toString(16));
 
-        // Convert srpB from base64 to BigInt
-        const B = BigInt(`0x${arrayBufferToHex(base64ToArrayBuffer(srpB))}`);
+        // SRP_B can be provided either as a hex string (common) or as base64.
+        // Detect format and convert accordingly.
+        let B: bigint;
+        if (/^[0-9a-fA-F]+$/.test(srpB)) {
+          // Hex-encoded
+          B = BigInt(`0x${srpB}`);
+        } else {
+          // Assume base64
+          B = BigInt(`0x${arrayBufferToHex(base64ToArrayBuffer(srpB))}`);
+        }
 
         // Calculate u = H(A | B)
         const dataToHash = await new Blob([
-          hexToArrayBuffer(padHex(A.toString(16))),
+          hexToArrayBuffer(padHex(srpAHex)),
           hexToArrayBuffer(padHex(B.toString(16))),
         ]).arrayBuffer();
 
@@ -240,6 +253,7 @@ export async function createDeviceSrpAuthHandler(
 
         return {
           deviceGroupKey,
+          srpAHex,
           passwordVerifier,
           passwordClaimSecretBlock: secretBlock,
           timestamp,

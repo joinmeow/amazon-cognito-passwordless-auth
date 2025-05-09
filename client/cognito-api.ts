@@ -16,7 +16,7 @@ import { parseJwtPayload, throwIfNot2xx, bufferToBase64 } from "./util.js";
 import { configure, MinimalResponse } from "./config.js";
 import { retrieveTokens } from "./storage.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
-import { createDeviceSrpAuthHandler } from "./device.js";
+import { createDeviceSrpAuthHandler, DeviceSrpAuthResult } from "./device.js";
 
 const AWS_REGION_REGEXP = /^[a-z]{2}-[a-z]+-\d$/;
 
@@ -1009,12 +1009,7 @@ export async function handleAuthResponse({
     handleDeviceSrpAuth: (
       srpB: string,
       secretBlock: string
-    ) => Promise<{
-      deviceGroupKey: string;
-      passwordVerifier: string;
-      passwordClaimSecretBlock: string;
-      timestamp: string;
-    }>;
+    ) => Promise<DeviceSrpAuthResult>;
   };
   clientMetadata?: Record<string, string>;
   abort?: AbortSignal;
@@ -1118,6 +1113,7 @@ export async function handleAuthResponse({
       }
 
       // Add the response parameters from SRP calculation
+      responseParameters.SRP_A = deviceSrpResult.srpAHex;
       responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
       responseParameters.PASSWORD_CLAIM_SIGNATURE =
         deviceSrpResult.passwordVerifier;
