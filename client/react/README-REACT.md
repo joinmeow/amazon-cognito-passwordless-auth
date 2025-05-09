@@ -885,22 +885,22 @@ The React hook includes support for MFA and remembered devices:
 function Login() {
   const { authenticateWithSRP } = usePasswordless();
   const [loading, setLoading] = useState(false);
-  
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
-    
+
     try {
       const { signedIn } = await authenticateWithSRP({
         username: e.target.username.value,
         password: e.target.password.value,
-        // For users with MFA enabled, this provides a callback for 
+        // For users with MFA enabled, this provides a callback for
         // the SMS or TOTP code
         otpMfaCode: async () => {
           // You can use any UI component to collect this
           return prompt("Enter your MFA code:");
         },
-        // If device confirmation is needed after MFA, this decides 
+        // If device confirmation is needed after MFA, this decides
         // whether to remember the device
         // NOTE: rememberDevice is ONLY called if MFA was validated successfully
         rememberDevice: async () => {
@@ -909,25 +909,25 @@ function Login() {
           );
         },
       });
-      
+
       // signedIn won't resolve until the entire authentication flow is complete,
       // including any MFA validation and device remembering process
       const tokens = await signedIn;
-      
+
       // Now you can redirect to the dashboard or protected area
-      router.push('/dashboard');
+      router.push("/dashboard");
     } catch (error) {
-      console.error('Authentication error:', error);
+      console.error("Authentication error:", error);
     } finally {
       setLoading(false);
     }
   };
-  
+
   return (
     <form onSubmit={handleSubmit}>
       {/* Login form fields */}
       <button type="submit" disabled={loading}>
-        {loading ? 'Signing in...' : 'Sign in'}
+        {loading ? "Signing in..." : "Sign in"}
       </button>
     </form>
   );
@@ -937,6 +937,7 @@ function Login() {
 ### Important Notes about Remember Device Flow
 
 1. **When the callback is invoked**: The `rememberDevice` callback is only invoked when:
+
    - A user successfully completes MFA authentication (specifically TOTP or SMS)
    - Cognito indicates that user confirmation is necessary for the device
    - **The callback will NEVER be invoked for non-MFA sign-ins**
@@ -945,8 +946,7 @@ function Login() {
 2. **Promise resolution**: The main `signedIn` promise won't resolve until:
    - The `rememberDevice` callback returns (with true or false)
    - If true, the `updateDeviceStatus` API call completes successfully
-   
-3. **Error handling**: Any errors in the `rememberDevice` flow will be caught and logged, 
+3. **Error handling**: Any errors in the `rememberDevice` flow will be caught and logged,
    but they won't prevent authentication from completing.
 
 ## Understanding the Hook Implementation
@@ -962,20 +962,20 @@ The authentication methods like `authenticateWithSRP` and `authenticateWithPlain
 tokensCb: async (newTokens: TokensFromSignIn) => {
   // Set tokens first
   setTokens(newTokens);
-  
+
   // Then handle the device remembering if necessary
-  if (rememberDevice && 
-      typeof rememberDevice === "function" && 
+  if (rememberDevice &&
+      typeof rememberDevice === "function" &&
       newTokens.userConfirmationNecessary) {
     try {
       const shouldRemember = await rememberDevice();
-      
-      if (shouldRemember && 
-          newTokens.deviceKey && 
+
+      if (shouldRemember &&
+          newTokens.deviceKey &&
           newTokens.accessToken) {
         // Call Cognito to update device status
         await updateDeviceStatus({...});
-        
+
         // Update local storage to match
         await storeDeviceRememberedStatus(dKey, true);
       }
@@ -1024,6 +1024,7 @@ This isolation ensures that:
 The hook uses several advanced state management patterns:
 
 1. **State Derivation**: The `signInStatus` is derived from multiple state variables
+
    ```javascript
    const signInStatus = useMemo(() => {
      // Logic to derive overall status from multiple state variables
@@ -1031,10 +1032,11 @@ The hook uses several advanced state management patterns:
    ```
 
 2. **State Wrapping**: The `setTokens` function is wrapped to automatically update parsed tokens
+
    ```javascript
    const setTokens: typeof _setTokens = useCallback((reactSetStateAction) => {
      _setTokens((prevState) => {
-       const newTokens = 
+       const newTokens =
          typeof reactSetStateAction === "function"
            ? reactSetStateAction(prevState)
            : reactSetStateAction;

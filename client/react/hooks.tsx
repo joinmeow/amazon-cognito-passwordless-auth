@@ -875,10 +875,7 @@ function _usePasswordless() {
                 debug?.("User opted NOT to remember this device");
               }
             } catch (err) {
-              debug?.(
-                "Failed while handling rememberDevice callback:",
-                err
-              );
+              debug?.("Failed while handling rememberDevice callback:", err);
             }
           }
         },
