@@ -18,8 +18,7 @@ import {
   retrieveTokens,
   storeTokens,
   storeDeviceKey,
-  isDeviceRemembered,
-  storeDeviceRememberedStatus,
+  getRememberedDevice,
 } from "./storage.js";
 import {
   TokensFromRefresh,
@@ -84,22 +83,12 @@ export async function processTokens(
       debug?.(
         "🔄 [Process Tokens] Setting deviceKey without full device confirmation (no accessToken)"
       );
-      // Set the deviceKey field in tokens
-      tokens.deviceKey = tokens.newDeviceMetadata.deviceKey;
-
-      // Store the device key separately for persistence
-      await storeDeviceKey(tokens.newDeviceMetadata.deviceKey);
-
-      // By default, device is not remembered unless explicitly confirmed
-      // through handleDeviceConfirmation
-      await storeDeviceRememberedStatus(
-        tokens.newDeviceMetadata.deviceKey,
-        false
-      );
+      // Persist deviceKey for convenience; remembering decision happens later
+      await storeDeviceKey(tokens.username, tokens.newDeviceMetadata.deviceKey);
     }
   } else if (tokens.deviceKey) {
-    // If we have a device key but no new metadata, check if it's remembered
-    const remembered = await isDeviceRemembered(tokens.deviceKey);
+    const record = await getRememberedDevice(tokens.username);
+    const remembered = record?.remembered ?? false;
     debug?.(
       `🔄 [Process Tokens] Using existing device key ${tokens.deviceKey}, remembered: ${remembered}`
     );

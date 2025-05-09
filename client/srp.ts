@@ -170,10 +170,7 @@ async function calculateSrpSignature({
 
   const xBuf = await crypto.subtle.digest(
     "SHA-256",
-    await new Blob([
-      hexToArrayBuffer(padHex(salt)),
-      identityHash,
-    ]).arrayBuffer()
+    await new Blob([hexToArrayBuffer(padHex(salt)), identityHash]).arrayBuffer()
   );
 
   // ---- 3. shared secret (S) ----
@@ -339,22 +336,10 @@ export function authenticateWithSRP({
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
 
-      // Ensure we have a device key. If none was provided by the caller yet, try
-      // to load it from storage so that remembered-device auth works even when
-      // the hook's `deviceKey` state hasn't been hydrated before the user
-      // clicks the sign-in button.
-      const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
-
-      // Pre-create a device SRP handler if we already have a key & password
-      const deviceHandler = actualDeviceKey
-        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
-        : undefined;
-
       const smallA = generateSmallA();
       const largeAHex = await calculateLargeAHex(smallA);
-      debug?.(`Invoking initiateAuth ...`);
+      debug?.(`Invoking initiateAuth without device key...`);
 
-      // Include device key in auth if available
       const challenge = await initiateAuth({
         authflow: "USER_SRP_AUTH",
         authParameters: {
@@ -363,7 +348,6 @@ export function authenticateWithSRP({
           CHALLENGE_NAME: "SRP_A",
         },
         clientMetadata,
-        deviceKey: actualDeviceKey,
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, challenge);
@@ -379,6 +363,16 @@ export function authenticateWithSRP({
       debug?.(
         `Using USER_ID_FOR_SRP (${userIdForSrp}) for all authentication challenges`
       );
+
+      // Now that we have initiated auth and have userIdForSrp, we can retrieve the device key
+      // for this specific user
+      const actualDeviceKey =
+        deviceKey ?? (await retrieveDeviceKey(userIdForSrp));
+
+      // Pre-create a device SRP handler if we have a device key
+      const deviceHandler = actualDeviceKey
+        ? await createDeviceSrpAuthHandler(userIdForSrp, actualDeviceKey)
+        : undefined;
 
       const { passwordClaimSignature, timestamp } = await calculateSrpSignature(
         {

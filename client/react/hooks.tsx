@@ -32,11 +32,11 @@ import { configure } from "../config.js";
 import {
   retrieveTokens,
   storeTokens,
-  TokensFromStorage,
-  retrieveDeviceKey,
   storeDeviceKey,
+  getRememberedDevice,
+  setRememberedDevice,
+  TokensFromStorage,
   TokensToStore,
-  storeDeviceRememberedStatus,
 } from "../storage.js";
 import {
   BusyState,
@@ -288,18 +288,6 @@ function _usePasswordless() {
         debug?.("Failed to retrieve tokens from storage:", err);
       })
       .finally(() => setInitiallyRetrievingTokensFromStorage(false));
-
-    // Also try to load device key separately
-    retrieveDeviceKey()
-      .then((key) => {
-        if (key) {
-          setDeviceKey(key);
-        }
-      })
-      .catch((err) => {
-        const { debug } = configure();
-        debug?.("Failed to retrieve device key from storage:", err);
-      });
   }, [setTokens]);
 
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
@@ -633,7 +621,7 @@ function _usePasswordless() {
       }
 
       // Ensure device key is stored in persistent storage
-      await storeDeviceKey(deviceKey);
+      await storeDeviceKey(tokens.username, deviceKey);
 
       return result;
     },
@@ -869,8 +857,15 @@ function _usePasswordless() {
                   deviceKey: dKey,
                   deviceRememberedStatus: "remembered",
                 });
-                await storeDeviceRememberedStatus(dKey, true);
-                debug?.(`Device ${dKey} remembered`);
+
+                // Update local remembered flag
+                const rec = await getRememberedDevice(newTokens.username);
+                if (rec && rec.deviceKey === dKey) {
+                  await setRememberedDevice(newTokens.username, {
+                    ...rec,
+                    remembered: true,
+                  });
+                }
               } else {
                 debug?.("User opted NOT to remember this device");
               }
@@ -951,7 +946,15 @@ function _usePasswordless() {
                   deviceKey: dKey,
                   deviceRememberedStatus: "remembered",
                 });
-                await storeDeviceRememberedStatus(dKey, true);
+
+                // Update local remembered flag
+                const rec = await getRememberedDevice(newTokens.username);
+                if (rec && rec.deviceKey === dKey) {
+                  await setRememberedDevice(newTokens.username, {
+                    ...rec,
+                    remembered: true,
+                  });
+                }
               }
             } catch (err) {
               const { debug } = configure();

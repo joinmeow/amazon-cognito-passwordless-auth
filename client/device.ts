@@ -14,11 +14,7 @@
  */
 import { configure } from "./config.js";
 
-import {
-  bufferToBase64,
-  bufferFromBase64,
-  bufferFromBase64Url,
-} from "./util.js";
+import { bufferToBase64 } from "./util.js";
 import {
   modPow,
   getConstants,
@@ -26,20 +22,15 @@ import {
   arrayBufferToHex,
   arrayBufferToBigInt,
   padHex,
-  formatDate,
   generateSmallA,
   calculateLargeAHex,
-  calculateSrpSignature,
   verifyDeviceSrp,
 } from "./srp.js";
 import { TokensFromSignIn } from "./model.js";
 import {
   storeDeviceKey,
-  storeDeviceRememberedStatus,
-  storeDevicePassword,
-  retrieveDevicePassword,
-  storeDeviceGroupKey,
-  retrieveDeviceGroupKey,
+  setRememberedDevice,
+  getRememberedDevice,
 } from "./storage.js";
 import { confirmDevice } from "./cognito-api.js";
 
@@ -173,25 +164,18 @@ export async function createDeviceSrpAuthHandler(
 > {
   const { debug } = configure();
 
-  // Retrieve the device password - without this, we can't do device auth
-  const devicePassword = await retrieveDevicePassword(deviceKey);
-  if (!devicePassword) {
+  const record = await getRememberedDevice(username);
+  if (!record || record.deviceKey !== deviceKey) {
     debug?.(
-      `No device password stored for device key ${deviceKey}, cannot create SRP handler`
+      `No remembered device record matching device key ${deviceKey} for user ${username}`
     );
     return undefined;
   }
 
-  // Prefer the stored deviceGroupKey; fall back to deriving from deviceKey if
-  // not yet stored (older sessions).
-  let deviceGroupKey = await retrieveDeviceGroupKey(deviceKey);
-  if (!deviceGroupKey) {
-    debug?.("❌ [Device SRP] No device group key stored for device key ${deviceKey}, cannot create SRP handler");
-    return undefined;
-  }
+  const { password: devicePassword, groupKey: deviceGroupKey } = record;
 
   // state kept between the two steps
-  let smallA = generateSmallA();
+  const smallA = generateSmallA();
   let bigAHex: string | undefined;
 
   return {
@@ -316,19 +300,10 @@ export async function handleDeviceConfirmation(
   debug?.("🔍 [Device Confirmation] Using device name:", finalDeviceName);
 
   try {
-    debug?.("🔍 [Device Confirmation] Storing device group key");
-    await storeDeviceGroupKey(deviceKey, deviceGroupKey);
-
     debug?.("🔍 [Device Confirmation] Generating device password");
-    // Generate a device password and store it for future device auth
     const devicePassword = await generateDevicePassword();
 
-    debug?.("🔍 [Device Confirmation] Storing device password");
-    // Store the device password - we'll need this for device auth later
-    await storeDevicePassword(deviceKey, devicePassword);
-
     debug?.("🔍 [Device Confirmation] Calculating device verifier using SRP");
-    // Calculate device verifier using SRP
     const deviceVerifierConfig = await calculateDeviceVerifier(
       tokens.username,
       deviceKey,
@@ -388,12 +363,16 @@ export async function handleDeviceConfirmation(
     debug?.(
       "🔍 [Device Confirmation] Storing device key and remembered status"
     );
-    // Store the device key and remembered status
-    await storeDeviceKey(deviceKey);
-    await storeDeviceRememberedStatus(
+    // Build or replace single remembered-device record for this user
+    await setRememberedDevice(tokens.username, {
       deviceKey,
-      !result.UserConfirmationNecessary
-    );
+      groupKey: deviceGroupKey,
+      password: devicePassword,
+      remembered: !result.UserConfirmationNecessary,
+    });
+
+    // Store device key for convenience (legacy behaviour)
+    await storeDeviceKey(tokens.username, deviceKey);
 
     debug?.(
       "✅ [Device Confirmation] Device confirmation completed successfully"
@@ -415,18 +394,4 @@ export async function handleDeviceConfirmation(
     tokens.deviceKey = deviceKey;
     return tokens;
   }
-}
-
-// Decode either standard Base-64 ( + / =) **or** URL-safe Base-64 ( - _ no padding )
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  // Choose decoder based on character set to avoid throwing on malformed input
-  const hasUrlSafeChars = /[-_]/.test(b64);
-
-  // If padding is missing (common in URL-safe variant) add it so that length is a multiple of 4
-  if (b64.length % 4 !== 0) {
-    b64 += "===".slice(0, (4 - (b64.length % 4)) % 4);
-  }
-
-  return (hasUrlSafeChars ? bufferFromBase64Url(b64) : bufferFromBase64(b64))
-    .buffer;
 }

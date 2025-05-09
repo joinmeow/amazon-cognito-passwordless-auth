@@ -36,28 +36,6 @@ export interface TokensFromStorage {
   deviceKey?: string;
 }
 
-/**
- * Store the device key separately from tokens so it persists even after logout
- * @param deviceKey The device key to store
- */
-export async function storeDeviceKey(deviceKey: string) {
-  if (!deviceKey) return;
-  const { clientId, storage, debug } = configure();
-  const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
-  debug?.(`Storing device key: ${deviceKey}`);
-  await storage.setItem(deviceKeyStorageKey, deviceKey);
-}
-
-/**
- * Retrieve the stored device key
- */
-export async function retrieveDeviceKey(): Promise<string | undefined> {
-  const { clientId, storage } = configure();
-  const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
-  const deviceKey = await storage.getItem(deviceKeyStorageKey);
-  return deviceKey || undefined;
-}
-
 export async function storeTokens(tokens: TokensToStore) {
   const { clientId, storage } = configure();
 
@@ -100,9 +78,10 @@ export async function storeTokens(tokens: TokensToStore) {
     );
   }
 
-  // If a device key is provided, store it separately so it persists after logout
-  if (tokens.deviceKey) {
-    promises.push(storeDeviceKey(tokens.deviceKey));
+  // If a device key is provided and we know the username,
+  // store it in the RememberedDeviceRecord so it persists
+  if (tokens.deviceKey && username) {
+    promises.push(storeDeviceKey(username, tokens.deviceKey));
   }
 
   // Also store user data from the id token
@@ -153,7 +132,7 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   ]);
 
   // Always get the device key separately, as it should persist across sessions
-  const deviceKey = await retrieveDeviceKey();
+  const deviceKey = await retrieveDeviceKey(username);
 
   return {
     idToken: idToken ?? undefined,
@@ -163,35 +142,6 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     username,
     deviceKey,
   };
-}
-
-/**
- * Store device remembered status
- * @param deviceKey The device key
- * @param isRemembered Whether the device should be remembered
- */
-export async function storeDeviceRememberedStatus(
-  deviceKey: string,
-  isRemembered: boolean
-) {
-  if (!deviceKey) return;
-  const { clientId, storage, debug } = configure();
-  const deviceRememberedKey = `Passwordless.${clientId}.deviceRemembered.${deviceKey}`;
-  debug?.(`Setting device ${deviceKey} remembered status: ${isRemembered}`);
-  await storage.setItem(deviceRememberedKey, isRemembered.toString());
-}
-
-/**
- * Check if a device is remembered
- * @param deviceKey The device key to check
- * @returns Whether the device is remembered
- */
-export async function isDeviceRemembered(deviceKey?: string): Promise<boolean> {
-  if (!deviceKey) return false;
-  const { clientId, storage } = configure();
-  const deviceRememberedKey = `Passwordless.${clientId}.deviceRemembered.${deviceKey}`;
-  const remembered = await storage.getItem(deviceRememberedKey);
-  return remembered === "true";
 }
 
 /**
@@ -245,61 +195,95 @@ export async function getRefreshScheduleInfo(): Promise<{
   };
 }
 
+export interface RememberedDeviceRecord {
+  deviceKey: string;
+  groupKey: string;
+  password: string;
+  remembered: boolean;
+}
+
+function buildDeviceStorageKey(clientId: string, username: string) {
+  return `Passwordless.${clientId}.device.${username}`;
+}
+
 /**
- * Store device password for device authentication
- * @param deviceKey The device key
- * @param devicePassword The device password to store
+ * Persist (or overwrite) a device record for a given username.
  */
-export async function storeDevicePassword(
-  deviceKey: string,
-  devicePassword: string
+export async function setRememberedDevice(
+  username: string,
+  record: RememberedDeviceRecord
 ) {
-  if (!deviceKey) return;
   const { clientId, storage, debug } = configure();
-  const devicePasswordKey = `Passwordless.${clientId}.devicePassword.${deviceKey}`;
-  debug?.(`Storing password for device: ${deviceKey}`);
-  await storage.setItem(devicePasswordKey, devicePassword);
+  const key = buildDeviceStorageKey(clientId, username);
+  debug?.(`Saving remembered device for user ${username}: ${record.deviceKey}`);
+  await storage.setItem(key, JSON.stringify(record));
 }
 
 /**
- * Retrieve stored device password
- * @param deviceKey The device key to retrieve the password for
- * @returns The device password if found, otherwise undefined
+ * Retrieve the device record for a user, migrating legacy per-device keys if necessary.
  */
-export async function retrieveDevicePassword(
-  deviceKey?: string
-): Promise<string | undefined> {
-  if (!deviceKey) return undefined;
+export async function getRememberedDevice(
+  username: string
+): Promise<RememberedDeviceRecord | undefined> {
   const { clientId, storage } = configure();
-  const devicePasswordKey = `Passwordless.${clientId}.devicePassword.${deviceKey}`;
-  const password = await storage.getItem(devicePasswordKey);
-  return password || undefined;
+  const key = buildDeviceStorageKey(clientId, username);
+  const raw = await storage.getItem(key);
+  if (raw) {
+    try {
+      return JSON.parse(raw) as RememberedDeviceRecord;
+    } catch {
+      // Corrupted JSON – remove it.
+      await storage.removeItem(key);
+      return undefined;
+    }
+  }
+
+  return undefined;
 }
 
 /**
- * Store the device group key so it can be used during DEVICE_PASSWORD_VERIFIER.
- * The key is stored per-deviceKey and persists across sessions/logouts.
+ * Remove the remembered device for a user (e.g. after ForgetDevice).
  */
-export async function storeDeviceGroupKey(
-  deviceKey: string,
-  deviceGroupKey: string
-) {
-  if (!deviceKey || !deviceGroupKey) return;
+export async function clearRememberedDevice(username: string) {
   const { clientId, storage, debug } = configure();
-  const key = `Passwordless.${clientId}.deviceGroupKey.${deviceKey}`;
-  debug?.(`Storing device group key for device ${deviceKey}: ${deviceGroupKey}`);
-  await storage.setItem(key, deviceGroupKey);
+  const key = buildDeviceStorageKey(clientId, username);
+  debug?.(`Clearing remembered device for user ${username}`);
+  await storage.removeItem(key);
 }
 
 /**
- * Retrieve the stored device group key for a given device key.
+ * Store the device key by creating/updating the device record for a user.
+ * Sets a basic RememberedDeviceRecord with empty placeholders for non-key values.
  */
-export async function retrieveDeviceGroupKey(
-  deviceKey?: string
+export async function storeDeviceKey(username: string, deviceKey: string) {
+  if (!username || !deviceKey) return;
+  const { debug } = configure();
+  debug?.(`Storing device key for ${username}: ${deviceKey}`);
+
+  // Check if we already have a record for this user
+  const existingRecord = await getRememberedDevice(username);
+
+  if (existingRecord?.deviceKey === deviceKey) {
+    // No change needed
+    return;
+  }
+
+  // Create/update the record
+  await setRememberedDevice(username, {
+    deviceKey,
+    groupKey: existingRecord?.groupKey || "", // Keep existing or empty placeholder
+    password: existingRecord?.password || "", // Keep existing or empty placeholder
+    remembered: existingRecord?.remembered || false, // Default to not remembered
+  });
+}
+
+/**
+ * Retrieve just the device key from the user's RememberedDeviceRecord.
+ */
+export async function retrieveDeviceKey(
+  username: string
 ): Promise<string | undefined> {
-  if (!deviceKey) return undefined;
-  const { clientId, storage } = configure();
-  const key = `Passwordless.${clientId}.deviceGroupKey.${deviceKey}`;
-  const val = await storage.getItem(key);
-  return val || undefined;
+  if (!username) return undefined;
+  const record = await getRememberedDevice(username);
+  return record?.deviceKey;
 }

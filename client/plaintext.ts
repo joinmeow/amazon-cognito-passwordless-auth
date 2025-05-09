@@ -60,37 +60,32 @@ export function authenticateWithPlaintextPassword({
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
 
-      // Ensure we have a device key. If none was supplied, attempt to load it
-      // from storage so remembered-device auth works even if the caller didn't
-      // provide one.
-      const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
+      // We'll add device key later after we have username context
+      // Do initial authentication without device parameters
+      debug?.(`Invoking initiateAuth with username and password only...`);
 
-      // Pre-create device SRP handler if password is stored (needed for DEVICE_PASSWORD_VERIFIER)
-      const deviceHandler = actualDeviceKey
-        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
-        : undefined;
-
-      debug?.(`Invoking initiateAuth ...`);
-
-      // Create auth parameters with optional device key
       const authParameters: Record<string, string> = {
         USERNAME: username,
         PASSWORD: password,
       };
 
-      if (actualDeviceKey) {
-        authParameters.DEVICE_KEY = actualDeviceKey;
-        debug?.(`Including device key in authentication: ${actualDeviceKey}`);
-      }
-
       const authResponse = await initiateAuth({
         authflow: "USER_PASSWORD_AUTH",
         authParameters,
-        deviceKey: actualDeviceKey, // Also pass device key to the initiateAuth function
         clientMetadata,
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, authResponse);
+
+      // Now that we have initiated authentication, we can look up device key
+      // using the confirmed username for this session
+      const actualDeviceKey =
+        deviceKey ?? (username ? await retrieveDeviceKey(username) : undefined);
+
+      // Pre-create device SRP handler if we have a device key
+      const deviceHandler = actualDeviceKey
+        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
+        : undefined;
 
       const tokens = await handleAuthResponse({
         authResponse,
