@@ -27,6 +27,10 @@ import {
   arrayBufferToBigInt,
   padHex,
   formatDate,
+  generateSmallA,
+  calculateLargeAHex,
+  calculateSrpSignature,
+  verifyDeviceSrp,
 } from "./srp.js";
 import { TokensFromSignIn } from "./model.js";
 import {
@@ -182,32 +186,24 @@ export async function createDeviceSrpAuthHandler(
   const deviceGroupKey = deviceKey.split("_")[0];
 
   // state kept between the two steps
-  let smallA: bigint | undefined;
-  let srpAHexCache: string | undefined;
+  let smallA = generateSmallA();
+  let bigAHex: string | undefined;
 
   return {
     deviceKey,
     generateStep1: async () => {
       debug?.("🔄 [Device SRP] Starting Step 1: DEVICE_SRP_AUTH challenge");
       // generate random 'a' and A
-      const aBytes = new Uint8Array(128);
-      crypto.getRandomValues(aBytes);
-      smallA = arrayBufferToBigInt(aBytes) % (await getConstants()).N;
-      const A = modPow(
-        (await getConstants()).g,
-        smallA,
-        (await getConstants()).N
-      );
-      srpAHexCache = padHex(A.toString(16));
-      debug?.("🚀 [Device SRP] Generated SRP_A", srpAHexCache.slice(0, 40));
+      bigAHex = await calculateLargeAHex(smallA);
+      debug?.("🚀 [Device SRP] Generated SRP_A", bigAHex);
       debug?.("✅ [Device SRP] Step 1 completed successfully");
-      return { srpAHex: srpAHexCache };
+      return { srpAHex: bigAHex };
     },
     generateStep2: async (srpB: string, secretBlock: string, salt?: string) => {
       debug?.(
         "🔄 [Device SRP] Starting Step 2: DEVICE_PASSWORD_VERIFIER challenge"
       );
-      if (!smallA || !srpAHexCache) {
+      if (!bigAHex) {
         debug?.(
           "❌ [Device SRP] Step 2 failed: generateStep1 was not called first"
         );
@@ -219,7 +215,7 @@ export async function createDeviceSrpAuthHandler(
       }
       debug?.(`🔑 [Device SRP] Salt: ${salt}`);
       debug?.(`🔑 [Device SRP] Secret Block: ${secretBlock}`);
-      const result = await generateDevicePasswordVerifier({
+      const result = await verifyDeviceSrp({
         deviceGroupKey,
         deviceKey,
         devicePassword,
@@ -227,7 +223,7 @@ export async function createDeviceSrpAuthHandler(
         secretBlock,
         salt,
         smallA,
-        srpAHex: srpAHexCache,
+        srpAHex: bigAHex,
       });
       debug?.("✅ [Device SRP] Step 2 completed successfully");
       return result;
@@ -425,140 +421,4 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 
   return (hasUrlSafeChars ? bufferFromBase64Url(b64) : bufferFromBase64(b64))
     .buffer;
-}
-
-/**
- * Calculate the values required for a DEVICE_PASSWORD_VERIFIER response as per AWS documentation:
- *   PASSWORD_CLAIM_SECRET_BLOCK = SECRET_BLOCK (echo)
- *   TIMESTAMP = formatted date string (same formatter Cognito SDKs use)
- *   PASSWORD_CLAIM_SIGNATURE = Base64(HMAC_SHA256(K_USER, DeviceGroupKey + DeviceKey + SECRET_BLOCK + TIMESTAMP))
- *   where K_USER = SHA256_HASH(S_USER) and S_USER is derived from SRP maths.
- */
-async function generateDevicePasswordVerifier({
-  deviceGroupKey,
-  deviceKey,
-  devicePassword,
-  srpB,
-  secretBlock,
-  salt,
-  smallA,
-  srpAHex: precomputedSrpAHex,
-}: {
-  deviceGroupKey: string;
-  deviceKey: string;
-  devicePassword: string;
-  srpB: string;
-  secretBlock: string;
-  salt: string;
-  smallA?: bigint;
-  srpAHex?: string;
-}): Promise<DeviceSrpAuthResult> {
-  const { crypto, debug } = configure();
-
-  debug?.("🔑 [Device SRP] Starting DEVICE_PASSWORD_VERIFIER calculation", {
-    deviceKey,
-    deviceGroupKey,
-    srpBPreview: srpB.slice(0, 40),
-    secretBlockPreview: secretBlock.slice(0, 40),
-  });
-
-  // Constants
-  const { g, N, k } = await getConstants();
-
-  // 1. Generate or reuse small 'a' and A
-  let a: bigint;
-  let srpAHex: string;
-  if (smallA && precomputedSrpAHex) {
-    a = smallA;
-    srpAHex = precomputedSrpAHex;
-  } else {
-    const aBytes = new Uint8Array(128);
-    crypto.getRandomValues(aBytes);
-    a = arrayBufferToBigInt(aBytes) % N;
-    const A = modPow(g, a, N);
-    srpAHex = padHex(A.toString(16));
-  }
-
-  // 2. Convert SRP_B (hex or base64/url-safe) to bigint B
-  let B: bigint;
-  if (/^[0-9a-fA-F]+$/.test(srpB)) {
-    B = BigInt(`0x${srpB}`);
-  } else {
-    B = BigInt(`0x${arrayBufferToHex(base64ToArrayBuffer(srpB))}`);
-  }
-
-  // 3. Compute u = H(A | B)
-  const dataToHash = await new Blob([
-    hexToArrayBuffer(padHex(srpAHex)),
-    hexToArrayBuffer(padHex(B.toString(16))),
-  ]).arrayBuffer();
-  const uHash = await crypto.subtle.digest("SHA-256", dataToHash);
-  const u = arrayBufferToBigInt(uHash);
-
-  // 4. Compute x = SHA256_HASH(salt + FULL_PASSWORD)
-  const fullPassword = `${deviceGroupKey}${deviceKey}:${devicePassword}`;
-  const fullPasswordHash = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(fullPassword)
-  );
-  // Incorporate the server-provided salt into the x calculation
-  const saltBuffer = base64ToArrayBuffer(salt);
-  const saltAndPasswordHash = await new Blob([
-    saltBuffer,
-    fullPasswordHash,
-  ]).arrayBuffer();
-  const xHash = await crypto.subtle.digest("SHA-256", saltAndPasswordHash);
-  const x = arrayBufferToBigInt(xHash);
-
-  // 5. S = (B - k * g^x) ^ (a + u * x) mod N
-  const kgx = (k * modPow(g, x, N)) % N;
-  const B_kgx = (B - kgx + N) % N; // ensure positive
-  const a_ux = (a + u * x) % N;
-  const S = modPow(B_kgx, a_ux, N);
-
-  // 6. K = SHA256(S)
-  const SHex = padHex(S.toString(16));
-  const K = await crypto.subtle.digest("SHA-256", hexToArrayBuffer(SHex));
-
-  // 7. Timestamp in Cognito SRP format: EEE MMM d HH:mm:ss z yyyy
-  const timestamp = formatDate(new Date());
-
-  // 8. Build HMAC input: [DeviceGroupKey||DeviceKey, SECRET_BLOCK bytes, TIMESTAMP]
-  const headerBuf = new TextEncoder().encode(deviceGroupKey + deviceKey);
-  const secretBuf = base64ToArrayBuffer(secretBlock);
-  const timeBuf = new TextEncoder().encode(timestamp);
-  const msg = new Uint8Array(
-    headerBuf.byteLength + secretBuf.byteLength + timeBuf.byteLength
-  );
-  msg.set(headerBuf, 0);
-  msg.set(new Uint8Array(secretBuf), headerBuf.byteLength);
-  msg.set(timeBuf, headerBuf.byteLength + secretBuf.byteLength);
-  const hmacKey = await crypto.subtle.importKey(
-    "raw",
-    K,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signatureBuffer = await crypto.subtle.sign(
-    "HMAC",
-    hmacKey,
-    msg.buffer
-  );
-
-  const passwordVerifier = bufferToBase64(signatureBuffer);
-
-  debug?.("🔑 [Device SRP] Derived values", {
-    srpAHexPreview: srpAHex.slice(0, 40),
-    uPreview: arrayBufferToHex(uHash).slice(0, 40),
-    timestamp,
-  });
-
-  return {
-    deviceGroupKey,
-    srpAHex,
-    passwordVerifier,
-    passwordClaimSecretBlock: secretBlock,
-    timestamp,
-  };
 }

@@ -104,56 +104,97 @@ async function calculateLargeAHex(smallA: bigint) {
   return modPow(g, smallA, N).toString(16);
 }
 
+// A generalised SRP-signature generator that works for both user-password and
+// device-password flows.  Exactly one credential set must be provided.
+type UserCreds = {
+  userPoolId: string;
+  username: string;
+  password: string;
+};
+
+type DeviceCreds = {
+  deviceGroupKey: string;
+  deviceKey: string;
+  devicePassword: string;
+};
+
 async function calculateSrpSignature({
   smallA,
   largeAHex,
   srpBHex,
   salt,
-  userPoolId,
-  username,
-  password,
   secretBlock,
+  creds,
 }: {
   smallA: bigint;
   largeAHex: string;
   srpBHex: string;
   salt: string;
-  userPoolId: string;
-  username: string;
-  password: string;
   secretBlock: string;
+  creds: UserCreds | DeviceCreds;
 }) {
   const { crypto } = configure();
+
+  // ---- 1. scramble parameter (u) ----
   const aPlusBHex = padHex(largeAHex) + padHex(srpBHex);
-  const u = await crypto.subtle.digest("SHA-256", hexToArrayBuffer(aPlusBHex));
-  const [, userPoolName] = userPoolId.split("_");
-  const usernamePasswordHash = await crypto.subtle.digest(
+  const uBuf = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`${userPoolName}${username}:${password}`)
+    hexToArrayBuffer(aPlusBHex)
   );
 
-  const x = await crypto.subtle.digest(
+  // ---- 2. credential-specific hash (x) ----
+  let identityHash: ArrayBuffer;
+  let identityPart1: string; // userPoolName OR deviceGroupKey
+  let identityPart2: string; // username OR deviceKey
+
+  if ((creds as UserCreds).userPoolId !== undefined) {
+    const { userPoolId, username, password } = creds as UserCreds;
+    const [, userPoolName] = userPoolId.split("_");
+    identityPart1 = userPoolName;
+    identityPart2 = username;
+    identityHash = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`${userPoolName}${username}:${password}`)
+    );
+  } else {
+    const { deviceGroupKey, deviceKey, devicePassword } = creds as DeviceCreds;
+    identityPart1 = deviceGroupKey;
+    identityPart2 = deviceKey;
+    identityHash = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(
+        `${deviceGroupKey}${deviceKey}:${devicePassword}`
+      )
+    );
+  }
+
+  const xBuf = await crypto.subtle.digest(
     "SHA-256",
     await new Blob([
       hexToArrayBuffer(padHex(salt)),
-      usernamePasswordHash,
+      identityHash,
     ]).arrayBuffer()
   );
 
+  // ---- 3. shared secret (S) ----
   const { g, N, k } = await getConstants();
-  const gModPowXN = modPow(g, arrayBufferToBigInt(x), N);
+  const gModPowXN = modPow(g, arrayBufferToBigInt(xBuf), N);
   const int = BigInt(`0x${srpBHex}`) - k * gModPowXN;
   const s = modPow(
     int,
-    smallA + arrayBufferToBigInt(u) * arrayBufferToBigInt(x),
+    smallA + arrayBufferToBigInt(uBuf) * arrayBufferToBigInt(xBuf),
     N
   );
+
+  // ---- 4. HKDF ----
   const ikmHex = padHex(s.toString(16));
-  const saltHkdfHex = padHex(arrayBufferToHex(u));
+  const saltHkdfHex = padHex(arrayBufferToHex(uBuf));
+
   const infoBits = new Uint8Array([
     ..."Caldera Derived Key".split("").map((c) => c.charCodeAt(0)),
     1,
   ]).buffer;
+
   const prkKey = await crypto.subtle.importKey(
     "raw",
     hexToArrayBuffer(saltHkdfHex),
@@ -164,11 +205,13 @@ async function calculateSrpSignature({
     false,
     ["sign"]
   );
+
   const prk = await crypto.subtle.sign(
     "HMAC",
     prkKey,
     hexToArrayBuffer(ikmHex)
   );
+
   const hkdfKey = await crypto.subtle.importKey(
     "raw",
     prk,
@@ -179,15 +222,18 @@ async function calculateSrpSignature({
     false,
     ["sign"]
   );
+
   const hkdf = (await crypto.subtle.sign("HMAC", hkdfKey, infoBits)).slice(
     0,
     16
   );
 
+  // ---- 5. signature ----
   const timestamp = formatDate(new Date());
+
   const parts = [
-    userPoolName.split("").map((c) => c.charCodeAt(0)),
-    username.split("").map((c) => c.charCodeAt(0)),
+    identityPart1.split("").map((c) => c.charCodeAt(0)),
+    identityPart2.split("").map((c) => c.charCodeAt(0)),
     ...bufferFromBase64(secretBlock),
     timestamp.split("").map((c) => c.charCodeAt(0)),
   ].flat();
@@ -340,10 +386,12 @@ export function authenticateWithSRP({
           largeAHex,
           srpBHex,
           salt: saltHex,
-          username: userIdForSrp,
-          userPoolId,
-          password,
           secretBlock: secretBlockB64,
+          creds: {
+            userPoolId,
+            username: userIdForSrp,
+            password,
+          },
         }
       );
       debug?.(`Invoking respondToAuthChallenge ...`);
@@ -420,6 +468,47 @@ export function authenticateWithSRP({
   };
 }
 
+async function verifyDeviceSrp({
+  deviceGroupKey,
+  deviceKey,
+  devicePassword,
+  srpB,
+  secretBlock,
+  salt,
+  smallA,
+  srpAHex,
+}: {
+  deviceGroupKey: string;
+  deviceKey: string;
+  devicePassword: string;
+  srpB: string;
+  secretBlock: string;
+  salt: string;
+  smallA: bigint;
+  srpAHex: string;
+}) {
+  const { passwordClaimSignature, timestamp } = await calculateSrpSignature({
+    smallA,
+    largeAHex: srpAHex,
+    srpBHex: srpB,
+    salt,
+    secretBlock,
+    creds: {
+      deviceGroupKey,
+      deviceKey,
+      devicePassword,
+    },
+  });
+
+  return {
+    deviceGroupKey,
+    srpAHex,
+    passwordVerifier: passwordClaimSignature,
+    passwordClaimSecretBlock: secretBlock,
+    timestamp,
+  } as const;
+}
+
 // Helper functions that need to be exported
 export {
   modPow,
@@ -429,4 +518,8 @@ export {
   arrayBufferToHex,
   arrayBufferToBigInt,
   formatDate,
+  generateSmallA,
+  calculateLargeAHex,
+  calculateSrpSignature,
+  verifyDeviceSrp,
 };
