@@ -288,6 +288,9 @@ authenticateWithSRP({
   smsMfaCode, // Optional: function returning SMS MFA code
   otpMfaCode, // Optional: function returning OTP MFA code
   clientMetadata, // Optional: metadata for the request
+  rememberDevice: async () => {
+    return confirm("Remember this device for future sign-ins?");
+  },
 });
 
 // Plaintext Password Authentication
@@ -490,6 +493,9 @@ function PasswordLogin() {
     authenticateWithSRP({
       username: event.target.username.value,
       password: event.target.password.value,
+      rememberDevice: async () => {
+        return confirm("Remember this device for future sign-ins?");
+      },
     });
   };
 
@@ -869,3 +875,185 @@ A complete example implementation is available in the [end-to-end example](../..
 
 - [main.tsx](../../end-to-end-example/client/src/main.tsx) - Library configuration and provider setup
 - [App.tsx](../../end-to-end-example/client/src/App.tsx) - Using the `usePasswordless` hook for sign-in status and user interface
+
+## MFA and Remember Device Flow
+
+The React hook includes support for MFA and remembered devices:
+
+```jsx
+// Component example
+function Login() {
+  const { authenticateWithSRP } = usePasswordless();
+  const [loading, setLoading] = useState(false);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    try {
+      const { signedIn } = await authenticateWithSRP({
+        username: e.target.username.value,
+        password: e.target.password.value,
+        // For users with MFA enabled, this provides a callback for 
+        // the SMS or TOTP code
+        otpMfaCode: async () => {
+          // You can use any UI component to collect this
+          return prompt("Enter your MFA code:");
+        },
+        // If device confirmation is needed after MFA, this decides 
+        // whether to remember the device
+        // NOTE: rememberDevice is ONLY called if MFA was validated successfully
+        rememberDevice: async () => {
+          return confirm(
+            "Would you like to remember this device to skip MFA next time?"
+          );
+        },
+      });
+      
+      // signedIn won't resolve until the entire authentication flow is complete,
+      // including any MFA validation and device remembering process
+      const tokens = await signedIn;
+      
+      // Now you can redirect to the dashboard or protected area
+      router.push('/dashboard');
+    } catch (error) {
+      console.error('Authentication error:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      {/* Login form fields */}
+      <button type="submit" disabled={loading}>
+        {loading ? 'Signing in...' : 'Sign in'}
+      </button>
+    </form>
+  );
+}
+```
+
+### Important Notes about Remember Device Flow
+
+1. **When the callback is invoked**: The `rememberDevice` callback is only invoked when:
+   - A user successfully completes MFA authentication (specifically TOTP or SMS)
+   - Cognito indicates that user confirmation is necessary for the device
+   - **The callback will NEVER be invoked for non-MFA sign-ins**
+   - Device remembering is ONLY possible after an MFA authentication step
+
+2. **Promise resolution**: The main `signedIn` promise won't resolve until:
+   - The `rememberDevice` callback returns (with true or false)
+   - If true, the `updateDeviceStatus` API call completes successfully
+   
+3. **Error handling**: Any errors in the `rememberDevice` flow will be caught and logged, 
+   but they won't prevent authentication from completing.
+
+## Understanding the Hook Implementation
+
+The `usePasswordless` hook is implemented in `hooks.tsx` with several key design patterns worth understanding if you're building complex authentication flows.
+
+### Async Token Callback Pattern
+
+The authentication methods like `authenticateWithSRP` and `authenticateWithPlaintextPassword` have been enhanced to use `async` token callbacks:
+
+```javascript
+// In hooks.tsx
+tokensCb: async (newTokens: TokensFromSignIn) => {
+  // Set tokens first
+  setTokens(newTokens);
+  
+  // Then handle the device remembering if necessary
+  if (rememberDevice && 
+      typeof rememberDevice === "function" && 
+      newTokens.userConfirmationNecessary) {
+    try {
+      const shouldRemember = await rememberDevice();
+      
+      if (shouldRemember && 
+          newTokens.deviceKey && 
+          newTokens.accessToken) {
+        // Call Cognito to update device status
+        await updateDeviceStatus({...});
+        
+        // Update local storage to match
+        await storeDeviceRememberedStatus(dKey, true);
+      }
+    } catch (err) {
+      debug?.("Failed while handling rememberDevice callback:", err);
+    }
+  }
+}
+```
+
+This pattern ensures:
+
+1. The underlying authentication promise doesn't resolve until device remembering is complete
+2. The UI can show appropriate loading states during the entire authentication process
+3. Your app code can simply `await signedIn` and know everything is done
+
+### Authentication Method Isolation
+
+The hook carefully manages the `authMethod` state to prevent unintended side effects between different authentication methods:
+
+```javascript
+// Before starting SRP authentication
+setAuthMethod("SRP");
+setFido2Credentials(undefined);
+
+// During SRP process
+if (status === "SIGNED_IN_WITH_SRP_PASSWORD") {
+  setAuthMethod("SRP");
+  setFido2Credentials(undefined);
+}
+
+// After successful authentication
+debug?.("Authentication completed, ensuring SRP auth method is preserved");
+setAuthMethod("SRP");
+setFido2Credentials(undefined);
+```
+
+This isolation ensures that:
+
+- FIDO2 credential operations don't run during SRP authentication
+- UI components can reliably check the auth method to show appropriate options
+- Each authentication type maintains its expected behavior
+
+### State Management Patterns
+
+The hook uses several advanced state management patterns:
+
+1. **State Derivation**: The `signInStatus` is derived from multiple state variables
+   ```javascript
+   const signInStatus = useMemo(() => {
+     // Logic to derive overall status from multiple state variables
+   }, [tokensParsed, isRefreshingTokens, signingInStatus, ...]);
+   ```
+
+2. **State Wrapping**: The `setTokens` function is wrapped to automatically update parsed tokens
+   ```javascript
+   const setTokens: typeof _setTokens = useCallback((reactSetStateAction) => {
+     _setTokens((prevState) => {
+       const newTokens = 
+         typeof reactSetStateAction === "function"
+           ? reactSetStateAction(prevState)
+           : reactSetStateAction;
+       // Update parsed tokens when raw tokens change
+       if (newTokens?.idToken && newTokens?.accessToken) {
+         setTokensParsed({...});
+       }
+       return newTokens;
+     });
+   }, []);
+   ```
+
+3. **Error Handling**: The hook includes centralized error handling
+   ```javascript
+   signinIn.signedIn.catch((error: Error) => {
+     debug?.("Authentication failed:", error);
+     setLastError(error);
+     setAuthMethod("SRP"); // Maintain consistent state even in failure
+   });
+   ```
+
+These patterns make the hook more robust and maintainable while providing a cleaner API surface for applications.

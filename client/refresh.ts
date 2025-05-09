@@ -144,15 +144,9 @@ export async function scheduleRefresh({
       return;
     }
 
-    // Standard case: Schedule refresh at 75% of remaining token lifetime
-    // This provides a good balance between freshness and avoiding too frequent refreshes
-    const refreshDelay = Math.max(
-      0,
-      Math.min(
-        timeUntilExpiry * 0.75, // 75% of time until expiry
-        timeUntilExpiry - 60000 // But at least 60 seconds before expiry
-      )
-    );
+    // Standard case: Schedule refresh at 50% of remaining token lifetime (half-time)
+    // This provides more frequent refreshes for better token freshness
+    const refreshDelay = Math.max(0, timeUntilExpiry * 0.5);
 
     // Record scheduling info
     await storeRefreshScheduleInfo({
@@ -274,7 +268,7 @@ export async function refreshTokens({
         logDebug(
           force
             ? `Force refreshing token that expires in ${Math.round(timeUntilExpiry / 1000)}s`
-            : `Refreshing token that expires in ${Math.round(timeUntilExpiry / 1000)}s`
+            : `Refreshing token (at half expiration time) that expires in ${Math.round(timeUntilExpiry / 1000)}s`
         );
       } else {
         logDebug(

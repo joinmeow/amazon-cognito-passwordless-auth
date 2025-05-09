@@ -829,7 +829,7 @@ function _usePasswordless() {
             setFido2Credentials(undefined);
           }
         },
-        tokensCb: (newTokens: TokensFromSignIn) => {
+        tokensCb: async (newTokens: TokensFromSignIn) => {
           // Just update component state - processTokens handles storage and refresh
           setTokens(newTokens);
 
@@ -852,35 +852,34 @@ function _usePasswordless() {
           if (
             rememberDevice &&
             typeof rememberDevice === "function" &&
-            newTokens.userConfirmationNecessary &&
-            newTokens.deviceKey &&
-            newTokens.accessToken
+            newTokens.userConfirmationNecessary
           ) {
-            (async () => {
-              try {
-                const shouldRemember = await rememberDevice();
-                if (!shouldRemember) {
-                  debug?.("User opted NOT to remember this device");
-                  return;
-                }
-                const dKey = newTokens.deviceKey!;
-                const accTok = newTokens.accessToken!;
-                debug?.(`Automatically remembering device ${dKey}`);
+            try {
+              const shouldRemember = await rememberDevice();
+              if (
+                shouldRemember &&
+                newTokens.deviceKey &&
+                newTokens.accessToken
+              ) {
+                const dKey = newTokens.deviceKey;
+                const accTok = newTokens.accessToken;
+                debug?.(`User opted to remember device ${dKey}`);
                 await updateDeviceStatus({
                   accessToken: accTok,
                   deviceKey: dKey,
                   deviceRememberedStatus: "remembered",
                 });
-
-                // Persist remembered status locally as well
                 await storeDeviceRememberedStatus(dKey, true);
-              } catch (err) {
-                debug?.(
-                  "Failed to automatically update device remembered status:",
-                  err
-                );
+                debug?.(`Device ${dKey} remembered`);
+              } else {
+                debug?.("User opted NOT to remember this device");
               }
-            })();
+            } catch (err) {
+              debug?.(
+                "Failed while handling rememberDevice callback:",
+                err
+              );
+            }
           }
         },
         clientMetadata: clientMetadata,
@@ -930,23 +929,24 @@ function _usePasswordless() {
         otpMfaCode,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens: TokensFromSignIn) => {
+        tokensCb: async (newTokens: TokensFromSignIn) => {
           setTokens(newTokens);
 
           // If rememberDevice callback requested and Cognito needs confirmation
           if (
             rememberDevice &&
             typeof rememberDevice === "function" &&
-            newTokens.userConfirmationNecessary &&
-            newTokens.deviceKey &&
-            newTokens.accessToken
+            newTokens.userConfirmationNecessary
           ) {
-            (async () => {
-              try {
-                const shouldRemember = await rememberDevice();
-                if (!shouldRemember) return;
-                const dKey = newTokens.deviceKey!;
-                const accTok = newTokens.accessToken!;
+            try {
+              const shouldRemember = await rememberDevice();
+              if (
+                shouldRemember &&
+                newTokens.deviceKey &&
+                newTokens.accessToken
+              ) {
+                const dKey = newTokens.deviceKey;
+                const accTok = newTokens.accessToken;
                 const { debug } = configure();
                 debug?.(`Automatically remembering device ${dKey} (PLAINTEXT)`);
                 await updateDeviceStatus({
@@ -955,11 +955,11 @@ function _usePasswordless() {
                   deviceRememberedStatus: "remembered",
                 });
                 await storeDeviceRememberedStatus(dKey, true);
-              } catch (err) {
-                const { debug } = configure();
-                debug?.("Failed to remember device automatically:", err);
               }
-            })();
+            } catch (err) {
+              const { debug } = configure();
+              debug?.("Failed to remember device automatically:", err);
+            }
           }
         },
       });

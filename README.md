@@ -70,10 +70,20 @@ const { signedIn } = await authenticateWithFido2({
 // Wait for the sign-in process to complete
 await signedIn;
 
-// Sign in with password (SRP)
+// Sign-in with SRP **without MFA** (no rememberDevice callback needed)
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "password123",
+});
+
+// If your user pool enforces an OTP second factor, provide the callback so it can
+// ask the user after they enter the OTP:
+const { signedIn: signedInWithOtp } = await authenticateWithSRP({
+  username: "user@example.com",
+  password: "password123",
+  rememberDevice: async () => {
+    return window.confirm("Remember this device?");
+  },
 });
 
 // Sign out
@@ -166,6 +176,9 @@ function YourApp() {
           authenticateWithSRP({
             username: form.username.value,
             password: form.password.value,
+            rememberDevice: async () => {
+              return window.confirm("Remember this device?");
+            },
           });
         }}
       >
@@ -205,6 +218,9 @@ await confirmSignUp({
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "securePassword123",
+  rememberDevice: async () => {
+    return window.confirm("Remember this device?");
+  },
 });
 ```
 
@@ -217,39 +233,31 @@ Device authentication allows users to bypass MFA on subsequent sign-ins from the
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
   password: "securePassword123",
+  rememberDevice: async () => {
+    return window.confirm("Remember this device?");
+  },
 });
 
-// 2. Wait for the sign-in to complete
+// 2. Wait for the sign-in to complete - including any "remember device" decisions
 const tokens = await signedIn;
 
-// 3. Check if the user needs to be asked about remembering the device
-if (tokens.userConfirmationNecessary) {
-  // Ask the user if they want to remember this device
-  const rememberDevice = confirm(
-    "Remember this device? You won't need MFA next time."
-  );
-
-  // Update device status based on user's choice
-  await updateDeviceStatus({
-    accessToken: tokens.accessToken,
-    deviceKey: tokens.deviceKey,
-    deviceRememberedStatus: rememberDevice ? "remembered" : "not_remembered",
-  });
-}
-
-// 4. On subsequent sign-ins, the library automatically uses the remembered device
-// and handles the DEVICE_SRP_AUTH challenge instead of requiring MFA
+// 3. The signedIn promise won't resolve until:
+// - User explicitly said "don't remember", or
+// - The UpdateDeviceStatus call has completed, or
+// - No rememberDevice callback was supplied
 ```
 
 How device authentication works:
 
 1. **Device Confirmation** (automatic): When a user signs in with MFA on a new device, the library automatically registers the device with Cognito.
 
-2. **Device Remembering** (user choice): Your app should ask users if they want to remember the device when `tokens.userConfirmationNecessary` is true.
+2. **Device Remembering** (user choice): When `userConfirmationNecessary` is true, your app's `rememberDevice` callback is invoked, giving you control over when and how to ask the user.
 
-3. **Subsequent Sign-ins**: On remembered devices, users bypass MFA automatically.
+3. **Atomic Authentication Flow**: The `signedIn` promise doesn't resolve until the entire flow (including device status updates) is complete.
 
-Important: Device confirmation now only happens when MFA is used during authentication. This ensures that device authentication maintains proper security by only allowing devices to be remembered after the user has successfully completed an MFA challenge.
+4. **Subsequent Sign-ins**: On remembered devices, users bypass MFA automatically.
+
+Important: The `rememberDevice` callback is **only invoked after successful MFA authentication** (like TOTP or SMS). For users without MFA enabled, or for sign-ins that don't trigger an MFA step, the callback will never be invoked and device remembering is not possible.
 
 ### TOTP MFA Setup
 
@@ -279,6 +287,46 @@ await beginSetup();
 await verifySetup(userEnteredCode, "My Authenticator");
 ```
 
+## Library Architecture
+
+The library is organized into several modules that handle different aspects of authentication:
+
+- **Core Configuration**: `config.ts` - Central configuration for the library
+- **Authentication APIs**:
+  - `cognito-api.ts` - Direct interactions with Cognito Identity Provider API
+  - `srp.ts` - Secure Remote Password implementation
+  - `fido2.ts` - WebAuthn/FIDO2 authentication
+  - `plaintext.ts` - Basic password authentication
+  - `device.ts` - Device remembering and authentication
+- **Token Management**:
+  - `storage.ts` - Token persistence and retrieval
+  - `refresh.ts` - Token refresh scheduling and execution
+  - `common.ts` - Shared token processing logic
+- **React Integration**:
+  - `react/hooks.tsx` - React hooks for authentication state
+  - `react/components.tsx` - Pre-built authentication UI components
+
+## Token Refresh Behavior
+
+The library intelligently manages token refresh to maintain a seamless user experience:
+
+```javascript
+// In refresh.ts
+const refreshDelay = Math.max(0, timeUntilExpiry * 0.5);
+```
+
+Token refresh occurs at exactly half of the remaining token lifetime. For example:
+
+- For a token with 1 hour validity, a refresh will occur after 30 minutes
+- For a token with 24 hours validity, a refresh will occur after 12 hours
+
+Key refresh behaviors:
+
+1. **Proactive Refresh** - Tokens are refreshed at 50% of their lifetime to ensure continuity
+2. **Background Refresh** - Token refresh happens automatically without user intervention
+3. **Visibility Awareness** - Refreshes adapt to tab visibility to conserve resources
+4. **Automatic Recovery** - The library handles refresh failures with graceful retries
+
 ## Password Reset Flow
 
 The library also supports password reset functionality:
@@ -304,7 +352,7 @@ await confirmForgotPassword({
 Configure the following properties:
 
 ```typescript
-import { configure } from "@joinmeow/cognito-passwordless-auth";
+import { configure } from "amazon-cognito-passwordless-auth";
 
 configure({
   clientId: "...",
@@ -332,43 +380,8 @@ configure({
 
 ## Documentation
 
-For more detailed documentation about the available API methods and components, check the client source code.
+For more detailed documentation about the available API methods and components, check the client source code or refer to the documentation for each specific module.
 
 ## License
 
 Apache-2.0
-
-## Token Refresh Configuration
-
-The library provides configurable token refresh behavior to optimize for both security and efficiency:
-
-```javascript
-Passwordless.configure({
-  // ... other configuration options
-
-  // Token refresh configuration
-  tokenRefresh: {
-    // Time (in milliseconds) after which a user is considered inactive
-    // Default: 30 minutes (1,800,000 ms)
-    inactivityThreshold: 30 * 60 * 1000,
-
-    // Whether to base token refreshes on user activity
-    // When true, tokens are refreshed intelligently based on user interactions
-    // When false, tokens are refreshed based on wall-clock time
-    // Default: true
-    useActivityTracking: true,
-  },
-});
-```
-
-### Activity-Based Token Refresh
-
-When `useActivityTracking` is enabled (default), the library will:
-
-1. Track user interactions with the page (mouse, keyboard, touch events)
-2. Refresh tokens more aggressively when the user is actively using the application
-3. Postpone non-critical token refreshes when a user is inactive
-4. Immediately check if a refresh is needed when a user returns to the app
-5. Always refresh tokens before they expire, regardless of activity status
-
-This approach provides a better balance between security, user experience, and resource efficiency. Active users never experience authentication interruptions, while inactive sessions consume fewer resources.

@@ -229,101 +229,21 @@ import {
 // Sign in with username and password
 const { signedIn } = await authenticateWithSRP({
   username: "user@example.com",
-  password: "password123",
+  password: "securePassword123",
+  rememberDevice: async () => {
+    return window.confirm("Remember this device?");
+  },
 });
 
 // Wait for sign-in to complete and get tokens
+// This will only resolve AFTER any "remember device" process completes
 const tokens = await signedIn;
 
-// Check if we need to ask the user to remember the device
-if (tokens.userConfirmationNecessary) {
-  // Ask user if they want to remember this device
-  const rememberDevice = confirm(
-    "Remember this device? You won't need MFA next time."
-  );
-
-  // Call updateDeviceStatus based on their choice
-  if (tokens.deviceKey) {
-    await updateDeviceStatus({
-      accessToken: tokens.accessToken,
-      deviceKey: tokens.deviceKey,
-      deviceRememberedStatus: rememberDevice ? "remembered" : "not_remembered",
-    });
-  }
-}
+// The rememberDevice callback is only invoked when MFA is used and
+// Cognito indicates userConfirmationNecessary = true
+// IMPORTANT: Device remembering ONLY works after successful TOTP or SMS MFA authentication.
+// Without an MFA step, the rememberDevice callback will never be invoked.
+// When this happens, signedIn won't resolve until either:
+// 1. The callback resolves to false (don't remember)
+// 2. The callback resolves to true AND updateDeviceStatus completes
 ```
-
-### React Example
-
-```jsx
-import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
-import { useState, useEffect } from "react";
-
-function Login() {
-  const { authenticateWithSRP, tokens, updateDeviceStatus } = usePasswordless();
-  const [showRememberPrompt, setShowRememberPrompt] = useState(false);
-
-  useEffect(() => {
-    // Check if we need to ask the user to remember device
-    if (tokens?.userConfirmationNecessary) {
-      setShowRememberPrompt(true);
-    }
-  }, [tokens]);
-
-  const handleRememberDevice = async (remember) => {
-    if (tokens?.deviceKey && tokens?.accessToken) {
-      await updateDeviceStatus({
-        accessToken: tokens.accessToken,
-        deviceKey: tokens.deviceKey,
-        deviceRememberedStatus: remember ? "remembered" : "not_remembered",
-      });
-      setShowRememberPrompt(false);
-    }
-  };
-
-  return (
-    <div>
-      {/* Login form */}
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          authenticateWithSRP({
-            username: e.target.username.value,
-            password: e.target.password.value,
-          });
-        }}
-      >
-        <input name="username" placeholder="Username" />
-        <input name="password" type="password" placeholder="Password" />
-        <button type="submit">Sign In</button>
-      </form>
-
-      {/* Remember device prompt */}
-      {showRememberPrompt && (
-        <div className="remember-device-prompt">
-          <p>
-            Do you want to remember this device? You won't need MFA next time.
-          </p>
-          <button onClick={() => handleRememberDevice(true)}>
-            Yes, remember
-          </button>
-          <button onClick={() => handleRememberDevice(false)}>
-            No, don't remember
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-```
-
-### Subsequent Authentication
-
-On subsequent sign-ins from a remembered device:
-
-1. The library automatically includes the stored device key in authentication requests
-2. Cognito sends a `DEVICE_SRP_AUTH` challenge instead of an MFA challenge
-3. The library automatically handles this challenge
-4. The user is signed in without needing to provide an MFA code
-
-This creates a seamless experience for users on their trusted devices while maintaining security.
