@@ -14,7 +14,7 @@
  */
 import { configure } from "./config.js";
 
-import { bufferToBase64 } from "./util.js";
+import { bufferToBase64, bufferFromBase64, bufferFromBase64Url } from "./util.js";
 import {
   modPow,
   getConstants,
@@ -221,16 +221,42 @@ export async function createDeviceSrpAuthHandler(
         const a_ux = (a + u * x) % N;
         const S = modPow(B_kgx, a_ux, N);
 
-        // Calculate K = H(S)
+        // Derive the authentication key K using the Cognito-specific HKDF:
+        //   PRK = HMAC_SHA256(key = u, data = S)
+        //   HKDF = HMAC_SHA256(key = PRK, data = "Caldera Derived Key" || 0x01)  → first 16 bytes
         const SHex = padHex(S.toString(16));
-        const K = await crypto.subtle.digest("SHA-256", hexToArrayBuffer(SHex));
+        const saltHkdfHex = padHex(arrayBufferToHex(uHash));
 
-        // Date-related values for the string to sign
-        const dateNow = new Date();
-        const dateStr = dateNow.toISOString().split("T")[0].replace(/-/g, "");
+        // "Caldera Derived Key" concatenated with a single byte of value 1
+        const infoBits = new Uint8Array(
+          [..."Caldera Derived Key"].map((c) => c.charCodeAt(0)).concat([1])
+        );
 
-        // Prepare the message to sign: dateStr + deviceGroupKey + deviceKey + secretBlock
-        const message = dateStr + deviceGroupKey + deviceKey + secretBlock;
+        const prkKey = await crypto.subtle.importKey(
+          "raw",
+          hexToArrayBuffer(saltHkdfHex),
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        const prk = await crypto.subtle.sign(
+          "HMAC",
+          prkKey,
+          hexToArrayBuffer(SHex)
+        );
+
+        const hkdfKey = await crypto.subtle.importKey(
+          "raw",
+          prk,
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        const hkdf = (await crypto.subtle.sign("HMAC", hkdfKey, infoBits)).slice(0, 16);
+        const K = hkdf;
+
+        // Prepare the message to sign: deviceGroupKey + deviceKey + secretBlock + timestamp
+        const message = deviceGroupKey + deviceKey + secretBlock + timestamp;
         const messageBuffer = new TextEncoder().encode(message);
 
         // Create HMAC using K as the key
@@ -444,12 +470,15 @@ export async function handleDeviceConfirmation(
   }
 }
 
-// Helper function to convert base64 to ArrayBuffer
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  // Decode base64 to string
-  const binaryString = atob(base64);
+// Decode either standard Base-64 ( + / =) **or** URL-safe Base-64 ( - _ no padding )
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  // Choose decoder based on character set to avoid throwing on malformed input
+  const hasUrlSafeChars = /[-_]/.test(b64);
 
-  // Copy the character codes without direct array indexing
-  // to avoid security/detect-object-injection warning
-  return Uint8Array.from(binaryString, (c) => c.charCodeAt(0)).buffer;
+  // If padding is missing (common in URL-safe variant) add it so that length is a multiple of 4
+  if (b64.length % 4 !== 0) {
+    b64 += "===".slice(0, (4 - (b64.length % 4)) % 4);
+  }
+
+  return (hasUrlSafeChars ? bufferFromBase64Url(b64) : bufferFromBase64(b64)).buffer;
 }
