@@ -1006,9 +1006,11 @@ export async function handleAuthResponse({
    */
   deviceHandler?: {
     deviceKey: string;
-    handleDeviceSrpAuth: (
+    generateStep1: () => Promise<{ srpAHex: string }>;
+    generateStep2: (
       srpB: string,
-      secretBlock: string
+      secretBlock: string,
+      salt?: string
     ) => Promise<DeviceSrpAuthResult>;
   };
   clientMetadata?: Record<string, string>;
@@ -1019,6 +1021,8 @@ export async function handleAuthResponse({
   // IMPORTANT: Log the username being used for challenges
   debug?.(`Using username "${username}" for all auth challenges`);
 
+  let currentDeviceHandler = deviceHandler;
+
   for (;;) {
     if (isAuthenticatedResponse(authResponse)) {
       let deviceKey: string | undefined = undefined;
@@ -1028,9 +1032,9 @@ export async function handleAuthResponse({
         deviceKey =
           authResponse.AuthenticationResult.NewDeviceMetadata.DeviceKey;
         debug?.("Device key obtained from authentication result:", deviceKey);
-      } else if (deviceHandler?.deviceKey) {
+      } else if (currentDeviceHandler?.deviceKey) {
         // If we're using a device key for authentication, keep track of it
-        deviceKey = deviceHandler.deviceKey;
+        deviceKey = currentDeviceHandler.deviceKey;
         debug?.("Using device key from device handler:", deviceKey);
       }
 
@@ -1074,52 +1078,26 @@ export async function handleAuthResponse({
         `Responding to SOFTWARE_TOKEN_MFA challenge with USERNAME "${username}"`
       );
     } else if (authResponse.ChallengeName === "DEVICE_SRP_AUTH") {
-      // Get challenge parameters
-      const srpB = authResponse.ChallengeParameters.SRP_B;
-      const secretBlock = authResponse.ChallengeParameters.SECRET_BLOCK;
       const deviceKey = authResponse.ChallengeParameters.DEVICE_KEY;
 
-      debug?.("Handling DEVICE_SRP_AUTH challenge");
+      debug?.("Handling DEVICE_SRP_AUTH challenge (step 1)");
 
-      // If a device handler was provided, use it
-      let deviceSrpResult;
-
-      if (deviceHandler) {
-        debug?.("Using provided device handler for SRP auth");
-        deviceSrpResult = await deviceHandler.handleDeviceSrpAuth(
-          srpB,
-          secretBlock
-        );
-        responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
-      } else {
-        // Try to create a handler for this device
-        debug?.("Creating device handler for SRP auth");
-        const createdHandler = await createDeviceSrpAuthHandler(
-          username,
-          deviceKey
-        );
-
-        if (!createdHandler) {
+      // Ensure we have a handler
+      if (!currentDeviceHandler) {
+        const created = await createDeviceSrpAuthHandler(username, deviceKey);
+        if (!created) {
           throw new Error(
             "Failed to create device SRP handler - device password may be missing"
           );
         }
-
-        deviceSrpResult = await createdHandler.handleDeviceSrpAuth(
-          srpB,
-          secretBlock
-        );
-        responseParameters.DEVICE_KEY = createdHandler.deviceKey;
+        currentDeviceHandler = created;
       }
 
-      // Add the response parameters from SRP calculation
-      responseParameters.SRP_A = deviceSrpResult.srpAHex;
-      responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
-      responseParameters.PASSWORD_CLAIM_SIGNATURE =
-        deviceSrpResult.passwordVerifier;
-      responseParameters.PASSWORD_CLAIM_SECRET_BLOCK =
-        deviceSrpResult.passwordClaimSecretBlock;
-      responseParameters.TIMESTAMP = deviceSrpResult.timestamp;
+      const { srpAHex } = await currentDeviceHandler.generateStep1();
+
+      // Build minimal response params
+      responseParameters.DEVICE_KEY = currentDeviceHandler.deviceKey;
+      responseParameters.SRP_A = srpAHex;
     } else if (authResponse.ChallengeName === "DEVICE_PASSWORD_VERIFIER") {
       // Get challenge parameters
       const srpB = authResponse.ChallengeParameters.SRP_B;
@@ -1127,37 +1105,31 @@ export async function handleAuthResponse({
       const deviceKey = authResponse.ChallengeParameters.DEVICE_KEY;
 
       debug?.("Handling DEVICE_PASSWORD_VERIFIER challenge");
+      debug?.("DEVICE_PASSWORD_VERIFIER parameters:", {
+        srpBPreview: srpB?.slice?.(0, 40),
+        srpBLength: srpB?.length,
+        secretBlockPreview: secretBlock?.slice?.(0, 40),
+        secretBlockLength: secretBlock?.length,
+        deviceKey,
+      });
 
-      // Similar approach as DEVICE_SRP_AUTH
-      let deviceSrpResult;
-
-      if (deviceHandler) {
-        debug?.("Using provided device handler for password verifier");
-        deviceSrpResult = await deviceHandler.handleDeviceSrpAuth(
-          srpB,
-          secretBlock
-        );
-        responseParameters.DEVICE_KEY = deviceHandler.deviceKey;
-      } else {
-        // Try to create a handler for this device
-        debug?.("Creating device handler for password verifier");
-        const createdHandler = await createDeviceSrpAuthHandler(
-          username,
-          deviceKey
-        );
-
-        if (!createdHandler) {
+      // Ensure we have a handler (might have been established in previous step)
+      if (!currentDeviceHandler) {
+        const created = await createDeviceSrpAuthHandler(username, deviceKey);
+        if (!created) {
           throw new Error(
             "Failed to create device SRP handler - device password may be missing"
           );
         }
-
-        deviceSrpResult = await createdHandler.handleDeviceSrpAuth(
-          srpB,
-          secretBlock
-        );
-        responseParameters.DEVICE_KEY = createdHandler.deviceKey;
+        currentDeviceHandler = created;
       }
+
+      const deviceSrpResult = await currentDeviceHandler.generateStep2(
+        srpB,
+        secretBlock,
+        authResponse.ChallengeParameters.SALT
+      );
+      responseParameters.DEVICE_KEY = currentDeviceHandler.deviceKey;
 
       // Add the response parameters from SRP calculation
       responseParameters.DEVICE_GROUP_KEY = deviceSrpResult.deviceGroupKey;
