@@ -523,8 +523,16 @@ async function generateDevicePasswordVerifier({
   // 7. Timestamp in Cognito SRP format: EEE MMM d HH:mm:ss z yyyy
   const timestamp = formatDate(new Date());
 
-  // 8. Build message and signature
-  const message = deviceGroupKey + deviceKey + secretBlock + timestamp;
+  // 8. Build HMAC input: [DeviceGroupKey||DeviceKey, SECRET_BLOCK bytes, TIMESTAMP]
+  const headerBuf = new TextEncoder().encode(deviceGroupKey + deviceKey);
+  const secretBuf = base64ToArrayBuffer(secretBlock);
+  const timeBuf = new TextEncoder().encode(timestamp);
+  const msg = new Uint8Array(
+    headerBuf.byteLength + secretBuf.byteLength + timeBuf.byteLength
+  );
+  msg.set(headerBuf, 0);
+  msg.set(new Uint8Array(secretBuf), headerBuf.byteLength);
+  msg.set(timeBuf, headerBuf.byteLength + secretBuf.byteLength);
   const hmacKey = await crypto.subtle.importKey(
     "raw",
     K,
@@ -535,7 +543,7 @@ async function generateDevicePasswordVerifier({
   const signatureBuffer = await crypto.subtle.sign(
     "HMAC",
     hmacKey,
-    new TextEncoder().encode(message)
+    msg.buffer
   );
 
   const passwordVerifier = bufferToBase64(signatureBuffer);
