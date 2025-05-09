@@ -24,6 +24,7 @@ import {
 import { processTokens } from "./common.js";
 import { bufferFromBase64, bufferToBase64 } from "./util.js";
 import { retrieveDeviceKey } from "./storage.js";
+import { createDeviceSrpAuthHandler } from "./device.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {
@@ -298,6 +299,11 @@ export function authenticateWithSRP({
       // clicks the sign-in button.
       const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
 
+      // Pre-create a device SRP handler if we already have a key & password
+      const deviceHandler = actualDeviceKey
+        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
+        : undefined;
+
       const smallA = generateSmallA();
       const largeAHex = await calculateLargeAHex(smallA);
       debug?.(`Invoking initiateAuth ...`);
@@ -375,6 +381,7 @@ export function authenticateWithSRP({
         otpMfaCode,
         newPassword,
         customChallengeAnswer,
+        deviceHandler,
         clientMetadata,
         abort: abort.signal,
       });

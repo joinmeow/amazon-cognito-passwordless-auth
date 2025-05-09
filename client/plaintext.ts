@@ -21,6 +21,7 @@ import {
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
 import { retrieveDeviceKey } from "./storage.js";
+import { createDeviceSrpAuthHandler } from "./device.js";
 
 export function authenticateWithPlaintextPassword({
   username,
@@ -64,6 +65,11 @@ export function authenticateWithPlaintextPassword({
       // provide one.
       const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey());
 
+      // Pre-create device SRP handler if password is stored (needed for DEVICE_PASSWORD_VERIFIER)
+      const deviceHandler = actualDeviceKey
+        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
+        : undefined;
+
       debug?.(`Invoking initiateAuth ...`);
 
       // Create auth parameters with optional device key
@@ -92,6 +98,7 @@ export function authenticateWithPlaintextPassword({
         smsMfaCode,
         otpMfaCode,
         newPassword,
+        deviceHandler,
         clientMetadata,
         abort: abort.signal,
       });
