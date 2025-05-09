@@ -1106,11 +1106,7 @@ export async function handleAuthResponse({
 
       debug?.("Handling DEVICE_PASSWORD_VERIFIER challenge");
       debug?.("DEVICE_PASSWORD_VERIFIER parameters:", {
-        srpBPreview: srpB?.slice?.(0, 40),
-        srpBLength: srpB?.length,
-        secretBlockPreview: secretBlock?.slice?.(0, 40),
-        secretBlockLength: secretBlock?.length,
-        deviceKey,
+        ChallengeParameters: authResponse.ChallengeParameters,
       });
 
       // Ensure we have a handler (might have been established in previous step)

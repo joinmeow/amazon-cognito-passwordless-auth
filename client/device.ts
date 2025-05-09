@@ -157,12 +157,12 @@ export async function createDeviceSrpAuthHandler(
       generateStep1: () => Promise<{ srpAHex: string }>;
 
       /**
-       * Called when the challenge name is DEVICE_PASSWORD_VERIFIER. Requires the SRP_B and
-       * SECRET_BLOCK values provided by Cognito and returns the signature payload.
+       * Called when the challenge name is DEVICE_PASSWORD_VERIFIER. Requires the SRP_B, SECRET_BLOCK, and salt provided by Cognito and returns the signature payload.
        */
       generateStep2: (
         srpB: string,
-        secretBlock: string
+        secretBlock: string,
+        salt?: string
       ) => Promise<DeviceSrpAuthResult>;
     }
   | undefined
@@ -188,6 +188,7 @@ export async function createDeviceSrpAuthHandler(
   return {
     deviceKey,
     generateStep1: async () => {
+      debug?.("🔄 [Device SRP] Starting Step 1: DEVICE_SRP_AUTH challenge");
       // generate random 'a' and A
       const aBytes = new Uint8Array(128);
       crypto.getRandomValues(aBytes);
@@ -199,24 +200,36 @@ export async function createDeviceSrpAuthHandler(
       );
       srpAHexCache = padHex(A.toString(16));
       debug?.("🚀 [Device SRP] Generated SRP_A", srpAHexCache.slice(0, 40));
+      debug?.("✅ [Device SRP] Step 1 completed successfully");
       return { srpAHex: srpAHexCache };
     },
-    generateStep2: async (srpB: string, secretBlock: string) => {
+    generateStep2: async (srpB: string, secretBlock: string, salt?: string) => {
+      debug?.(
+        "🔄 [Device SRP] Starting Step 2: DEVICE_PASSWORD_VERIFIER challenge"
+      );
       if (!smallA || !srpAHexCache) {
+        debug?.(
+          "❌ [Device SRP] Step 2 failed: generateStep1 was not called first"
+        );
         throw new Error("generateStep2 called before generateStep1");
       }
-      // Reuse helper but inject pre-computed smallA & srpAHex
-      // We'll call generateDevicePasswordVerifier but need biga? we changed earlier doesn't take smallA param.
-
+      if (!salt) {
+        debug?.("❌ [Device SRP] Step 2 failed: Missing salt parameter");
+        throw new Error("Missing salt for DEVICE_PASSWORD_VERIFIER");
+      }
+      debug?.(`🔑 [Device SRP] Salt: ${salt}`);
+      debug?.(`🔑 [Device SRP] Secret Block: ${secretBlock}`);
       const result = await generateDevicePasswordVerifier({
         deviceGroupKey,
         deviceKey,
         devicePassword,
         srpB,
         secretBlock,
+        salt,
         smallA,
         srpAHex: srpAHexCache,
       });
+      debug?.("✅ [Device SRP] Step 2 completed successfully");
       return result;
     },
   };
@@ -427,6 +440,7 @@ async function generateDevicePasswordVerifier({
   devicePassword,
   srpB,
   secretBlock,
+  salt,
   smallA,
   srpAHex: precomputedSrpAHex,
 }: {
@@ -435,6 +449,7 @@ async function generateDevicePasswordVerifier({
   devicePassword: string;
   srpB: string;
   secretBlock: string;
+  salt: string;
   smallA?: bigint;
   srpAHex?: string;
 }): Promise<DeviceSrpAuthResult> {
@@ -486,7 +501,14 @@ async function generateDevicePasswordVerifier({
     "SHA-256",
     new TextEncoder().encode(fullPassword)
   );
-  const x = arrayBufferToBigInt(fullPasswordHash);
+  // Incorporate the server-provided salt into the x calculation
+  const saltBuffer = base64ToArrayBuffer(salt);
+  const saltAndPasswordHash = await new Blob([
+    saltBuffer,
+    fullPasswordHash,
+  ]).arrayBuffer();
+  const xHash = await crypto.subtle.digest("SHA-256", saltAndPasswordHash);
+  const x = arrayBufferToBigInt(xHash);
 
   // 5. S = (B - k * g^x) ^ (a + u * x) mod N
   const kgx = (k * modPow(g, x, N)) % N;
