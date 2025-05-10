@@ -241,13 +241,21 @@ function _usePasswordless() {
       scheduleRefresh({
         abort: abort.signal,
         // Just update component state - processTokens handles storage
-        tokensCb: (newTokens) =>
-          newTokens && setTokens((tokens) => ({ ...tokens, ...newTokens })),
+        tokensCb: (newTokens) => {
+          if (newTokens) {
+            setTokens((tokens) => ({ ...tokens, ...newTokens }));
+          } else {
+            // When we get null/undefined tokens (invalid case), trigger a refresh of signInStatus
+            setRecheckSignInStatus((s) => s + 1);
+          }
+        },
         isRefreshingCb: setIsRefreshingTokens,
       })
         .catch((err) => {
           const { debug } = configure();
           debug?.("Failed to schedule token refresh:", err);
+          // Also force a recheck on errors
+          setRecheckSignInStatus((s) => s + 1);
         })
         .finally(() => setIsSchedulingRefresh(false));
       return () => abort.abort();
@@ -270,11 +278,19 @@ function _usePasswordless() {
     debug?.("Detected incomplete tokens, attempting refresh");
     refreshTokens({
       // Just update component state - processTokens handles storage
-      tokensCb: (newTokens) =>
-        newTokens && setTokens((tokens) => ({ ...tokens, ...newTokens })),
+      tokensCb: (newTokens) => {
+        if (newTokens) {
+          setTokens((tokens) => ({ ...tokens, ...newTokens }));
+        } else {
+          // If refresh fails completely, clear tokens and trigger signInStatus update
+          setTokens(undefined);
+          setRecheckSignInStatus((s) => s + 1);
+        }
+      },
       isRefreshingCb: setIsRefreshingTokens,
     }).catch(() => {
       setTokens(undefined);
+      setRecheckSignInStatus((s) => s + 1);
     });
   }
 
@@ -286,6 +302,8 @@ function _usePasswordless() {
       .catch((err) => {
         const { debug } = configure();
         debug?.("Failed to retrieve tokens from storage:", err);
+        // Make sure signInStatus gets recalculated on error
+        setRecheckSignInStatus((s) => s + 1);
       })
       .finally(() => setInitiallyRetrievingTokensFromStorage(false));
   }, [setTokens]);
@@ -366,32 +384,46 @@ function _usePasswordless() {
 
   // Determine sign-in status
   const signInStatus = useMemo(() => {
+    const { debug } = configure();
+    debug?.(
+      "Re-calculating signInStatus (recheckCount:",
+      recheckSignInStatus,
+      ")"
+    );
+
     // ensure memo updates when tokens expire
     void recheckSignInStatus;
     // 1) Initial load
     if (initiallyRetrievingTokensFromStorage) {
+      debug?.("signInStatus → CHECKING (initiallyRetrievingTokensFromStorage)");
       return "CHECKING" as const;
     }
     // 2) Any busy operation
     if (busyState.includes(signingInStatus as BusyState)) {
       if (signingInStatus === "SIGNING_OUT") {
+        debug?.("signInStatus → SIGNING_OUT (busyState)");
         return "SIGNING_OUT" as const;
       }
+      debug?.("signInStatus → SIGNING_IN (busyState)");
       return "SIGNING_IN" as const;
     }
     // 3) Not signed in if no valid tokens
     if (!tokensParsed) {
+      debug?.("signInStatus → NOT_SIGNED_IN (no tokensParsed)");
       return "NOT_SIGNED_IN" as const;
     }
     // 4) Token expired
     if (tokensParsed.expireAt.valueOf() <= Date.now()) {
+      debug?.("signInStatus → NOT_SIGNED_IN (token expired)");
       return "NOT_SIGNED_IN" as const;
     }
     // 5) Refresh in progress
     if (isSchedulingRefresh || isRefreshingTokens) {
+      debug?.("signInStatus → REFRESHING_SIGN_IN");
       return "REFRESHING_SIGN_IN" as const;
     }
     // 6) Otherwise, we're signed in
+    debug?.("signInStatus → SIGNED_IN");
     return "SIGNED_IN" as const;
   }, [
     initiallyRetrievingTokensFromStorage,

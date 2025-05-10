@@ -81,7 +81,7 @@ export async function scheduleRefresh({
   isRefreshingCb,
 }: {
   abort?: AbortSignal;
-  tokensCb?: (res: TokensFromRefresh) => void | Promise<void>;
+  tokensCb?: (res: TokensFromRefresh | null) => void | Promise<void>;
   isRefreshingCb?: (isRefreshing: boolean) => unknown;
 } = {}): Promise<void> {
   // Skip if already scheduling
@@ -104,6 +104,14 @@ export async function scheduleRefresh({
 
     if (!tokens?.expireAt) {
       logDebug("No valid tokens found, skipping refresh scheduling");
+      // Notify caller that we have no valid tokens
+      if (tokensCb) {
+        try {
+          await tokensCb(null);
+        } catch (err) {
+          logDebug("Error in tokensCb during no-tokens case:", err);
+        }
+      }
       return;
     }
 
