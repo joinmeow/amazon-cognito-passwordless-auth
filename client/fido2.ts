@@ -27,7 +27,7 @@ import {
   bufferToBase64Url,
 } from "./util.js";
 import { configure } from "./config.js";
-import { retrieveTokens } from "./storage.js";
+import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
 import { CognitoIdTokenPayload } from "./jwt-model.js";
 
 export interface StoredCredential {
@@ -489,15 +489,18 @@ export function authenticateWithFido2({
       throw new Error("Missing Fido2 config");
     }
     statusCb?.("STARTING_SIGN_IN_WITH_FIDO2");
+    let existingDeviceKey: string | undefined;
     let fido2credential: Awaited<ReturnType<typeof credentialGetter>>,
       session: string;
     try {
       if (username) {
         debug?.(`Invoking initiateAuth ...`);
+        existingDeviceKey = await retrieveDeviceKey(username);
         const initAuthResponse = await initiateAuth({
           authflow: "CUSTOM_AUTH",
           authParameters: {
             USERNAME: username,
+            ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
           },
           abort: abort.signal,
         });
@@ -560,10 +563,12 @@ export function authenticateWithFido2({
           `Proceeding with discovered credential for username: ${username} (b64: ${fido2credential.userHandleB64})`
         );
         debug?.(`Invoking initiateAuth ...`);
+        existingDeviceKey = await retrieveDeviceKey(username);
         const initAuthResponse = await initiateAuth({
           authflow: "CUSTOM_AUTH",
           authParameters: {
             USERNAME: username,
+            ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
           },
           abort: abort.signal,
         });
@@ -573,12 +578,14 @@ export function authenticateWithFido2({
       }
       statusCb?.("COMPLETING_SIGN_IN_WITH_FIDO2");
       debug?.(`Invoking respondToAuthChallenge ...`);
+      const challengeResponses: Record<string, string> = {
+        ANSWER: JSON.stringify(fido2credential),
+        USERNAME: username,
+        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
+      };
       const authResult = await respondToAuthChallenge({
         challengeName: "CUSTOM_CHALLENGE",
-        challengeResponses: {
-          ANSWER: JSON.stringify(fido2credential),
-          USERNAME: username,
-        },
+        challengeResponses,
         clientMetadata: {
           ...clientMetadata,
           signInMethod: "FIDO2",

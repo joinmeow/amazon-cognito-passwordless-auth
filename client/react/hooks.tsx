@@ -366,33 +366,40 @@ function _usePasswordless() {
 
   // Determine sign-in status
   const signInStatus = useMemo(() => {
-    recheckSignInStatus; // dummy usage otherwise eslint complains we should remove it from the dep array
-    return tokensParsed && tokensParsed.expireAt.valueOf() >= Date.now()
-      ? ("SIGNED_IN" as const)
-      : tokensParsed && (isSchedulingRefresh || isRefreshingTokens)
-        ? ("REFRESHING_SIGN_IN" as const)
-        : busyState
-              .filter((state) => !["SIGNING_OUT"].includes(state))
-              .includes(signingInStatus as BusyState)
-          ? ("SIGNING_IN" as const)
-          : initiallyRetrievingTokensFromStorage
-            ? ("CHECKING" as const)
-            : signingInStatus === "SIGNING_OUT"
-              ? ("SIGNING_OUT" as const)
-              : signingInStatus === "SIGNED_IN_WITH_PASSWORD" ||
-                  signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD" ||
-                  signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD" ||
-                  signingInStatus === "SIGNED_IN_WITH_FIDO2" ||
-                  signingInStatus === "SIGNED_IN_WITH_OTP"
-                ? ("SIGNED_IN" as const)
-                : ("NOT_SIGNED_IN" as const);
+    // ensure memo updates when tokens expire
+    void recheckSignInStatus;
+    // 1) Initial load
+    if (initiallyRetrievingTokensFromStorage) {
+      return "CHECKING" as const;
+    }
+    // 2) Any busy operation
+    if (busyState.includes(signingInStatus as BusyState)) {
+      if (signingInStatus === "SIGNING_OUT") {
+        return "SIGNING_OUT" as const;
+      }
+      return "SIGNING_IN" as const;
+    }
+    // 3) Not signed in if no valid tokens
+    if (!tokensParsed) {
+      return "NOT_SIGNED_IN" as const;
+    }
+    // 4) Token expired
+    if (tokensParsed.expireAt.valueOf() <= Date.now()) {
+      return "NOT_SIGNED_IN" as const;
+    }
+    // 5) Refresh in progress
+    if (isSchedulingRefresh || isRefreshingTokens) {
+      return "REFRESHING_SIGN_IN" as const;
+    }
+    // 6) Otherwise, we're signed in
+    return "SIGNED_IN" as const;
   }, [
+    initiallyRetrievingTokensFromStorage,
+    signingInStatus,
     tokensParsed,
     isSchedulingRefresh,
     isRefreshingTokens,
-    signingInStatus,
-    initiallyRetrievingTokensFromStorage,
-    recheckSignInStatus, // if this increments we should redetermine the signInStatus
+    recheckSignInStatus,
   ]);
 
   // Check signInStatus upon token expiry
@@ -430,6 +437,7 @@ function _usePasswordless() {
       fido2ListCredentials()
         .then((res) => {
           if (!cancel.signal.aborted) {
+            debug?.("Fetched FIDO2 credentials:", res.authenticators);
             setFido2Credentials(res.authenticators.map(toFido2Credential));
           }
         })
@@ -497,6 +505,11 @@ function _usePasswordless() {
 
     return () => abort.abort();
   }, [isSignedIn, tokens?.accessToken]);
+
+  useEffect(() => {
+    const { debug } = configure();
+    debug?.("fido2Credentials state updated:", fido2Credentials);
+  }, [fido2Credentials]);
 
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
@@ -734,19 +747,21 @@ function _usePasswordless() {
       signingOut.signedOut.catch((error: Error) => setLastError(error));
       return signingOut;
     },
-    /** Sign in with FIDO2 (e.g. Face ID or Touch) */
+    /**
+     * Sign in with FIDO2 (e.g. Face ID or Touch)
+     */
     authenticateWithFido2: ({
       username,
       credentials,
       clientMetadata,
     }: {
-      /**
-       * Username, or alias (e-mail, phone number)
-       */
+      /** Username, alias (e-mail, phone number) */
       username?: string;
       credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
       clientMetadata?: Record<string, string>;
     } = {}) => {
+      const { debug } = configure();
+      debug?.("Starting FIDO2 sign-in (hook)");
       setLastError(undefined);
       setAuthMethod("FIDO2");
       const signinIn = authenticateWithFido2({
@@ -754,12 +769,54 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         statusCb: setSigninInStatus,
-        tokensCb: (newTokens) => setTokens(newTokens),
+        tokensCb: async (newTokens) => {
+          // 1) Update tokens in state and deviceKey
+          setTokens(newTokens);
+          if (newTokens.deviceKey) {
+            setDeviceKey(newTokens.deviceKey);
+          } else {
+            try {
+              const existing = await getRememberedDevice(newTokens.username);
+              if (existing?.deviceKey) {
+                setDeviceKey(existing.deviceKey);
+              }
+            } catch {
+              // ignore
+            }
+          }
+          // 2) If a rememberDevice callback is provided and user confirmation is needed, prompt
+          if (newTokens.userConfirmationNecessary) {
+            try {
+              if (newTokens.deviceKey && newTokens.accessToken) {
+                debug?.(
+                  `Fido2 sign-in setting device ${newTokens.deviceKey} as remembered`
+                );
+                await updateDeviceStatus({
+                  accessToken: newTokens.accessToken,
+                  deviceKey: newTokens.deviceKey,
+                  deviceRememberedStatus: "remembered",
+                });
+                // Update local record
+                const rec = await getRememberedDevice(newTokens.username);
+                if (rec && rec.deviceKey === newTokens.deviceKey) {
+                  await setRememberedDevice(newTokens.username, {
+                    ...rec,
+                    remembered: true,
+                  });
+                }
+              } else {
+                debug?.("User opted NOT to remember this device");
+              }
+            } catch (err) {
+              debug?.("Failed while handling rememberDevice callback:", err);
+            }
+          }
+          // 3) Refresh FIDO2 credentials list
+          revalidateFido2Credentials();
+        },
       });
       signinIn.signedIn.catch((error: Error) => {
-        // If authentication fails, make sure to clean up properly
         setLastError(error);
-        // Don't change auth method on failure - keep it as SRP to prevent FIDO2 ops
       });
       return signinIn;
     },
@@ -1191,23 +1248,25 @@ function _useLocalUserCache() {
     ]
   );
 
-  // 4 Update user FIDO preference - only if not using SRP
+  // 4 Update user FIDO preference based on auth method & credentials
   useEffect(() => {
-    // Skip this effect entirely for SRP auth
-    if (authMethodLocal === "SRP" || !currentUser) {
-      return;
-    }
-
-    const useFido = determineFido(currentUser);
+    if (!currentUser) return;
+    // For SRP sign-ins, explicitly disable FIDO2
+    const useFido =
+      authMethodLocal === "SRP" ? "NO" : determineFido(currentUser);
     if (useFido === "INDETERMINATE") return;
     setCurrentUser((state) => {
       const update: StoredUser = {
         ...currentUser,
         useFido,
-        credentials: fido2Credentials?.map((c) => ({
-          id: c.credentialId,
-          transports: c.transports,
-        })),
+        // Clear stored credentials on SRP; otherwise keep FIDO2 list
+        credentials:
+          authMethodLocal === "SRP"
+            ? undefined
+            : fido2Credentials?.map((c) => ({
+                id: c.credentialId,
+                transports: c.transports,
+              })),
       };
       return JSON.stringify(state) === JSON.stringify(update) ? state : update;
     });
