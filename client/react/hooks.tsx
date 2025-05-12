@@ -412,15 +412,15 @@ function _usePasswordless() {
       debug?.("signInStatus → NOT_SIGNED_IN (no tokensParsed)");
       return "NOT_SIGNED_IN" as const;
     }
-    // 4) Token expired
-    if (tokensParsed.expireAt.valueOf() <= Date.now()) {
-      debug?.("signInStatus → NOT_SIGNED_IN (token expired)");
-      return "NOT_SIGNED_IN" as const;
-    }
-    // 5) Refresh in progress
+    // 4) Refresh in progress
     if (isSchedulingRefresh || isRefreshingTokens) {
       debug?.("signInStatus → REFRESHING_SIGN_IN");
       return "REFRESHING_SIGN_IN" as const;
+    }
+    // 5) Token expired
+    if (tokensParsed.expireAt.valueOf() <= Date.now()) {
+      debug?.("signInStatus → NOT_SIGNED_IN (token expired)");
+      return "NOT_SIGNED_IN" as const;
     }
     // 6) Otherwise, we're signed in
     debug?.("signInStatus → SIGNED_IN");
@@ -450,7 +450,7 @@ function _usePasswordless() {
   }, [tokens?.expireAt]);
 
   // Track FIDO2 authenticators for the user
-  const isSignedIn = signInStatus === "SIGNED_IN";
+  const isSignedIn = signInStatus === "SIGNED_IN" || signInStatus === "REFRESHING_SIGN_IN";
   const revalidateFido2Credentials = () => {
     const { debug } = configure();
 
