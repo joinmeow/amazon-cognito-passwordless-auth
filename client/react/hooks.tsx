@@ -450,7 +450,8 @@ function _usePasswordless() {
   }, [tokens?.expireAt]);
 
   // Track FIDO2 authenticators for the user
-  const isSignedIn = signInStatus === "SIGNED_IN" || signInStatus === "REFRESHING_SIGN_IN";
+  const isSignedIn =
+    signInStatus === "SIGNED_IN" || signInStatus === "REFRESHING_SIGN_IN";
   const revalidateFido2Credentials = () => {
     const { debug } = configure();
 
