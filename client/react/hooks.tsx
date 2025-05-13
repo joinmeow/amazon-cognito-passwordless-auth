@@ -210,8 +210,6 @@ function _usePasswordless() {
   );
   const [isSchedulingRefresh, setIsSchedulingRefresh] = useState<boolean>();
   const [isRefreshingTokens, setIsRefreshingTokens] = useState<boolean>();
-  const [showAuthenticatorManager, setShowAuthenticatorManager] =
-    useState(false);
   const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
   const [authMethod, setAuthMethod] = useState<
     "SRP" | "FIDO2" | "PLAINTEXT" | undefined
@@ -1056,13 +1054,6 @@ function _usePasswordless() {
       signinIn.signedIn.catch((error: Error) => setLastError(error));
       return signinIn;
     },
-    /** Should the FIDO2 credential manager UI component be shown? */
-    showAuthenticatorManager,
-    /** Toggle showing the FIDO2 credential manager UI component */
-    toggleShowAuthenticatorManager: useCallback(
-      () => setShowAuthenticatorManager((state) => !state),
-      []
-    ),
     /** The current status of TOTP MFA for the user */
     totpMfaStatus,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
