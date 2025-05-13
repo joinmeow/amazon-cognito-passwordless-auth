@@ -350,6 +350,9 @@ export async function refreshTokens({
     }
 
     // Process tokens
+    logDebug(
+      `RefreshTokens: old refreshToken=${refreshToken}, new refreshToken=${tokensFromRefresh.refreshToken}`
+    );
     const processedTokens = await processTokens(tokensFromRefresh, abort);
 
     // Reset schedule info

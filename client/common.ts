@@ -101,6 +101,7 @@ export async function processTokens(
   // 2. Store tokens for persistence
   debug?.("🔄 [Process Tokens] Storing tokens for persistence");
   await storeTokens(tokens);
+  debug?.("🔄 [Process Tokens] After storeTokens, tokens:", tokens);
 
   // 3. Schedule refresh if we have a refresh token
   // But only if this is NOT a fresh login (indicated by newDeviceMetadata)

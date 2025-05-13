@@ -37,7 +37,8 @@ export interface TokensFromStorage {
 }
 
 export async function storeTokens(tokens: TokensToStore) {
-  const { clientId, storage } = configure();
+  const { clientId, storage, debug } = configure();
+  debug?.("[storeTokens] tokens to store:", tokens);
 
   // Extract username from tokens or from the id token
   let username = tokens.username;
@@ -70,6 +71,9 @@ export async function storeTokens(tokens: TokensToStore) {
     )
   );
   if (tokens.refreshToken) {
+    debug?.(
+      `[storeTokens] Writing refreshToken for ${username} to key ${amplifyKeyPrefix}.${username}.refreshToken`
+    );
     promises.push(
       storage.setItem(
         `${amplifyKeyPrefix}.${username}.refreshToken`,
@@ -114,6 +118,9 @@ export async function storeTokens(tokens: TokensToStore) {
     )
   );
   await Promise.all(promises.filter((p) => !!p));
+  debug?.(
+    `[storeTokens] Completed storage, refreshToken stored under key ${amplifyKeyPrefix}.${username}.refreshToken`
+  );
 }
 
 export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
