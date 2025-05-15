@@ -73,6 +73,10 @@
     "./util": {
       "import": "./dist/client/util.js",
       "types": "./util.d.ts"
+    },
+    "./hosted-oauth": {
+      "import": "./dist/client/hosted-oauth.js",
+      "types": "./hosted-oauth.d.ts"
     }
   },
   "devDependencies": {
@@ -105,7 +109,8 @@
     "refresh.d.ts",
     "srp.d.ts",
     "storage.d.ts",
-    "util.d.ts"
+    "util.d.ts",
+    "hosted-oauth.d.ts"
   ],
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.598.0",
