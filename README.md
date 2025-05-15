@@ -191,6 +191,71 @@ function YourApp() {
 }
 ```
 
+## Sign in with Google (OAuth2 Redirect)
+
+When you call `signInWithGoogle()`, the library builds the Google OAuth2 authorization URL (including client ID, PKCE challenge, state, scopes, etc.) and redirects the browser. After the user signs in, Google redirects back to your registered `redirectUri` with `?code=...&state=...`.
+
+On your callback page, call `handleGoogleCallback()` from `@joinmeow/cognito-passwordless-auth/client/google` to complete the flow:
+
+Plain-JS / Multi-Page Example:
+
+```html
+<!-- /auth/google/callback.html -->
+<script type="module">
+  import { handleGoogleCallback } from "@joinmeow/cognito-passwordless-auth/client/google";
+  (async () => {
+    try {
+      const tokens = await handleGoogleCallback();
+      // Save tokens in your app (e.g. in memory or storage)
+      window.location.href = "/";
+    } catch (err) {
+      console.error("Google OAuth failed", err);
+      document.body.textContent = "Sign-in error: " + err.message;
+    }
+  })();
+</script>
+```
+
+React Single-Page App Example:
+
+```jsx
+// GoogleCallback.jsx
+import { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { handleGoogleCallback } from "@joinmeow/cognito-passwordless-auth/client/google";
+
+export function GoogleCallback() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await handleGoogleCallback();
+        navigate("/dashboard");
+      } catch (err) {
+        console.error("Google callback error", err);
+        navigate("/login?error=oauth");
+      }
+    })();
+  }, [navigate]);
+
+  return <div>Signing you in…</div>;
+}
+```
+
+Steps:
+
+1. Configure Google OAuth in `Passwordless.configure({ google: { clientId, redirectUri, scopes } })`.
+2. Initiate sign-in:
+
+```js
+import { signInWithGoogle } from "@joinmeow/cognito-passwordless-auth/client/google";
+<button onClick={() => signInWithGoogle()}>Sign in with Google</button>;
+```
+
+3. After redirect, your callback page or component calls `handleGoogleCallback()` to exchange the code, store tokens, clean up the URL, and return the tokens.
+4. Redirect users to your protected routes (e.g. `/dashboard`).
+
 ## Advanced Features
 
 ### User Registration Flow
@@ -300,88 +365,4 @@ The library is organized into several modules that handle different aspects of a
   - `device.ts` - Device remembering and authentication
 - **Token Management**:
   - `storage.ts` - Token persistence and retrieval
-  - `refresh.ts` - Token refresh scheduling and execution
-  - `common.ts` - Shared token processing logic
-- **React Integration**:
-  - `react/hooks.tsx` - React hooks for authentication state
-  - `react/components.tsx` - Pre-built authentication UI components
-
-## Token Refresh Behavior
-
-The library intelligently manages token refresh to maintain a seamless user experience:
-
-```javascript
-// In refresh.ts
-const refreshDelay = Math.max(0, timeUntilExpiry * 0.5);
-```
-
-Token refresh occurs at exactly half of the remaining token lifetime. For example:
-
-- For a token with 1 hour validity, a refresh will occur after 30 minutes
-- For a token with 24 hours validity, a refresh will occur after 12 hours
-
-Key refresh behaviors:
-
-1. **Proactive Refresh** - Tokens are refreshed at 50% of their lifetime to ensure continuity
-2. **Background Refresh** - Token refresh happens automatically without user intervention
-3. **Visibility Awareness** - Refreshes adapt to tab visibility to conserve resources
-4. **Automatic Recovery** - The library handles refresh failures with graceful retries
-
-## Password Reset Flow
-
-The library also supports password reset functionality:
-
-```javascript
-// 1. Request a password reset code
-await forgotPassword({
-  username: "user@example.com",
-});
-
-// 2. Complete the password reset with the code received via email/SMS
-await confirmForgotPassword({
-  username: "user@example.com",
-  confirmationCode: "123456",
-  password: "newSecurePassword123",
-});
-
-// 3. User can now sign in with the new password
-```
-
-## Configuration
-
-Configure the following properties:
-
-```typescript
-import { configure } from "amazon-cognito-passwordless-auth";
-
-configure({
-  clientId: "...",
-  cognitoIdpEndpoint: "...",
-  // ... other config properties
-
-  // Whether to use the new GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN.
-  // When true, uses the new API. When false (default), uses the legacy approach.
-  useGetTokensFromRefreshToken: false, // (default: false)
-
-  // Token refresh configuration
-  tokenRefresh: {
-    // Time (in milliseconds) after which a user is considered inactive
-    // Default: 30 minutes (1,800,000 ms)
-    inactivityThreshold: 30 * 60 * 1000,
-
-    // Whether to base token refreshes on user activity
-    // When true, tokens are refreshed intelligently based on user interactions
-    // When false, tokens are refreshed based on wall-clock time
-    // Default: true
-    useActivityTracking: true,
-  },
-});
-```
-
-## Documentation
-
-For more detailed documentation about the available API methods and components, check the client source code or refer to the documentation for each specific module.
-
-## License
-
-Apache-2.0
+  - `refresh.ts`

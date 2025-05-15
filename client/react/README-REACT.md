@@ -10,9 +10,6 @@
    - [Installation](#installation)
    - [Configuration](#configuration)
 3. [React Components](#react-components)
-   - [PasswordlessContextProvider](#passwordlesscontextprovider)
-   - [Passwordless Component](#passwordless-component)
-   - [Fido2Toast Component](#fido2toast-component)
 4. [React Hooks](#react-hooks)
    - [usePasswordless Hook](#usepasswordless-hook)
    - [useLocalUserCache Hook](#uselocalusercache-hook)
@@ -95,133 +92,16 @@ configure({
 2. **Wrap your app with the providers**:
 
 ```jsx
-import {
-  PasswordlessContextProvider,
-  Passwordless as PasswordlessComponent,
-  Fido2Toast,
-} from "amazon-cognito-passwordless-auth/react";
-import "amazon-cognito-passwordless-auth/passwordless.css";
+import { PasswordlessContextProvider } from "amazon-cognito-passwordless-auth/react";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <PasswordlessContextProvider>
-    <PasswordlessComponent
-      brand={{
-        backgroundImageUrl: "<url>",
-        customerName: "ACME corp.",
-        customerLogoUrl: "<url>",
-      }}
-    >
-      <App />
-    </PasswordlessComponent>
-    <Fido2Toast />
+    <App />
   </PasswordlessContextProvider>
 );
 ```
 
-You can resize the `Passwordless` component by overriding the `.passwordless-main-container` class:
-
-```css
-.passwordless-main-container {
-  height: 100vh !important;
-}
-```
-
 ## React Components
-
-### PasswordlessContextProvider
-
-This component provides the React context for the Passwordless library. It's required to wrap your app to use any of the hooks.
-
-```jsx
-<PasswordlessContextProvider enableLocalUserCache={true}>
-  <App />
-</PasswordlessContextProvider>
-```
-
-Props:
-
-- `enableLocalUserCache` (optional): Enable storing recently signed-in users
-- `children`: Your application components
-
-### Passwordless Component
-
-A pre-built login component that supports signing in with FIDO2 and username/password. It shows the last signed-in user on this device, so they can sign in again without entering their username:
-
-<img src="../../drawings/passwordless-signin.png" alt="Passwordless Sign In" width="500px" />
-
-Users can also sign in with their Passkey, without typing their username:
-
-<img src="../../drawings/passwordless-signin-passkey.png" alt="Passwordless Sign In" width="500px" />
-
-Usage:
-
-```jsx
-<Passwordless
-  brand={{
-    backgroundImageUrl: "url/to/background.jpg",
-    customerName: "Your Company",
-    customerLogoUrl: "url/to/logo.png",
-  }}
->
-  <App />
-</Passwordless>
-```
-
-The component will render your app (the child) once the user signs in. If no child is provided and the user is signed in, it renders a debug utility view:
-
-<img src="../../drawings/passwordless-signed-in.png" alt="Passwordless Signed In" width="500px" />
-
-### Fido2Toast Component
-
-This component renders as a toast at the top right corner of the viewport, with two purposes:
-
-1. **Recommend FIDO2 credential creation** if the user doesn't have one yet
-2. **Manage FIDO2 credentials** - view, update, delete, and add credentials
-
-Add it at the top level of your app, below other components so it can render on top:
-
-```jsx
-<PasswordlessContextProvider>
-  <App />
-  <Fido2Toast />
-</PasswordlessContextProvider>
-```
-
-#### FIDO2 Credential Recommendation
-
-The recommendation appears automatically if the user:
-
-- Signed in with a method other than FIDO2
-- Doesn't have any FIDO2 credentials set up
-- Has a compatible platform authenticator available
-
-<img src="../../drawings/fido2-recommendation-screenshot.png" alt="FIDO2 credentials" width="400px" />
-
-When the user clicks "Add face or touch unlock", they'll provide the biometric gesture and name their credential:
-
-<img src="../../drawings/fido2-friendly-name-screenshot.png" alt="FIDO2 credentials" width="450px" />
-
-After completion, FIDO2 is activated for future sign-ins:
-
-<img src="../../drawings/fido2-activated-screenshot.png" alt="FIDO2 credentials" width="250px" />
-
-#### FIDO2 Credential Manager
-
-The credential manager appears when you call `toggleShowAuthenticatorManager()` from the `usePasswordless` hook:
-
-<img src="../../drawings/fido2-authenticators-screenshot.png" alt="FIDO2 credentials" width="500px" />
-
-```jsx
-function ManageCredentialsButton() {
-  const { toggleShowAuthenticatorManager } = usePasswordless();
-
-  return (
-    <button onClick={toggleShowAuthenticatorManager}>
-      Manage FIDO2 Credentials
-    </button>
-  );
-}
-```
 
 ## React Hooks
 
@@ -245,8 +125,6 @@ function MyComponent() {
     fido2Credentials, // Array of user's registered FIDO2 credentials
     creatingCredential, // Boolean: true during credential creation
     userVerifyingPlatformAuthenticatorAvailable, // Boolean: is Face/Touch ID available?
-    showAuthenticatorManager, // Boolean: should credential manager be shown?
-    toggleShowAuthenticatorManager, // Toggle the credential manager visibility
 
     // Device authentication
     deviceKey, // Current device key for remembered device

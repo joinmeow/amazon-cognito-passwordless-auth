@@ -24,7 +24,7 @@
     "gen-types:client": "rm -rf react && tsc --project client/tsconfig.json --declarationDir . --declaration --emitDeclarationOnly",
     "gen-types": "npm run gen-types:client",
     "clear-d-ts": "find . -type d -name node_modules -prune -o -name '*.d.ts' -print | xargs rm",
-    "dist:client": "rm -rf dist/client && npm run gen-types:client && cd client && npx tsc --outdir ../dist/client && cp *.css ../dist/client && node ../dist-create-package.cjs client module",
+    "dist:client": "rm -rf dist/client && npm run gen-types:client && cd client && npx tsc --outdir ../dist/client && node ../dist-create-package.cjs client module",
     "dist": "npm run dist:client",
     "prepack": "npm run dist"
   },
