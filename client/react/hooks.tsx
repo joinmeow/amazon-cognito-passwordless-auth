@@ -223,6 +223,43 @@ function _usePasswordless() {
     preferred: false,
     availableMfaTypes: [],
   });
+  /** Timestamp (ms) of the last detected user interaction */
+  const [lastActivityAt, setLastActivityAt] = useState<number>(() =>
+    Date.now()
+  );
+
+  /** Local clock tick (updates every second) so the UI can react to inactivity duration */
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  // 1️⃣  Attach lightweight listeners to detect user activity
+  useEffect(() => {
+    if (typeof globalThis.addEventListener === "undefined") return;
+    const activityHandler = () => setLastActivityAt(Date.now());
+    const events: (keyof WindowEventMap)[] = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "scroll",
+      "touchstart",
+    ];
+    events.forEach((evt) =>
+      globalThis.addEventListener(evt, activityHandler, { passive: true })
+    );
+    return () =>
+      events.forEach((evt) =>
+        globalThis.removeEventListener(evt, activityHandler)
+      );
+  }, []);
+
+  // 2️⃣  Keep an internal clock running so React renders every second and derived
+  //      inactivity duration stays fresh. Very cheap (1-sec interval, cleared on unmount).
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  /** Helper function for consumers – milliseconds since last activity */
+  const timeSinceLastActivityMs = nowTick - lastActivityAt;
 
   // At component mount, check sign-in status
   useEffect(() => {
@@ -576,6 +613,7 @@ function _usePasswordless() {
       }),
     /** Mark the user as active to potentially trigger token refresh */
     markUserActive: () => {
+      setLastActivityAt(Date.now());
       // Schedule a refresh if tokens exist but only if we're not currently refreshing
       if (tokens && !isRefreshingTokens) {
         // Using void to properly handle the promise
@@ -1092,6 +1130,10 @@ function _usePasswordless() {
         });
       }
     },
+    /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
+    timeSinceLastActivityMs,
+    /** Seconds (rounded) since the last user activity */
+    timeSinceLastActivitySeconds: Math.round(timeSinceLastActivityMs / 1000),
   };
 }
 

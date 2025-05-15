@@ -127,11 +127,18 @@ export interface Config {
    */
   history?: MinimalHistory;
   /**
-   * Whether to use the new GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN.
-   * When true, uses the new API. When false (default), uses the legacy approach.
-   * @default false
+   * Cognito Hosted UI / OAuth2 configuration. Required for signInWithRedirect (Google etc.).
    */
-  useGetTokensFromRefreshToken?: boolean;
+  hostedUi?: {
+    /** e.g. mydomain.auth.us-east-1.amazoncognito.com */
+    domain: string;
+    /** Redirect URI registered in the user-pool app client */
+    redirectSignIn: string;
+    /** OAuth2 scopes requested. Defaults to ['openid','email','profile'] */
+    scopes?: string[];
+    /** Use authorization-code or implicit flow. Defaults to 'code'. */
+    responseType?: "code" | "token";
+  };
 }
 
 export type ConfigWithDefaults = Config &
@@ -168,15 +175,15 @@ export function configure(config?: ConfigInput) {
         useActivityTracking: config.tokenRefresh?.useActivityTracking ?? true,
       },
     };
-    config_.debug?.("Configuration loaded:", config);
-
-    // Add new configuration property with default
-    if (config.useGetTokensFromRefreshToken !== undefined) {
-      config_.useGetTokensFromRefreshToken =
-        config.useGetTokensFromRefreshToken;
-    } else if (config_.useGetTokensFromRefreshToken === undefined) {
-      config_.useGetTokensFromRefreshToken = false;
+    if (config.hostedUi) {
+      config_.hostedUi = {
+        domain: config.hostedUi.domain,
+        redirectSignIn: config.hostedUi.redirectSignIn,
+        scopes: config.hostedUi.scopes ?? ["openid", "email", "profile"],
+        responseType: config.hostedUi.responseType ?? "code",
+      };
     }
+    config_.debug?.("Configuration loaded:", config);
   } else {
     if (!config_) {
       throw new Error("Call configure(config) first");

@@ -43,7 +43,7 @@ Passwordless.configure({
   },
   storage: localStorage, // Optional, default to localStorage
   // Whether to use the new GetTokensFromRefreshToken API
-  useGetTokensFromRefreshToken: false, // Default is false
+  useGetTokensFromRefreshToken: true, // Default is true
 });
 ```
 
@@ -146,28 +146,30 @@ const hours = timeAgo(Date.now(), newDate(Date.now() - 2 * 3600 * 1000)); // 2 h
 
 This library supports the new GetTokensFromRefreshToken API that was introduced by AWS Cognito. This API supports refresh token rotation, which enhances security by automatically invalidating used refresh tokens after a grace period when enabled in your user pool.
 
-### Enabling GetTokensFromRefreshToken Support
+### GetTokensFromRefreshToken API (Default)
 
-To use the new API, set the `useGetTokensFromRefreshToken` flag in your configuration:
+This library uses the GetTokensFromRefreshToken API by default. This API supports refresh token rotation, which enhances security by automatically invalidating used refresh tokens after a grace period when enabled in your user pool.
+
+If you need to use the legacy InitiateAuth approach instead, you can disable this feature:
 
 ```typescript
 import { configure } from "@joinmeow/cognito-passwordless-auth";
 
 configure({
   // ...your other configuration options
-  useGetTokensFromRefreshToken: true, // Default is false
+  useGetTokensFromRefreshToken: false, // Override the default (true)
 });
 ```
 
-When enabled:
+By default (enabled):
 
-- The library will use the GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN flow
+- The library uses the GetTokensFromRefreshToken API instead of InitiateAuth with REFRESH_TOKEN flow
 - Any new refresh tokens returned as part of token refresh (when refresh token rotation is enabled in your user pool) will be automatically stored and used for future refresh operations
 - Debug logs will show when refresh token rotation occurs
 
-When disabled (default):
+When explicitly disabled:
 
-- The library will continue using the InitiateAuth API with REFRESH_TOKEN flow as before
+- The library will use the older InitiateAuth API with REFRESH_TOKEN flow
 
 ### Configuring Refresh Token Rotation in Your User Pool
 

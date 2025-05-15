@@ -14,8 +14,12 @@
  */
 import { configure } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import { retrieveTokens, storeRefreshScheduleInfo } from "./storage.js";
-import { initiateAuth, getTokensFromRefreshToken } from "./cognito-api.js";
+import {
+  retrieveTokens,
+  storeRefreshScheduleInfo,
+  getRefreshScheduleInfo,
+} from "./storage.js";
+import { getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 
@@ -72,8 +76,8 @@ function logDebug(message: string, error?: unknown): void {
 }
 
 /**
- * Schedule a token refresh based on token expiry
- * Using a simple approach: refresh at 75% of token lifetime
+ * Schedule a token refresh so it fires ~5 minutes before expiry
+ * (or immediately if expiry is near). Wall-clock timers survive tab sleep.
  */
 export async function scheduleRefresh({
   abort,
@@ -96,6 +100,28 @@ export async function scheduleRefresh({
       refreshState.refreshTimer();
       refreshState.refreshTimer = undefined;
       await storeRefreshScheduleInfo({ isScheduled: false });
+    }
+
+    // Restore persisted schedule (e.g. after hard reload)
+    const persisted = await getRefreshScheduleInfo();
+    if (
+      !refreshState.refreshTimer &&
+      persisted.isScheduled &&
+      persisted.expiryTime
+    ) {
+      const delay = Math.max(
+        0,
+        persisted.expiryTime - Date.now() - 5 * 60 * 1000
+      );
+      if (delay > 0) {
+        logDebug(
+          `Restoring persisted refresh timer to fire in ${Math.round(delay / 1000)}s`
+        );
+        refreshState.refreshTimer = setTimeoutWallClock(() => {
+          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+        }, delay);
+        return;
+      }
     }
 
     // Get current tokens
@@ -141,7 +167,7 @@ export async function scheduleRefresh({
         });
 
         // Schedule next refresh with a small delay to avoid race conditions
-        setTimeout(() => {
+        setTimeoutWallClock(() => {
           void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
         }, 2000);
       } catch (err) {
@@ -152,9 +178,8 @@ export async function scheduleRefresh({
       return;
     }
 
-    // Standard case: Schedule refresh at 50% of remaining token lifetime (half-time)
-    // This provides more frequent refreshes for better token freshness
-    const refreshDelay = Math.max(0, timeUntilExpiry * 0.5);
+    // Standard case: schedule refresh five minutes before expiry
+    const refreshDelay = Math.max(0, timeUntilExpiry - 5 * 60 * 1000);
 
     // Record scheduling info
     await storeRefreshScheduleInfo({
@@ -170,43 +195,42 @@ export async function scheduleRefresh({
       try {
         await storeRefreshScheduleInfo({ isScheduled: false });
 
-        // Only refresh if document is visible or close to expiry
-        if (isDocumentVisible() || timeUntilExpiry < 5 * 60 * 1000) {
-          void refreshTokens({
-            abort,
-            tokensCb: async (refreshedTokens) => {
-              await tokensCb?.(refreshedTokens);
-              // Schedule the next refresh
-              void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
-            },
-            isRefreshingCb,
-            tokens,
-          });
-        } else {
-          logDebug("Page not visible, deferring refresh");
-          // Schedule a check soon to see if page becomes visible
-          setTimeout(() => {
+        // Re-read latest token info to avoid stale data
+        const latestTokens = await retrieveTokens();
+
+        // Always refresh at the scheduled point – independent of tab visibility
+        void refreshTokens({
+          abort,
+          tokensCb: async (refreshedTokens) => {
+            await tokensCb?.(refreshedTokens);
+            // Chain the next schedule after successful refresh
             void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
-          }, 60000); // Check again in 1 minute
-        }
+          },
+          isRefreshingCb,
+          tokens: latestTokens,
+        });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
         // Try again with backoff
-        setTimeout(() => {
+        setTimeoutWallClock(() => {
           void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
         }, 30000); // 30 second backoff
       }
     }, refreshDelay);
 
     // Handle abort event
-    abort?.addEventListener("abort", () => {
-      if (refreshState.refreshTimer) {
-        refreshState.refreshTimer();
-        refreshState.refreshTimer = undefined;
-        void storeRefreshScheduleInfo({ isScheduled: false });
-        logDebug("Refresh scheduling aborted");
-      }
-    });
+    abort?.addEventListener(
+      "abort",
+      () => {
+        if (refreshState.refreshTimer) {
+          refreshState.refreshTimer();
+          refreshState.refreshTimer = undefined;
+          void storeRefreshScheduleInfo({ isScheduled: false });
+          logDebug("Refresh scheduling aborted");
+        }
+      },
+      { once: true }
+    );
   } catch (err) {
     logDebug("Error scheduling refresh:", err);
   }
@@ -251,8 +275,6 @@ export async function refreshTokens({
   isRefreshingCb?.(true);
 
   try {
-    const { useGetTokensFromRefreshToken } = configure();
-
     // Get tokens if not provided
     if (!tokens) {
       tokens = await retrieveTokens();
@@ -289,61 +311,31 @@ export async function refreshTokens({
     let tokensFromRefresh: TokensFromRefresh;
 
     try {
-      if (useGetTokensFromRefreshToken) {
-        // Use new GetTokensFromRefreshToken API
-        const authResult = await getTokensFromRefreshToken({
-          refreshToken,
-          deviceKey,
-          abort,
-        });
+      // Always use GetTokensFromRefreshToken API
+      const authResult = await getTokensFromRefreshToken({
+        refreshToken,
+        deviceKey,
+        abort,
+      });
 
-        tokensFromRefresh = {
-          accessToken: authResult.AuthenticationResult.AccessToken,
-          idToken: authResult.AuthenticationResult.IdToken,
-          expireAt: new Date(
-            Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-          ),
-          username,
-          ...(authResult.AuthenticationResult.RefreshToken && {
-            refreshToken: authResult.AuthenticationResult.RefreshToken,
-          }),
-          ...(deviceKey && { deviceKey }),
-        };
+      tokensFromRefresh = {
+        accessToken: authResult.AuthenticationResult.AccessToken,
+        idToken: authResult.AuthenticationResult.IdToken,
+        expireAt: new Date(
+          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+        ),
+        username,
+        // As per AWS docs GetTokensFromRefreshToken always returns a new refresh
+        // token when rotation is enabled. We still fall back to the previous
+        // value as a safeguard when rotation is disabled.
+        refreshToken:
+          authResult.AuthenticationResult.RefreshToken ?? refreshToken,
+        ...(deviceKey && { deviceKey }),
+      };
 
-        logDebug(
-          `Token refreshed, expires in ${authResult.AuthenticationResult.ExpiresIn}s`
-        );
-      } else {
-        // Use legacy InitiateAuth flow
-        const authParameters: Record<string, string> = {
-          REFRESH_TOKEN: refreshToken,
-        };
-
-        if (deviceKey) {
-          authParameters.DEVICE_KEY = deviceKey;
-        }
-
-        const authResult = await initiateAuth({
-          authflow: "REFRESH_TOKEN",
-          authParameters,
-          deviceKey,
-          abort,
-        });
-
-        tokensFromRefresh = {
-          accessToken: authResult.AuthenticationResult.AccessToken,
-          idToken: authResult.AuthenticationResult.IdToken,
-          expireAt: new Date(
-            Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-          ),
-          username,
-          ...(deviceKey && { deviceKey }),
-        };
-
-        logDebug(
-          `Token refreshed, expires in ${authResult.AuthenticationResult.ExpiresIn}s`
-        );
-      }
+      logDebug(
+        `Token refreshed; new refresh token received: ${authResult.AuthenticationResult.RefreshToken ? "yes" : "no"}, expires in ${authResult.AuthenticationResult.ExpiresIn}s`
+      );
     } catch (error) {
       logDebug("Token refresh failed:", error);
       throw error;
@@ -395,10 +387,15 @@ export async function forceRefreshTokens(
   }
 
   // Force refresh
-  return refreshTokens({
-    ...args,
+  const refreshed = await refreshTokens({
+    ...(args ?? {}),
     force: true,
   });
+
+  // Resume automatic scheduling after the forced refresh
+  void scheduleRefresh();
+
+  return refreshed;
 }
 
 // Initialize visibility change listener for browser environments
