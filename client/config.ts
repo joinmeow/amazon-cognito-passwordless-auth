@@ -193,26 +193,27 @@ export function configure(config?: ConfigInput) {
   return config_;
 }
 
-/**
- * Get the full OAuth authorize endpoint URL with protocol
- */
+function normalizeEndpoint(endpoint: string): string {
+  // Ensure the endpoint has a protocol and no trailing slash
+  const withProtocol = endpoint.startsWith("http")
+    ? endpoint
+    : `https://${endpoint}`;
+  return withProtocol.replace(/\/+$/, ""); // trim trailing slashes
+}
+
 export function getAuthorizeEndpoint(): string {
-  const config = configure();
-  const endpoint = config.cognitoIdpEndpoint;
-  return endpoint.startsWith("http")
-    ? `${endpoint}/oauth2/authorize`
-    : `https://${endpoint}/oauth2/authorize`;
+  const { cognitoIdpEndpoint } = configure();
+  const base = normalizeEndpoint(cognitoIdpEndpoint);
+  return `${base}/oauth2/authorize`;
 }
 
 /**
  * Get the full OAuth token endpoint URL with protocol
  */
 export function getTokenEndpoint(): string {
-  const config = configure();
-  const endpoint = config.cognitoIdpEndpoint;
-  return endpoint.startsWith("http")
-    ? `${endpoint}/oauth2/token`
-    : `https://${endpoint}/oauth2/token`;
+  const { cognitoIdpEndpoint } = configure();
+  const base = normalizeEndpoint(cognitoIdpEndpoint);
+  return `${base}/oauth2/token`;
 }
 
 /**
