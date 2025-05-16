@@ -162,7 +162,7 @@ export function configure(config?: ConfigInput) {
       cognitoIdpEndpoint,
       crypto: config.crypto ?? Defaults.crypto,
       storage: config.storage ?? Defaults.storage,
-      fetch: (config.fetch ?? Defaults.fetch).bind(globalThis) as MinimalFetch,
+      fetch: (config.fetch ?? Defaults.fetch).bind(globalThis),
       location: config.location ?? Defaults.location,
       history: config.history ?? Defaults.history,
       totp: config.totp ?? {
