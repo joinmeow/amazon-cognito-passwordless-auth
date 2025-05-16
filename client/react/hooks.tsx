@@ -1154,7 +1154,7 @@ function _usePasswordless() {
       setLastError(undefined);
       setAuthMethod("REDIRECT");
       setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
-      hostedSignInWithRedirect({ provider, customState });
+      void hostedSignInWithRedirect({ provider, customState });
     },
   };
 }
@@ -1246,7 +1246,7 @@ function _useLocalUserCache() {
 
   // 1 populate lastSignedInUsers from local storage
   useEffect(() => {
-    getLastSignedInUsers()
+    void getLastSignedInUsers()
       .then(setLastSignedInUsers)
       .catch((err) => {
         const { debug } = configure();
@@ -1283,12 +1283,12 @@ function _useLocalUserCache() {
     setCurrentUser((state) =>
       JSON.stringify(state) === JSON.stringify(user) ? state : user
     );
-  }, [lastSignedInUsers, idToken]);
+  }, [lastSignedInUsers, idToken, authMethodLocal]);
 
   // 3 If user is updated, store in lastSignedInUsers
   useEffect(() => {
     if (currentUser) {
-      registerSignedInUser(currentUser).catch((err) => {
+      void registerSignedInUser(currentUser).catch((err) => {
         const { debug } = configure();
         debug?.("Failed to register last signed-in user:", err);
       });
@@ -1373,7 +1373,7 @@ function _useLocalUserCache() {
       setFidoPreferenceOverride(undefined);
       setAuthMethodLocal(undefined);
     }
-  }, [currentUser]);
+  }, [currentUser, authMethodLocal]);
 
   return {
     /** The current signed-in user */
@@ -1390,7 +1390,7 @@ function _useLocalUserCache() {
     lastSignedInUsers,
     /** Clear the last signed in users from your configured storage (e.g. localStorage) */
     clearLastSignedInUsers: () => {
-      clearLastSignedInUsers().catch((err) => {
+      void clearLastSignedInUsers().catch((err) => {
         const { debug } = configure();
         debug?.("Failed to clear last signed-in users:", err);
       });

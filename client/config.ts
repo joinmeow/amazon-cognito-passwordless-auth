@@ -156,7 +156,7 @@ export function configure(config?: ConfigInput) {
         "Invalid configuration provided: either cognitoIdpEndpoint or userPoolId must be provided"
       );
     }
-    
+
     config_ = {
       ...config,
       cognitoIdpEndpoint,
@@ -180,7 +180,9 @@ export function configure(config?: ConfigInput) {
         scopes: config.hostedUi.scopes ?? ["openid", "email", "profile"],
         responseType: config.hostedUi.responseType ?? "code",
       };
-      config_.debug?.("Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain");
+      config_.debug?.(
+        "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
+      );
     }
     config_.debug?.("Configuration loaded:", config);
   } else {
@@ -197,7 +199,7 @@ export function configure(config?: ConfigInput) {
 export function getAuthorizeEndpoint(): string {
   const config = configure();
   const endpoint = config.cognitoIdpEndpoint;
-  return endpoint.startsWith('http') 
+  return endpoint.startsWith("http")
     ? `${endpoint}/oauth2/authorize`
     : `https://${endpoint}/oauth2/authorize`;
 }
@@ -208,7 +210,7 @@ export function getAuthorizeEndpoint(): string {
 export function getTokenEndpoint(): string {
   const config = configure();
   const endpoint = config.cognitoIdpEndpoint;
-  return endpoint.startsWith('http') 
+  return endpoint.startsWith("http")
     ? `${endpoint}/oauth2/token`
     : `https://${endpoint}/oauth2/token`;
 }
@@ -219,9 +221,7 @@ export function getTokenEndpoint(): string {
 export function getCognitoIdpEndpointWithProtocol(): string {
   const config = configure();
   const endpoint = config.cognitoIdpEndpoint;
-  return endpoint.startsWith('http') 
-    ? endpoint
-    : `https://${endpoint}`;
+  return endpoint.startsWith("http") ? endpoint : `https://${endpoint}`;
 }
 
 type Maybe<T> = T | undefined | null;
