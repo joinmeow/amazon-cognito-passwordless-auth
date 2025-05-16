@@ -130,8 +130,6 @@ export interface Config {
    * Cognito Hosted UI / OAuth2 configuration. Required for signInWithRedirect (Google etc.).
    */
   hostedUi?: {
-    /** e.g. mydomain.auth.us-east-1.amazoncognito.com */
-    domain: string;
     /** Redirect URI registered in the user-pool app client */
     redirectSignIn: string;
     /** OAuth2 scopes requested. Defaults to ['openid','email','profile'] */
@@ -158,6 +156,7 @@ export function configure(config?: ConfigInput) {
         "Invalid configuration provided: either cognitoIdpEndpoint or userPoolId must be provided"
       );
     }
+    
     config_ = {
       ...config,
       cognitoIdpEndpoint,
@@ -177,11 +176,11 @@ export function configure(config?: ConfigInput) {
     };
     if (config.hostedUi) {
       config_.hostedUi = {
-        domain: config.hostedUi.domain,
         redirectSignIn: config.hostedUi.redirectSignIn,
         scopes: config.hostedUi.scopes ?? ["openid", "email", "profile"],
         responseType: config.hostedUi.responseType ?? "code",
       };
+      config_.debug?.("Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain");
     }
     config_.debug?.("Configuration loaded:", config);
   } else {
@@ -190,6 +189,39 @@ export function configure(config?: ConfigInput) {
     }
   }
   return config_;
+}
+
+/**
+ * Get the full OAuth authorize endpoint URL with protocol
+ */
+export function getAuthorizeEndpoint(): string {
+  const config = configure();
+  const endpoint = config.cognitoIdpEndpoint;
+  return endpoint.startsWith('http') 
+    ? `${endpoint}/oauth2/authorize`
+    : `https://${endpoint}/oauth2/authorize`;
+}
+
+/**
+ * Get the full OAuth token endpoint URL with protocol
+ */
+export function getTokenEndpoint(): string {
+  const config = configure();
+  const endpoint = config.cognitoIdpEndpoint;
+  return endpoint.startsWith('http') 
+    ? `${endpoint}/oauth2/token`
+    : `https://${endpoint}/oauth2/token`;
+}
+
+/**
+ * Get the full Cognito IDP endpoint URL with protocol
+ */
+export function getCognitoIdpEndpointWithProtocol(): string {
+  const config = configure();
+  const endpoint = config.cognitoIdpEndpoint;
+  return endpoint.startsWith('http') 
+    ? endpoint
+    : `https://${endpoint}`;
 }
 
 type Maybe<T> = T | undefined | null;

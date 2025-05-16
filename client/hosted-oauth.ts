@@ -12,7 +12,7 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { configure } from "./config.js";
+import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
 import { storeTokens } from "./storage.js";
 
@@ -25,15 +25,39 @@ export async function signInWithRedirect({
   customState,
 }: { provider?: string; customState?: string } = {}) {
   const cfg = configure();
+  const { debug } = cfg;
+  
   if (!cfg.hostedUi) {
     throw new Error("hostedUi configuration missing");
   }
+  
   const {
-    domain,
     redirectSignIn,
     scopes,
     responseType = "code",
   } = cfg.hostedUi;
+  
+  // Get the OAuth authorize endpoint
+  const authorizeEndpoint = getAuthorizeEndpoint();
+  debug?.(`Using OAuth authorize endpoint: ${authorizeEndpoint}`);
+  
+  // Construct full URL from relative URL if needed
+  let fullRedirectUrl = redirectSignIn;
+  
+  // Check if the redirectSignIn is relative (doesn't start with http:// or https://)
+  if (redirectSignIn && !redirectSignIn.match(/^https?:\/\//)) {
+    debug?.(`Converting relative redirectSignIn "${redirectSignIn}" to absolute URL`);
+    
+    // Create a URL object using the current location as base
+    const currentUrl = new URL(cfg.location.href);
+    
+    // Create a new URL with the current as base and the redirect path as the path
+    const absoluteUrl = new URL(redirectSignIn, currentUrl.origin);
+    fullRedirectUrl = absoluteUrl.href;
+    
+    debug?.(`Converted to absolute URL: ${fullRedirectUrl}`);
+  }
+  
   const stateRandom = generateRandomString(32);
   const state = customState
     ? `${stateRandom}-${btoa(customState)}`
@@ -47,7 +71,7 @@ export async function signInWithRedirect({
 
   const query: Record<string, string> = {
     client_id: cfg.clientId,
-    redirect_uri: redirectSignIn,
+    redirect_uri: fullRedirectUrl,
     response_type: responseType,
     scope: (scopes ?? ["openid", "email", "profile"]).join(" "),
     state,
@@ -58,18 +82,55 @@ export async function signInWithRedirect({
     query.code_challenge_method = method;
   }
 
+  debug?.(`Initiating OAuth redirect with params: ${JSON.stringify(query)}`);
   const qs = new URLSearchParams(query).toString();
-  cfg.location.href = `https://${domain}/oauth2/authorize?${qs}`;
+  
+  const oauthUrl = `${authorizeEndpoint}?${qs}`;
+  debug?.(`Redirecting to: ${oauthUrl}`);
+  cfg.location.href = oauthUrl;
 }
 
 export async function handleCognitoOAuthCallback(): Promise<void> {
   const cfg = configure();
-  if (!cfg.hostedUi) return;
+  const { debug } = cfg;
+  
+  debug?.("OAuth callback triggered - beginning callback processing");
+  
+  if (!cfg.hostedUi) {
+    debug?.("No hostedUi config found, ignoring redirect");
+    return;
+  }
+  
   const { redirectSignIn, responseType = "code" } = cfg.hostedUi;
+  debug?.(`OAuth configuration: redirectSignIn=${redirectSignIn}, responseType=${responseType}`);
+  
+  // Convert relative redirectSignIn to absolute URL if needed
+  let fullRedirectUrl = redirectSignIn;
+  if (redirectSignIn && !redirectSignIn.match(/^https?:\/\//)) {
+    debug?.(`Converting relative redirectSignIn "${redirectSignIn}" to absolute URL for comparison`);
+    
+    // Create a URL object using the current location as base
+    const currentUrl = new URL(cfg.location.href);
+    
+    // Create a new URL with the current as base and the redirect path as the path
+    const absoluteUrl = new URL(redirectSignIn, currentUrl.origin);
+    fullRedirectUrl = absoluteUrl.href;
+    
+    debug?.(`Converted to absolute URL: ${fullRedirectUrl}`);
+  }
+  
   const inFlight = await cfg.storage.getItem(OAUTH_IN_PROGRESS_KEY);
-  if (inFlight !== "true") return; // not our redirect
+  debug?.(`OAuth in-flight status: ${inFlight}`);
+  
+  if (inFlight !== "true") {
+    debug?.("No OAuth flow in progress, ignoring redirect");
+    return; // not our redirect
+  }
 
   const url = new URL(cfg.location.href);
+  debug?.(`Current URL: ${url.toString()}`);
+  debug?.(`URL query parameters: ${JSON.stringify(Object.fromEntries(url.searchParams))}`);
+  
   const normalize = (u: string) => {
     const { origin, pathname } = new URL(u);
     // Remove trailing slash for reliable comparison
@@ -79,73 +140,141 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
     return origin + path;
   };
 
-  if (normalize(cfg.location.href) !== normalize(redirectSignIn)) {
-    // Not on the expected redirect URL
+  const normalizedCurrentUrl = normalize(cfg.location.href);
+  const normalizedRedirectUrl = normalize(fullRedirectUrl);
+  debug?.(`Normalized URLs - Current: ${normalizedCurrentUrl}, Expected: ${normalizedRedirectUrl}`);
+
+  if (normalizedCurrentUrl !== normalizedRedirectUrl) {
+    debug?.(`URL mismatch, not our expected redirect URL. Ignoring.`);
     return;
   }
 
+  debug?.("URL matches expected redirect URL, continuing OAuth flow");
+
   const error = url.searchParams.get("error");
   if (error) {
+    const errorDesc = url.searchParams.get("error_description") ?? error;
+    debug?.(`OAuth error received: ${error}, description: ${errorDesc}`);
     await clear();
-    throw new Error(url.searchParams.get("error_description") ?? error);
+    throw new Error(errorDesc);
   }
+  
   const returnedState = url.searchParams.get("state");
+  debug?.(`Returned state parameter: ${returnedState?.substring(0, 10)}...`);
+  
   const storedState = await cfg.storage.getItem(STATE_KEY);
+  debug?.(`Stored state from browser: ${storedState?.substring(0, 10)}...`);
+  
   if (!returnedState || returnedState !== storedState) {
+    debug?.("OAuth state mismatch - possible CSRF attack or invalidated session");
     await clear();
     throw new Error("OAuth state mismatch");
   }
 
+  debug?.("OAuth state validation successful");
+  
   if (responseType === "code") {
     const code = url.searchParams.get("code");
+    debug?.(`Authorization code received: ${code?.substring(0, 5)}...`);
+    
     if (!code) {
+      debug?.("No authorization code in response");
       await clear();
       throw new Error("Authorization code missing");
     }
+    
+    debug?.("Proceeding to exchange code for tokens");
     await exchangeCodeForTokens(code);
   } else {
     // implicit flow: tokens are in hash
+    debug?.("Using implicit flow, extracting tokens from URL hash");
     const hash = url.hash.substring(1);
     const params = new URLSearchParams(hash);
+    debug?.(`Hash parameters: ${JSON.stringify(Object.fromEntries(params))}`);
+    
     const access_token = params.get("access_token");
     const id_token = params.get("id_token");
     const expires_in = params.get("expires_in");
     const refresh_token = params.get("refresh_token");
+    
+    debug?.(`Tokens extracted - Access token: ${access_token ? "present" : "missing"}, ID token: ${id_token ? "present" : "missing"}, Refresh token: ${refresh_token ? "present" : "missing"}`);
+    
     if (!access_token || !id_token) {
+      debug?.("Required tokens missing in implicit flow response");
       await clear();
       throw new Error("Tokens missing in implicit flow");
     }
+    
     const expireAt = new Date(Date.now() + Number(expires_in ?? "3600") * 1000);
+    debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
+    
     await storeTokens({
       accessToken: access_token,
       idToken: id_token,
       refreshToken: refresh_token ?? undefined,
       expireAt,
     });
+    debug?.("Tokens successfully stored from implicit flow");
   }
+  
   // cleanup URL
-  cfg.history.pushState(null, "", redirectSignIn);
+  debug?.(`Cleaning up URL, pushing state to: ${fullRedirectUrl}`);
+  cfg.history.pushState(null, "", fullRedirectUrl);
+  
   await clear();
+  debug?.("OAuth flow completed successfully");
 }
 
 async function exchangeCodeForTokens(code: string) {
   const cfg = configure();
-  const { domain, redirectSignIn } = cfg.hostedUi!;
+  const { debug } = cfg;
+  
+  debug?.("Beginning code-to-token exchange");
+  const { redirectSignIn } = cfg.hostedUi!;
+  
+  // Get the OAuth token endpoint
+  const tokenEndpoint = getTokenEndpoint();
+  debug?.(`Using OAuth token endpoint: ${tokenEndpoint}`);
+  
+  // Handle relative redirectSignIn for the token exchange
+  let fullRedirectUrl = redirectSignIn;
+  if (redirectSignIn && !redirectSignIn.match(/^https?:\/\//)) {
+    debug?.(`Converting relative redirectSignIn "${redirectSignIn}" to absolute URL for token exchange`);
+    
+    // Create a URL object using the current location as base
+    const currentUrl = new URL(cfg.location.href);
+    
+    // Create a new URL with the current as base and the redirect path as the path
+    const absoluteUrl = new URL(redirectSignIn, currentUrl.origin);
+    fullRedirectUrl = absoluteUrl.href;
+    
+    debug?.(`Using absolute URL for token exchange: ${fullRedirectUrl}`);
+  }
+  
   const verifier = (await cfg.storage.getItem(PKCE_KEY)) ?? "";
+  debug?.(`PKCE verifier retrieved: ${verifier ? "present" : "missing"}`);
+  
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: cfg.clientId,
     code,
-    redirect_uri: redirectSignIn,
+    redirect_uri: fullRedirectUrl,
     code_verifier: verifier,
   }).toString();
-  const tokenEndpoint = `https://${domain}/oauth2/token`;
+  
+  debug?.(`Token endpoint: ${tokenEndpoint}`);
+  debug?.("Sending token exchange request");
+  
   const res = await cfg.fetch(tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
+  
+  debug?.(`Token exchange response success: ${res.ok ? "yes" : "no"}`);
+  
   if (!res.ok) {
+    debug?.("Token exchange failed");
     await clear();
     // Attempt to parse error response safely
     type CognitoErrorResponse = {
@@ -154,6 +283,7 @@ async function exchangeCodeForTokens(code: string) {
     };
 
     const errJson: unknown = await res.json();
+    debug?.(`Error response: ${JSON.stringify(errJson)}`);
 
     let message = "Token exchange failed";
     if (
@@ -172,8 +302,11 @@ async function exchangeCodeForTokens(code: string) {
       message = (errJson as CognitoErrorResponse).error as string;
     }
 
+    debug?.(`Throwing error: ${message}`);
     throw new Error(message);
   }
+  
+  debug?.("Token exchange successful, parsing response");
   const json = (await res.json()) as {
     access_token: string;
     id_token: string;
@@ -181,20 +314,30 @@ async function exchangeCodeForTokens(code: string) {
     expires_in: number;
     token_type: string;
   };
+  
+  debug?.(`Tokens received - Access token: ${json.access_token ? "present" : "missing"}, ID token: ${json.id_token ? "present" : "missing"}, Refresh token: ${json.refresh_token ? "present" : "missing"}, Expires in: ${json.expires_in}s`);
+  
   const expireAt = new Date(Date.now() + json.expires_in * 1000);
+  debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
+  
   await storeTokens({
     accessToken: json.access_token,
     idToken: json.id_token,
     refreshToken: json.refresh_token,
     expireAt,
   });
+  debug?.("Tokens successfully stored from code exchange");
 }
 
 async function clear() {
   const cfg = configure();
+  const { debug } = cfg;
+  
+  debug?.("Clearing OAuth storage keys");
   await cfg.storage.removeItem(STATE_KEY);
   await cfg.storage.removeItem(PKCE_KEY);
   await cfg.storage.removeItem(OAUTH_IN_PROGRESS_KEY);
+  debug?.("OAuth storage keys cleared");
 }
 
 // Utility re-exports for other modules
