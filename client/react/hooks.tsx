@@ -895,6 +895,7 @@ function _usePasswordless() {
       password,
       smsMfaCode,
       otpMfaCode,
+      newPassword,
       clientMetadata,
       rememberDevice,
     }: {
@@ -905,6 +906,12 @@ function _usePasswordless() {
       password: string;
       smsMfaCode?: () => Promise<string>;
       otpMfaCode?: () => Promise<string>;
+      /**
+       * Provide a callback that resolves with a new password **when Cognito returns the
+       * `NEW_PASSWORD_REQUIRED` challenge**. Returning a promise lets you prompt the user
+       * only when necessary and keeps the authentication flow fully encapsulated.
+       */
+      newPassword?: () => Promise<string>;
       clientMetadata?: Record<string, string>;
       /**
        * Provide a callback that resolves to "true" if the user elected to remember
@@ -931,6 +938,7 @@ function _usePasswordless() {
         password,
         smsMfaCode,
         otpMfaCode,
+        newPassword,
         statusCb: (status) => {
           setSigninInStatus(status);
           // Ensure authMethod remains SRP throughout the authentication process
