@@ -149,12 +149,18 @@ type ConfigInput = Omit<Config, "cognitoIdpEndpoint"> &
 let config_: ConfigWithDefaults | undefined = undefined;
 export function configure(config?: ConfigInput) {
   if (config) {
-    const cognitoIdpEndpoint =
+    let cognitoIdpEndpoint =
       config.cognitoIdpEndpoint || config.userPoolId?.split("_")[0];
     if (!cognitoIdpEndpoint) {
       throw new Error(
         "Invalid configuration provided: either cognitoIdpEndpoint or userPoolId must be provided"
       );
+    }
+
+    // If endpoint lacks protocol and is not an AWS region, prefix with https://
+    const regionRegex = /^[a-z]{2}-[a-z]+-\d$/;
+    if (!cognitoIdpEndpoint.startsWith("http") && !regionRegex.test(cognitoIdpEndpoint)) {
+      cognitoIdpEndpoint = `https://${cognitoIdpEndpoint}`;
     }
 
     config_ = {

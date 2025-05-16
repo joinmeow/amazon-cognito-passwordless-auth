@@ -129,6 +129,9 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
     return; // not our redirect
   }
 
+  // Mark as processing to prevent duplicate handling in concurrent invocations
+  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "processing");
+
   const url = new URL(cfg.location.href);
   debug?.(`Current URL: ${url.toString()}`);
   debug?.(
