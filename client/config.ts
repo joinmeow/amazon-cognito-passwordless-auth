@@ -159,7 +159,10 @@ export function configure(config?: ConfigInput) {
 
     // If endpoint lacks protocol and is not an AWS region, prefix with https://
     const regionRegex = /^[a-z]{2}-[a-z]+-\d$/;
-    if (!cognitoIdpEndpoint.startsWith("http") && !regionRegex.test(cognitoIdpEndpoint)) {
+    if (
+      !cognitoIdpEndpoint.startsWith("http") &&
+      !regionRegex.test(cognitoIdpEndpoint)
+    ) {
       cognitoIdpEndpoint = `https://${cognitoIdpEndpoint}`;
     }
 
