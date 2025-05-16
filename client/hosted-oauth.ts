@@ -278,11 +278,20 @@ async function exchangeCodeForTokens(code: string) {
   debug?.(`Token endpoint: ${tokenEndpoint}`);
   debug?.("Sending token exchange request");
 
-  const res = await cfg.fetch(tokenEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  let res: Awaited<ReturnType<typeof cfg.fetch>>;
+  try {
+    res = await cfg.fetch(tokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch (err) {
+    debug?.("Token exchange network error:", err);
+    await clear();
+    throw new Error(
+      err instanceof Error ? err.message : "Network error during token exchange"
+    );
+  }
 
   debug?.(`Token exchange response success: ${res.ok ? "yes" : "no"}`);
 
