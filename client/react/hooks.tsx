@@ -70,6 +70,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import { signInWithRedirect as hostedSignInWithRedirect } from "../hosted-oauth.js";
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
@@ -212,7 +213,7 @@ function _usePasswordless() {
   const [isRefreshingTokens, setIsRefreshingTokens] = useState<boolean>();
   const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
   const [authMethod, setAuthMethod] = useState<
-    "SRP" | "FIDO2" | "PLAINTEXT" | undefined
+    "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined
   >();
   const [totpMfaStatus, setTotpMfaStatus] = useState<{
     enabled: boolean;
@@ -816,9 +817,7 @@ function _usePasswordless() {
       signingOut.signedOut.catch((error: Error) => setLastError(error));
       return signingOut;
     },
-    /**
-     * Sign in with FIDO2 (e.g. Face ID or Touch)
-     */
+    /** Sign in with FIDO2 (e.g. Face ID or Touch) */
     authenticateWithFido2: ({
       username,
       credentials,
@@ -1142,6 +1141,21 @@ function _usePasswordless() {
     timeSinceLastActivityMs,
     /** Seconds (rounded) since the last user activity */
     timeSinceLastActivitySeconds: Math.round(timeSinceLastActivityMs / 1000),
+    /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
+    signInWithRedirect: ({
+      provider = "Google",
+      customState,
+    }: {
+      provider?: string;
+      customState?: string;
+    } = {}) => {
+      const { debug } = configure();
+      debug?.("Starting sign-in via Hosted UI redirect");
+      setLastError(undefined);
+      setAuthMethod("REDIRECT");
+      setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
+      hostedSignInWithRedirect({ provider, customState });
+    },
   };
 }
 
@@ -1151,6 +1165,8 @@ type StoredUser = {
   email?: string;
   useFido?: "YES" | "NO" | "ASK";
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  /** Last authentication method used by this user */
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
 };
 
 /** Retrieve the last signed in users from your configured storage (e.g. localStorage) */
@@ -1200,7 +1216,7 @@ function _useLocalUserCache() {
   // Since it's not exposed in the usePasswordless() return object
   // Let's create a local version in this hook
   const [authMethodLocal, setAuthMethodLocal] = useState<
-    "SRP" | "FIDO2" | "PLAINTEXT" | undefined
+    "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined
   >();
 
   // Keep our local authMethod in sync with the main one by watching signingInStatus
@@ -1211,6 +1227,8 @@ function _useLocalUserCache() {
       setAuthMethodLocal("PLAINTEXT");
     } else if (signingInStatus === "SIGNED_IN_WITH_FIDO2") {
       setAuthMethodLocal("FIDO2");
+    } else if (signingInStatus === "SIGNED_IN_WITH_REDIRECT") {
+      setAuthMethodLocal("REDIRECT");
     } else if (signingInStatus === "SIGNED_OUT") {
       setAuthMethodLocal(undefined);
     }
@@ -1246,6 +1264,7 @@ function _useLocalUserCache() {
       username: idToken["cognito:username"],
       email:
         idToken.email && idToken.email_verified ? idToken.email : undefined,
+      authMethod: authMethodLocal,
     };
     if (lastSignedInUsers) {
       const found = lastSignedInUsers.find(
@@ -1255,6 +1274,7 @@ function _useLocalUserCache() {
       if (found) {
         user.useFido = found.useFido;
         user.credentials = found.credentials;
+        user.authMethod = found.authMethod ?? user.authMethod;
         if (!idToken.email_verified) {
           user.email = found.email;
         }
@@ -1333,6 +1353,7 @@ function _useLocalUserCache() {
       const update: StoredUser = {
         ...currentUser,
         useFido,
+        authMethod: authMethodLocal ?? currentUser.authMethod,
         // Clear stored credentials on SRP; otherwise keep FIDO2 list
         credentials:
           authMethodLocal === "SRP"

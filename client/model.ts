@@ -46,6 +46,7 @@ export const busyState = [
   "SIGNING_IN_WITH_OTP",
   "SIGNING_OUT",
   "AUTHENTICATING_WITH_DEVICE",
+  "STARTING_SIGN_IN_WITH_REDIRECT",
 ] as const;
 export type BusyState = (typeof busyState)[number];
 const idleState = [
@@ -58,5 +59,7 @@ const idleState = [
   "FIDO2_SIGNIN_FAILED",
   "SIGNIN_WITH_OTP_FAILED",
   "PASSWORD_SIGNIN_FAILED",
+  "SIGNED_IN_WITH_REDIRECT",
+  "SIGNIN_WITH_REDIRECT_FAILED",
 ] as const;
 export type IdleState = (typeof idleState)[number];

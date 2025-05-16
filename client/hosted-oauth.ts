@@ -70,11 +70,17 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
   if (inFlight !== "true") return; // not our redirect
 
   const url = new URL(cfg.location.href);
-  if (
-    url.origin + url.pathname !==
-    new URL(redirectSignIn).origin + new URL(redirectSignIn).pathname
-  ) {
-    // Not on the redirect URL
+  const normalize = (u: string) => {
+    const { origin, pathname } = new URL(u);
+    // Remove trailing slash for reliable comparison
+    const path = pathname.endsWith("/") && pathname !== "/"
+      ? pathname.slice(0, -1)
+      : pathname;
+    return origin + path;
+  };
+
+  if (normalize(cfg.location.href) !== normalize(redirectSignIn)) {
+    // Not on the expected redirect URL
     return;
   }
 
