@@ -21,10 +21,19 @@ import {
 
 export interface TokensToStore {
   accessToken: string;
-  idToken: string;
+  /**
+   * ID token returned by Cognito. Optional because certain OAuth flows
+   * (e.g. custom authorization servers) may omit it. All logic that depends
+   * on the ID token must therefore handle the undefined case.
+   */
+  idToken?: string;
   refreshToken?: string;
   expireAt: Date;
   deviceKey?: string;
+  /**
+   * Optional pre-resolved username. If not provided we will attempt to
+   * derive it from either the ID-token (preferred) or from the access token.
+   */
   username?: string;
 }
 export interface TokensFromStorage {
@@ -40,36 +49,60 @@ export async function storeTokens(tokens: TokensToStore) {
   const { clientId, storage, debug } = configure();
   debug?.("[storeTokens] tokens to store:", tokens);
 
-  // Extract username from tokens or from the id token
+  // --------- 1. Derive username ---------
   let username = tokens.username;
-  if (!username) {
-    const payload = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
-    username = payload["cognito:username"];
 
-    // Verify we have a username
+  // Prefer extracting from the *access* token because
+  // 1) it is always present (required for any Cognito auth flow) and
+  // 2) the field name is a simple `username`, avoiding the Cognito-specific
+  //    "cognito:username" key present in the ID token.
+  if (!username) {
+    const accessPayload = parseJwtPayload<CognitoAccessTokenPayload>(
+      tokens.accessToken
+    );
+    username = accessPayload.username;
+
+    // Fallback to ID-token if access token didn't contain it (edge-case when
+    // using a custom authorizer that strips the field).
+    if (!username && tokens.idToken) {
+      const idPayload = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
+      username = idPayload["cognito:username"];
+    }
+
     if (!username) {
       throw new Error("Could not determine username when storing tokens");
     }
   }
 
-  // Get the payload of the access token to extract the scope
-  const { scope } = parseJwtPayload<CognitoAccessTokenPayload>(
-    tokens.accessToken
-  );
+  // --------- 2. Prepare key prefixes ---------
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
   const customKeyPrefix = `Passwordless.${clientId}`;
 
+  // --------- 3. Parse access token for scope (always present) ---------
+  const { scope: accessTokenScope, sub: accessSub } =
+    parseJwtPayload<CognitoAccessTokenPayload>(tokens.accessToken);
+
+  // --------- 4. Queue write operations ---------
   const promises: (void | Promise<void>)[] = [];
+
   promises.push(storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, username));
-  promises.push(
-    storage.setItem(`${amplifyKeyPrefix}.${username}.idToken`, tokens.idToken)
-  );
+
+  // Store ID token if available
+  if (tokens.idToken) {
+    promises.push(
+      storage.setItem(`${amplifyKeyPrefix}.${username}.idToken`, tokens.idToken)
+    );
+  }
+
+  // Access token is always present
   promises.push(
     storage.setItem(
       `${amplifyKeyPrefix}.${username}.accessToken`,
       tokens.accessToken
     )
   );
+
+  // Store refresh token if provided
   if (tokens.refreshToken) {
     debug?.(
       `[storeTokens] Writing refreshToken for ${username} to key ${amplifyKeyPrefix}.${username}.refreshToken`
@@ -82,44 +115,60 @@ export async function storeTokens(tokens: TokensToStore) {
     );
   }
 
-  // If a device key is provided and we know the username,
-  // store it in the RememberedDeviceRecord so it persists
-  if (tokens.deviceKey && username) {
+  // Persist device key if supplied
+  if (tokens.deviceKey) {
     promises.push(storeDeviceKey(username, tokens.deviceKey));
   }
 
-  // Also store user data from the id token
-  const payload = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
+  // --------- 5. Store user data (sub + optional email) ---------
+  let sub: string | undefined;
+  let email: string | undefined;
+
+  if (tokens.idToken) {
+    const payloadId = parseJwtPayload<CognitoIdTokenPayload>(tokens.idToken);
+    sub = payloadId.sub;
+    email = payloadId.email;
+  } else {
+    // Fall back to access token for sub. Email is not available in access token
+    sub = accessSub;
+  }
+
+  const userAttributes: { Name: string; Value: string | undefined }[] = [
+    { Name: "sub", Value: sub },
+  ];
+  if (email) {
+    userAttributes.push({ Name: "email", Value: email });
+  }
+
   promises.push(
     storage.setItem(
       `${amplifyKeyPrefix}.${username}.userData`,
       JSON.stringify({
-        UserAttributes: [
-          {
-            Name: "sub",
-            Value: payload.sub,
-          },
-          {
-            Name: "email",
-            Value: payload.email,
-          },
-        ],
+        UserAttributes: userAttributes,
         Username: username,
       })
     )
   );
+
   promises.push(
-    storage.setItem(`${amplifyKeyPrefix}.${username}.tokenScopesString`, scope)
+    storage.setItem(
+      `${amplifyKeyPrefix}.${username}.tokenScopesString`,
+      accessTokenScope
+    )
   );
+
   promises.push(
     storage.setItem(
       `${customKeyPrefix}.${username}.expireAt`,
       tokens.expireAt.toISOString()
     )
   );
-  await Promise.all(promises.filter((p) => !!p));
+
+  // --------- 6. Execute writes ---------
+  await Promise.all(promises.filter(Boolean));
+
   debug?.(
-    `[storeTokens] Completed storage, refreshToken stored under key ${amplifyKeyPrefix}.${username}.refreshToken`
+    `[storeTokens] Completed storage${tokens.refreshToken ? ", refreshToken stored under key " + amplifyKeyPrefix + "." + username + ".refreshToken" : ""}`
   );
 }
 
