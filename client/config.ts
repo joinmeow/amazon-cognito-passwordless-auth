@@ -130,6 +130,12 @@ export interface Config {
    * Cognito Hosted UI / OAuth2 configuration. Required for signInWithRedirect (Google etc.).
    */
   hostedUi?: {
+    /**
+     * (Optional) Custom domain for your Cognito Hosted UI. Example: auth.example.com
+     * If provided, all authorize / token endpoints are built from this domain.
+     * If omitted, we fall back to cognitoIdpEndpoint.
+     */
+    domain?: string;
     /** Redirect URI registered in the user-pool app client */
     redirectSignIn: string;
     /** OAuth2 scopes requested. Defaults to ['openid','email','profile'] */
@@ -188,6 +194,7 @@ export function configure(config?: ConfigInput) {
         redirectSignIn: config.hostedUi.redirectSignIn,
         scopes: config.hostedUi.scopes ?? ["openid", "email", "profile"],
         responseType: config.hostedUi.responseType ?? "code",
+        ...(config.hostedUi.domain && { domain: config.hostedUi.domain }),
       };
       config_.debug?.(
         "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
@@ -211,8 +218,9 @@ function normalizeEndpoint(endpoint: string): string {
 }
 
 export function getAuthorizeEndpoint(): string {
-  const { cognitoIdpEndpoint } = configure();
-  const base = normalizeEndpoint(cognitoIdpEndpoint);
+  const { cognitoIdpEndpoint, hostedUi } = configure();
+  const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
+  const base = normalizeEndpoint(domainBase);
   return `${base}/oauth2/authorize`;
 }
 
@@ -220,8 +228,9 @@ export function getAuthorizeEndpoint(): string {
  * Get the full OAuth token endpoint URL with protocol
  */
 export function getTokenEndpoint(): string {
-  const { cognitoIdpEndpoint } = configure();
-  const base = normalizeEndpoint(cognitoIdpEndpoint);
+  const { cognitoIdpEndpoint, hostedUi } = configure();
+  const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
+  const base = normalizeEndpoint(domainBase);
   return `${base}/oauth2/token`;
 }
 
