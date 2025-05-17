@@ -303,9 +303,10 @@ function _usePasswordless() {
   // Skip this check if we're in the middle of SRP authentication process
   if (
     tokens &&
-    (!tokens.idToken || !tokens.accessToken || !tokens.expireAt) &&
+    (!tokens.accessToken || !tokens.expireAt) &&
     !isRefreshingTokens &&
     !isSchedulingRefresh &&
+    authMethod !== "REDIRECT" &&
     authMethod !== "SRP" &&
     signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
     signingInStatus !== "SIGNED_IN_WITH_PASSWORD"
