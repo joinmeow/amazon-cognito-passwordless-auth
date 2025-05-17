@@ -31,12 +31,10 @@ import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
 import {
   retrieveTokens,
-  storeTokens,
   storeDeviceKey,
   getRememberedDevice,
   setRememberedDevice,
   TokensFromStorage,
-  TokensToStore,
 } from "../storage.js";
 import {
   BusyState,
@@ -155,25 +153,6 @@ function _usePasswordless() {
     accessToken: CognitoAccessTokenPayload;
     expireAt: Date;
   }>();
-  const setTokens: typeof _setTokens = useCallback((reactSetStateAction) => {
-    _setTokens((prevState) => {
-      const newTokens =
-        typeof reactSetStateAction === "function"
-          ? reactSetStateAction(prevState)
-          : reactSetStateAction;
-      const { idToken, accessToken, expireAt } = newTokens ?? {};
-      if (idToken && accessToken && expireAt) {
-        setTokensParsed({
-          idToken: parseJwtPayload<CognitoIdTokenPayload>(idToken),
-          accessToken: parseJwtPayload<CognitoAccessTokenPayload>(accessToken),
-          expireAt,
-        });
-      } else {
-        setTokensParsed(undefined);
-      }
-      return newTokens;
-    });
-  }, []);
   const [lastError, setLastError] = useState<Error>();
   const [
     userVerifyingPlatformAuthenticatorAvailable,
@@ -185,6 +164,28 @@ function _usePasswordless() {
     // Will be populated when tokens are loaded during component initialization
     return null;
   });
+
+  /** Translate authMethod → the corresponding *SIGNED_IN_WITH_* status */
+  const signedInStatusForAuth = useCallback(
+    (
+      method?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT"
+    ): BusyState | IdleState | undefined => {
+      switch (method) {
+        case "REDIRECT":
+          return "SIGNED_IN_WITH_REDIRECT";
+        case "SRP":
+          return "SIGNED_IN_WITH_SRP_PASSWORD";
+        case "PLAINTEXT":
+          return "SIGNED_IN_WITH_PLAINTEXT_PASSWORD";
+        case "FIDO2":
+          return "SIGNED_IN_WITH_FIDO2";
+        default:
+          return undefined;
+      }
+    },
+    []
+  );
+
   const updateFido2Credential = useCallback(
     (update: { credentialId: string } & Partial<Fido2Credential>) =>
       setFido2Credentials((state) => {
@@ -268,65 +269,186 @@ function _usePasswordless() {
   }, []);
   const busy = busyState.includes(signingInStatus as BusyState);
 
-  // Schedule token refresh
+  /**
+   * Parse a fresh or cached token bundle and update the derived `tokensParsed` state.
+   * Handles the special case where Hosted-UI/OAuth ("REDIRECT") flows may not return
+   * an ID-token by synthesising a minimal one from the access-token claims so the
+   * rest of the library can continue to treat the user as signed-in.
+   */
+  const parseAndSetTokens = useCallback((tokens?: TokensFromStorage) => {
+    if (!tokens) {
+      setTokensParsed(undefined);
+      return;
+    }
+
+    const { accessToken, expireAt, idToken } = tokens;
+
+    // OAuth/Hosted-UI flow – ID-token can be missing
+    if (accessToken && expireAt && tokens.authMethod === "REDIRECT") {
+      try {
+        const accessTokenParsed =
+          parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+
+        setTokensParsed({
+          accessToken: accessTokenParsed,
+          idToken: {
+            sub: accessTokenParsed.sub,
+            "cognito:username": accessTokenParsed.username,
+            exp: accessTokenParsed.exp,
+            iat: accessTokenParsed.iat,
+            ...(idToken ? parseJwtPayload<CognitoIdTokenPayload>(idToken) : {}),
+          } as CognitoIdTokenPayload,
+          expireAt,
+        });
+      } catch (err) {
+        const { debug } = configure();
+        debug?.("Failed to parse tokens for OAuth flow:", err);
+        setTokensParsed(undefined);
+      }
+      return;
+    }
+
+    // Standard flows – expect both access & ID token
+    if (accessToken && expireAt) {
+      try {
+        if (idToken) {
+          setTokensParsed({
+            idToken: parseJwtPayload<CognitoIdTokenPayload>(idToken),
+            accessToken:
+              parseJwtPayload<CognitoAccessTokenPayload>(accessToken),
+            expireAt,
+          });
+        } else {
+          // Non-OAuth flows must provide an ID-token
+          setTokensParsed(undefined);
+        }
+      } catch (err) {
+        const { debug } = configure();
+        debug?.("Failed to parse tokens:", err);
+        setTokensParsed(undefined);
+      }
+    } else {
+      setTokensParsed(undefined);
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // ♻️  Schedule automatic token refresh and keep auth status stable
+  // ---------------------------------------------------------------------------
+
+  // At component mount, schedule token refresh
   const refreshToken = tokens?.refreshToken;
   const expireAtTime = tokens?.expireAt?.getTime();
-  useEffect(() => {
-    if (refreshToken) {
-      const abort = new AbortController();
-      scheduleRefresh({
-        abort: abort.signal,
-        // Just update component state - processTokens handles storage
-        tokensCb: (newTokens) => {
-          if (newTokens) {
-            setTokens((tokens) => ({ ...tokens, ...newTokens }));
-          } else {
-            // When we get null/undefined tokens (invalid case), trigger a refresh of signInStatus
-            setRecheckSignInStatus((s) => s + 1);
-          }
-        },
-        isRefreshingCb: setIsRefreshingTokens,
-      })
-        .catch((err) => {
-          const { debug } = configure();
-          debug?.("Failed to schedule token refresh:", err);
-          // Also force a recheck on errors
-          setRecheckSignInStatus((s) => s + 1);
-        })
-        .finally(() => setIsSchedulingRefresh(false));
-      return () => abort.abort();
-    }
-  }, [setTokens, refreshToken, expireAtTime]);
+  // Preserve the method used to obtain the current tokens so that we can
+  // restore the correct *SIGNED_IN_WITH_* status after the background refresh.
+  const authMethodFromTokens = tokens?.authMethod;
 
-  // If we have some tokens, but not all, attempt a refresh
-  // Should only happen in corner cases, e.g. a developer deleted some keys from storage
-  // Skip this check if we're in the middle of SRP authentication process
+  useEffect(() => {
+    if (!refreshToken) {
+      return;
+    }
+
+    const abort = new AbortController();
+    let isRefreshInProgress = false;
+
+    // Indicate that we are about to schedule or run a refresh operation
+    setIsSchedulingRefresh(true);
+
+    scheduleRefresh({
+      abort: abort.signal,
+      tokensCb: (newTokens) => {
+        if (newTokens) {
+          _setTokens((prev) => {
+            const merged = { ...prev, ...newTokens } as TokensFromStorage;
+            parseAndSetTokens(merged);
+            return merged;
+          });
+
+          const newStatus = signedInStatusForAuth(
+            newTokens.authMethod ?? authMethodFromTokens
+          );
+          newStatus && setSigninInStatus(newStatus);
+        } else if (isRefreshInProgress) {
+          // Avoid flicker to SIGNED_OUT while a scheduled refresh is underway
+          const { debug } = configure();
+          debug?.(
+            "Token refresh returned null/undefined but avoiding SIGNED_OUT state"
+          );
+
+          const status = signedInStatusForAuth(authMethodFromTokens);
+          status && setSigninInStatus(status);
+
+          setRecheckSignInStatus((s) => s + 1);
+        } else {
+          setRecheckSignInStatus((s) => s + 1);
+        }
+      },
+      isRefreshingCb: (isRefreshing) => {
+        isRefreshInProgress = isRefreshing;
+        setIsRefreshingTokens(isRefreshing);
+
+        const status = signedInStatusForAuth(authMethodFromTokens);
+        status && setSigninInStatus(status);
+      },
+    })
+      .catch((err) => {
+        const { debug } = configure();
+        debug?.("Failed to schedule token refresh:", err);
+
+        const status = signedInStatusForAuth(authMethodFromTokens);
+        status && setSigninInStatus(status);
+
+        setRecheckSignInStatus((s) => s + 1);
+      })
+      .finally(() => {
+        setIsSchedulingRefresh(false);
+        isRefreshInProgress = false;
+      });
+
+    return () => abort.abort();
+  }, [
+    _setTokens,
+    refreshToken,
+    expireAtTime,
+    authMethodFromTokens,
+    signedInStatusForAuth,
+    parseAndSetTokens,
+  ]);
+
+  // If we have an incomplete token bundle (edge-case: storage was tampered with)
+  // attempt a one-off refresh to heal the state.
   if (
     tokens &&
     (!tokens.accessToken || !tokens.expireAt) &&
     !isRefreshingTokens &&
     !isSchedulingRefresh &&
-    authMethod !== "REDIRECT" &&
     authMethod !== "SRP" &&
     signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
-    signingInStatus !== "SIGNED_IN_WITH_PASSWORD"
+    signingInStatus !== "SIGNED_IN_WITH_PASSWORD" &&
+    signingInStatus !== "SIGNED_IN_WITH_REDIRECT" &&
+    signingInStatus !== "STARTING_SIGN_IN_WITH_REDIRECT"
   ) {
     const { debug } = configure();
     debug?.("Detected incomplete tokens, attempting refresh");
+
     refreshTokens({
-      // Just update component state - processTokens handles storage
       tokensCb: (newTokens) => {
         if (newTokens) {
-          setTokens((tokens) => ({ ...tokens, ...newTokens }));
+          _setTokens((prev) => {
+            const merged = { ...prev, ...newTokens } as TokensFromStorage;
+            parseAndSetTokens(merged);
+            return merged;
+          });
         } else {
-          // If refresh fails completely, clear tokens and trigger signInStatus update
-          setTokens(undefined);
+          _setTokens(undefined);
+          parseAndSetTokens(undefined);
           setRecheckSignInStatus((s) => s + 1);
         }
       },
       isRefreshingCb: setIsRefreshingTokens,
     }).catch(() => {
-      setTokens(undefined);
+      _setTokens(undefined);
+      parseAndSetTokens(undefined);
       setRecheckSignInStatus((s) => s + 1);
     });
   }
@@ -334,16 +456,35 @@ function _usePasswordless() {
   // At component mount, load tokens from storage
   useEffect(() => {
     // First, retrieve tokens from storage
+    const { debug } = configure();
     retrieveTokens()
-      .then(setTokens)
+      .then((tokens) => {
+        // Process the raw tokens first
+        _setTokens(tokens);
+
+        // Parse tokens with special handling for OAuth
+        parseAndSetTokens(tokens);
+
+        // If these are tokens from OAuth/REDIRECT, update the signing in status
+        if (tokens?.authMethod === "REDIRECT") {
+          debug?.(
+            "Setting signingInStatus to SIGNED_IN_WITH_REDIRECT based on retrieved tokens"
+          );
+          setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
+        }
+      })
       .catch((err) => {
-        const { debug } = configure();
         debug?.("Failed to retrieve tokens from storage:", err);
         // Make sure signInStatus gets recalculated on error
         setRecheckSignInStatus((s) => s + 1);
       })
       .finally(() => setInitiallyRetrievingTokensFromStorage(false));
-  }, [setTokens]);
+  }, [parseAndSetTokens]);
+
+  // 🛠  Keep tokensParsed in sync even if some paths bypass the helper wrapper
+  useEffect(() => {
+    parseAndSetTokens(tokens);
+  }, [tokens, parseAndSetTokens]);
 
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
   useEffect(() => {
@@ -419,52 +560,49 @@ function _usePasswordless() {
     [deleteFido2Credential, updateFido2Credential]
   );
 
-  // Determine sign-in status
+  // Determine sign-in status (single authoritative state for UI)
   const signInStatus = useMemo(() => {
     const { debug } = configure();
-    debug?.(
-      "Re-calculating signInStatus (recheckCount:",
+    debug?.("Re-evaluating signInStatus", {
       recheckSignInStatus,
-      ")"
-    );
+      opStatus: signingInStatus,
+      authMethod: tokens?.authMethod,
+    });
 
-    // ensure memo updates when tokens expire
-    void recheckSignInStatus;
-    // 1) Initial load
-    if (initiallyRetrievingTokensFromStorage) {
-      debug?.("signInStatus → CHECKING (initiallyRetrievingTokensFromStorage)");
-      return "CHECKING" as const;
-    }
-    // 2) Any busy operation
+    // 1️⃣ Initial load – waiting for storage
+    if (initiallyRetrievingTokensFromStorage) return "CHECKING";
+
+    // 2️⃣ Library is busy signing in/out
     if (busyState.includes(signingInStatus as BusyState)) {
-      if (signingInStatus === "SIGNING_OUT") {
-        debug?.("signInStatus → SIGNING_OUT (busyState)");
-        return "SIGNING_OUT" as const;
-      }
-      debug?.("signInStatus → SIGNING_IN (busyState)");
-      return "SIGNING_IN" as const;
+      return signingInStatus === "SIGNING_OUT" ? "SIGNING_OUT" : "SIGNING_IN";
     }
-    // 3) Not signed in if no valid tokens
-    if (!tokensParsed) {
-      debug?.("signInStatus → NOT_SIGNED_IN (no tokensParsed)");
-      return "NOT_SIGNED_IN" as const;
-    }
-    // 4) Refresh in progress
-    if (isSchedulingRefresh || isRefreshingTokens) {
-      debug?.("signInStatus → REFRESHING_SIGN_IN");
-      return "REFRESHING_SIGN_IN" as const;
-    }
-    // 5) Token expired
-    if (tokensParsed.expireAt.valueOf() <= Date.now()) {
-      debug?.("signInStatus → NOT_SIGNED_IN (token expired)");
-      return "NOT_SIGNED_IN" as const;
-    }
-    // 6) Otherwise, we're signed in
-    debug?.("signInStatus → SIGNED_IN");
-    return "SIGNED_IN" as const;
+
+    // 3️⃣ Decide which expiry timestamp to use
+    const isOAuth = tokens?.authMethod === "REDIRECT";
+    const expiresAt: Date | undefined = isOAuth
+      ? tokens?.expireAt
+      : tokensParsed?.expireAt;
+
+    // 3a) Still waiting for JWTs to be parsed – treat as signing in to avoid flicker
+    if (!isOAuth && tokens && !tokensParsed) return "SIGNING_IN";
+
+    // Missing tokens → not signed in
+    if (!expiresAt) return "NOT_SIGNED_IN";
+
+    // 4️⃣ Refresh in progress
+    if (isSchedulingRefresh || isRefreshingTokens) return "REFRESHING_SIGN_IN";
+
+    const now = Date.now();
+
+    // 5️⃣ Tokens expired (monotonic check)
+    if (now >= expiresAt.valueOf()) return "NOT_SIGNED_IN";
+
+    // 6️⃣ All good
+    return "SIGNED_IN";
   }, [
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
+    tokens,
     tokensParsed,
     isSchedulingRefresh,
     isRefreshingTokens,
@@ -581,6 +719,18 @@ function _usePasswordless() {
     debug?.("fido2Credentials state updated:", fido2Credentials);
   }, [fido2Credentials]);
 
+  /**
+   * Replace the current token bundle with a fresh one – no merging.
+   * Cognito rotates refresh-tokens, so keeping stale fields would be dangerous.
+   */
+  const updateTokens = useCallback(
+    (next: TokensFromStorage | undefined) => {
+      _setTokens(next);
+      parseAndSetTokens(next);
+    },
+    [parseAndSetTokens]
+  );
+
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
     tokens,
@@ -589,30 +739,67 @@ function _usePasswordless() {
     /** Is the UI currently refreshing tokens? */
     isRefreshingTokens,
     /** Execute (and reschedule) token refresh */
-    refreshTokens: (abort?: AbortSignal) =>
-      refreshTokens({
+    refreshTokens: (abort?: AbortSignal) => {
+      // Update signingInStatus to indicate refresh is in progress
+      const { debug } = configure();
+      debug?.("Manually refreshing tokens");
+
+      // Set appropriate status based on auth method
+      const status = signedInStatusForAuth(tokens?.authMethod);
+      status && setSigninInStatus(status);
+
+      return refreshTokens({
         abort,
-        tokensCb: (newTokens) =>
-          newTokens &&
-          storeTokens(newTokens).then(() =>
-            setTokens((tokens) => ({ ...tokens, ...newTokens }))
-          ),
-        isRefreshingCb: setIsRefreshingTokens,
-      }),
-    /** Force an immediate token refresh regardless of current token state */
-    forceRefreshTokens: (abort?: AbortSignal) =>
-      forceRefreshTokens({
-        abort,
-        tokensCb: (newTokens: TokensFromRefresh) => {
+        tokensCb: (newTokens) => {
           if (newTokens) {
-            return storeTokens(newTokens as TokensToStore).then(() =>
-              setTokens((tokens) => ({ ...tokens, ...newTokens }))
+            // Process tokens and update UI state with auth method
+            updateTokens(newTokens);
+
+            // Update signing status after refresh based on auth method
+            const newStatus = signedInStatusForAuth(
+              newTokens.authMethod ?? tokens?.authMethod
             );
+            newStatus && setSigninInStatus(newStatus);
+
+            // Don't return the tokens, return void to match the callback signature
+            return undefined;
           }
           return Promise.resolve();
         },
         isRefreshingCb: setIsRefreshingTokens,
-      }),
+      });
+    },
+    /** Force an immediate token refresh regardless of current token state */
+    forceRefreshTokens: (abort?: AbortSignal) => {
+      // Update signingInStatus to indicate refresh is in progress
+      const { debug } = configure();
+      debug?.("Forcing immediate token refresh");
+
+      // Set appropriate status based on auth method
+      const status = signedInStatusForAuth(tokens?.authMethod);
+      status && setSigninInStatus(status);
+
+      return forceRefreshTokens({
+        abort,
+        tokensCb: (newTokens: TokensFromRefresh) => {
+          if (newTokens) {
+            // Process tokens and update UI state with auth method
+            updateTokens(newTokens);
+
+            // Update signing status after refresh based on auth method
+            const newStatus = signedInStatusForAuth(
+              newTokens.authMethod ?? tokens?.authMethod
+            );
+            newStatus && setSigninInStatus(newStatus);
+
+            // Don't return the tokens, return void to match the callback signature
+            return undefined;
+          }
+          return Promise.resolve();
+        },
+        isRefreshingCb: setIsRefreshingTokens,
+      });
+    },
     /** Mark the user as active to potentially trigger token refresh */
     markUserActive: () => {
       setLastActivityAt(Date.now());
@@ -622,9 +809,7 @@ function _usePasswordless() {
         void scheduleRefresh({
           tokensCb: (newTokens) => {
             if (newTokens) {
-              return storeTokens(newTokens as TokensToStore).then(() =>
-                setTokens((tokens) => ({ ...tokens, ...newTokens }))
-              );
+              updateTokens(newTokens);
             }
             return Promise.resolve();
           },
@@ -808,8 +993,7 @@ function _usePasswordless() {
       const signingOut = signOut({
         statusCb: setSigninInStatus,
         tokensRemovedLocallyCb: () => {
-          setTokens(undefined);
-          setTokensParsed(undefined);
+          _setTokens(undefined);
           setFido2Credentials(undefined);
         },
         currentStatus: signingInStatus,
@@ -840,7 +1024,7 @@ function _usePasswordless() {
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens) => {
           // 1) Update tokens in state and deviceKey
-          setTokens(newTokens);
+          updateTokens(newTokens);
           if (newTokens.deviceKey) {
             setDeviceKey(newTokens.deviceKey);
           } else {
@@ -953,7 +1137,7 @@ function _usePasswordless() {
         },
         tokensCb: async (newTokens: TokensFromSignIn) => {
           // Just update component state - processTokens handles storage and refresh
-          setTokens(newTokens);
+          updateTokens(newTokens);
 
           // Keep SRP-specific behavior for auth method
           debug?.(
@@ -968,7 +1152,10 @@ function _usePasswordless() {
           }
 
           // Force sign-in status update after setting tokens
-          setSigninInStatus("SIGNED_IN_WITH_SRP_PASSWORD");
+          const status = signedInStatusForAuth(
+            newTokens.authMethod ?? authMethodFromTokens
+          );
+          status && setSigninInStatus(status);
 
           // After successful authentication, handle remembered device flag if provided
           if (
@@ -1056,7 +1243,7 @@ function _usePasswordless() {
         clientMetadata,
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens: TokensFromSignIn) => {
-          setTokens(newTokens);
+          updateTokens(newTokens);
 
           // If rememberDevice callback requested and Cognito needs confirmation
           if (

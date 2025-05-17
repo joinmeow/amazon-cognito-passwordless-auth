@@ -241,6 +241,40 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     storage.getItem(`${customKeyPrefix}.${username}.expireAt`),
   ]);
 
+  // ---------- 🔐  Validate / derive reliable expiry timestamp ----------
+  let expireAtDate: Date | undefined;
+  const { debug } = configure();
+
+  // a) If a string is present and parses to a valid date → use it
+  if (expireAt && !Number.isNaN(Date.parse(expireAt))) {
+    expireAtDate = new Date(expireAt);
+  }
+
+  // b) Otherwise, or if the date is clearly invalid (<1970 or NaN), derive
+  //    it from the access-token's `exp` claim (if we have one).
+  if (!expireAtDate && accessToken) {
+    try {
+      const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+      if (typeof exp === "number" && exp > 0) {
+        expireAtDate = new Date(exp * 1000);
+        debug?.(
+          `[retrieveTokens] Reconstructed expireAt from accessToken: ${expireAtDate.toISOString()}`
+        );
+      }
+    } catch (err) {
+      debug?.("[retrieveTokens] Failed to parse exp from accessToken:", err);
+    }
+  }
+
+  // c) Safety-net: if we still don't have a valid future expiry timestamp,
+  //    discard all tokens – they are either tampered with or already expired.
+  if (!expireAtDate || expireAtDate.valueOf() <= Date.now()) {
+    debug?.(
+      "[retrieveTokens] Stored tokens missing valid future expireAt. Dropping cached tokens."
+    );
+    return undefined;
+  }
+
   // Always get the device key separately, as it should persist across sessions
   const deviceKey = await retrieveDeviceKey(username);
 
@@ -251,7 +285,7 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     idToken: idToken ?? undefined,
     accessToken: accessToken ?? undefined,
     refreshToken: refreshToken ?? undefined,
-    expireAt: expireAt ? new Date(expireAt) : undefined,
+    expireAt: expireAtDate,
     username,
     deviceKey,
     authMethod,
