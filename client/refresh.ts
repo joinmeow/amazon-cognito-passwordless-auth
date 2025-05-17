@@ -254,7 +254,6 @@ type TokenPayload = {
  */
 async function refreshTokensViaOAuth({
   refreshToken,
-  deviceKey,
   abort,
 }: {
   refreshToken: string;
@@ -282,11 +281,9 @@ async function refreshTokensViaOAuth({
     refresh_token: refreshToken,
   });
 
-  // Add device key if present
-  if (deviceKey) {
-    debug?.(`Including device key in OAuth refresh: ${deviceKey}`);
-    body.append("device_key", deviceKey);
-  }
+  // Note: Cognito's OAuth2 token endpoint does not accept device_key.
+  // Passing unknown parameters can break some proxy/WAF configurations, so we
+  // intentionally do NOT send the device key even if we have one.
 
   debug?.("Sending OAuth token refresh request");
 
