@@ -1329,6 +1329,11 @@ function _usePasswordless() {
     timeSinceLastActivityMs,
     /** Seconds (rounded) since the last user activity */
     timeSinceLastActivitySeconds: Math.round(timeSinceLastActivityMs / 1000),
+    /** Re-load the latest token bundle from storage and push it into context */
+    reloadTokensFromStorage: async () => {
+      const latest = await retrieveTokens();
+      updateTokens(latest);
+    },
     /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
     signInWithRedirect: ({
       provider = "Google",
