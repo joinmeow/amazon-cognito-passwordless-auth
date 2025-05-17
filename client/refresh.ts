@@ -12,7 +12,7 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { configure } from "./config.js";
+import { configure, getTokenEndpoint } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
 import {
   retrieveTokens,
@@ -245,7 +245,103 @@ type TokenPayload = {
   username?: string;
   deviceKey?: string;
   expireAt?: Date;
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
 };
+
+/**
+ * Refresh tokens using OAuth token endpoint
+ * This handles refresh token rotation in OAuth flows
+ */
+async function refreshTokensViaOAuth({
+  refreshToken,
+  deviceKey,
+  abort,
+}: {
+  refreshToken: string;
+  deviceKey?: string;
+  abort?: AbortSignal;
+}): Promise<{
+  accessToken: string;
+  idToken?: string;
+  refreshToken?: string;
+  expiresIn: number;
+}> {
+  const cfg = configure();
+  const { debug, clientId } = cfg;
+
+  debug?.("Using OAuth token endpoint for refresh token flow");
+
+  // Get the OAuth token endpoint
+  const tokenEndpoint = getTokenEndpoint();
+  debug?.(`Using OAuth token endpoint: ${tokenEndpoint}`);
+
+  // Build the request body for token refresh
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: refreshToken,
+  });
+
+  // Add device key if present
+  if (deviceKey) {
+    debug?.(`Including device key in OAuth refresh: ${deviceKey}`);
+    body.append("device_key", deviceKey);
+  }
+
+  debug?.("Sending OAuth token refresh request");
+
+  try {
+    const res = await cfg.fetch(tokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal: abort,
+    });
+
+    if (!res.ok) {
+      const errorResponse = await res
+        .json()
+        .catch(() => ({ error: "Unknown error" }));
+      debug?.("OAuth token refresh failed:", errorResponse);
+      throw new Error(
+        `OAuth token refresh failed: ${
+          typeof errorResponse === "object" && errorResponse !== null
+            ? "error_description" in errorResponse
+              ? String(errorResponse.error_description)
+              : "error" in errorResponse
+                ? String(errorResponse.error)
+                : "Unknown error"
+            : "Unknown error"
+        }`
+      );
+    }
+
+    const json = (await res.json()) as {
+      access_token: string;
+      id_token?: string;
+      refresh_token?: string;
+      expires_in: number;
+      token_type: string;
+    };
+
+    debug?.(
+      `OAuth token refresh successful - Access token: ${json.access_token ? "present" : "missing"}, ID token: ${json.id_token ? "present" : "missing"}, Refresh token: ${json.refresh_token ? "present" : "missing"}, Expires in: ${json.expires_in}s`
+    );
+
+    return {
+      accessToken: json.access_token,
+      idToken: json.id_token,
+      refreshToken: json.refresh_token,
+      expiresIn: json.expires_in,
+    };
+  } catch (error) {
+    debug?.(
+      "OAuth token refresh error:",
+      error instanceof Error ? error.message : String(error)
+    );
+    throw error;
+  }
+}
 
 /**
  * Refresh tokens using the refresh token
@@ -285,6 +381,7 @@ export async function refreshTokens({
     const username = tokens?.username;
     const deviceKey = tokens?.deviceKey;
     const expireAt = tokens?.expireAt;
+    const authMethod = tokens?.authMethod;
 
     // Basic validation
     if (!refreshToken || !username) {
@@ -311,16 +408,84 @@ export async function refreshTokens({
     let tokensFromRefresh: TokensFromRefresh;
 
     try {
-      // Always use GetTokensFromRefreshToken API
-      const authResult = await getTokensFromRefreshToken({
-        refreshToken,
-        deviceKey,
-        abort,
-      });
+      // Check auth method to determine the right refresh approach
+      const { debug } = configure();
+
+      // We'll use OAuth refresh if:
+      // 1. User authenticated with REDIRECT method (OAuth flow)
+      // 2. hostedUi is configured as a fallback
+      let authResult;
+      const { hostedUi } = configure();
+
+      if (authMethod === "REDIRECT") {
+        debug?.(
+          "Using OAuth token endpoint for refresh since auth method is REDIRECT"
+        );
+        const oauthResult = await refreshTokensViaOAuth({
+          refreshToken,
+          deviceKey,
+          abort,
+        });
+
+        // Transform OAuth response to match our expected format
+        authResult = {
+          AuthenticationResult: {
+            AccessToken: oauthResult.accessToken,
+            IdToken: oauthResult.idToken,
+            RefreshToken: oauthResult.refreshToken,
+            ExpiresIn: oauthResult.expiresIn,
+            TokenType: "Bearer",
+          },
+        };
+      } else if (hostedUi && !authMethod) {
+        // If we don't know the auth method but hostedUi is configured, try OAuth as fallback
+        debug?.(
+          "No auth method found but hostedUi is configured, trying OAuth refresh"
+        );
+        try {
+          const oauthResult = await refreshTokensViaOAuth({
+            refreshToken,
+            deviceKey,
+            abort,
+          });
+
+          // Transform OAuth response to match our expected format
+          authResult = {
+            AuthenticationResult: {
+              AccessToken: oauthResult.accessToken,
+              IdToken: oauthResult.idToken,
+              RefreshToken: oauthResult.refreshToken,
+              ExpiresIn: oauthResult.expiresIn,
+              TokenType: "Bearer",
+            },
+          };
+        } catch (err) {
+          debug?.("OAuth refresh failed, falling back to Cognito API:", err);
+          // Fall back to Cognito API
+          authResult = await getTokensFromRefreshToken({
+            refreshToken,
+            deviceKey,
+            abort,
+          });
+        }
+      } else {
+        // Use Cognito API for SRP, FIDO2, PLAINTEXT and unknown auth methods
+        debug?.(
+          `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
+        );
+        authResult = await getTokensFromRefreshToken({
+          refreshToken,
+          deviceKey,
+          abort,
+        });
+      }
 
       tokensFromRefresh = {
         accessToken: authResult.AuthenticationResult.AccessToken,
-        idToken: authResult.AuthenticationResult.IdToken,
+        // idToken is optional in OAuth flows
+        ...(authResult.AuthenticationResult.IdToken && {
+          idToken: authResult.AuthenticationResult.IdToken,
+        }),
         expireAt: new Date(
           Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
         ),
@@ -331,6 +496,8 @@ export async function refreshTokens({
         refreshToken:
           authResult.AuthenticationResult.RefreshToken ?? refreshToken,
         ...(deviceKey && { deviceKey }),
+        // Preserve the authentication method for future refreshes
+        ...(authMethod && { authMethod }),
       };
 
       logDebug(

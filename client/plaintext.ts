@@ -110,7 +110,10 @@ export function authenticateWithPlaintextPassword({
 
       // Always process tokens first - this handles device confirmation, storage, and refresh scheduling
       const processedTokens = (await processTokens(
-        tokens,
+        {
+          ...tokens,
+          authMethod: "PLAINTEXT",
+        },
         abort.signal
       )) as TokensFromSignIn;
 

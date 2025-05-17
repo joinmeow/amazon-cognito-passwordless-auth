@@ -618,7 +618,10 @@ export function authenticateWithFido2({
 
       // Always process tokens first - this handles device confirmation, storage, and refresh scheduling
       const processedTokens = (await processTokens(
-        tokens,
+        {
+          ...tokens,
+          authMethod: "FIDO2",
+        },
         abort.signal
       )) as TokensFromSignIn;
 

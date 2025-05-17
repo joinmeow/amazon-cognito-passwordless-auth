@@ -440,7 +440,10 @@ export function authenticateWithSRP({
 
       // Always process tokens first - this handles device confirmation, storage, and refresh scheduling
       const processedTokens = (await processTokens(
-        tokens,
+        {
+          ...tokens,
+          authMethod: "SRP", // Explicitly set auth method for SRP auth
+        },
         abort.signal
       )) as TokensFromSignIn;
 

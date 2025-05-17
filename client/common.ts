@@ -51,6 +51,18 @@ export async function processTokens(
 
   debug?.("🔄 [Process Tokens] Starting token processing after authentication");
 
+  // Log token structure to help debug OAuth flows
+  debug?.("🔄 [Process Tokens] Processing tokens structure:", {
+    hasAccessToken: !!tokens.accessToken,
+    hasIdToken: !!tokens.idToken,
+    hasRefreshToken: !!tokens.refreshToken,
+    hasUsername: !!tokens.username,
+    hasExpireAt: !!tokens.expireAt,
+    hasDeviceKey: !!tokens.deviceKey,
+    authMethod: tokens.authMethod || "unknown",
+    hasNewDeviceMetadata: !!(tokens as TokensFromSignIn).newDeviceMetadata,
+  });
+
   // 1. Process device confirmation if needed
   if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
     debug?.(
@@ -100,8 +112,25 @@ export async function processTokens(
 
   // 2. Store tokens for persistence
   debug?.("🔄 [Process Tokens] Storing tokens for persistence");
-  await storeTokens(tokens);
-  debug?.("🔄 [Process Tokens] After storeTokens, tokens:", tokens);
+
+  // Make sure we're not passing undefined idToken to storeTokens
+  // TokensToStore requires idToken to be string or undefined, not null
+  const tokensToStore = {
+    ...tokens,
+    // Explicitly ensure idToken is undefined if not present (not null)
+    idToken: tokens.idToken || undefined,
+    // Make sure authMethod persists through storage
+    authMethod: tokens.authMethod,
+  };
+
+  await storeTokens(tokensToStore);
+  debug?.("🔄 [Process Tokens] After storeTokens, tokens:", {
+    hasAccessToken: !!tokensToStore.accessToken,
+    hasIdToken: !!tokensToStore.idToken,
+    hasRefreshToken: !!tokensToStore.refreshToken,
+    username: tokensToStore.username,
+    expiresAt: tokensToStore.expireAt?.toISOString(),
+  });
 
   // 3. Schedule refresh if we have a refresh token
   // But only if this is NOT a fresh login (indicated by newDeviceMetadata)

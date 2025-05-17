@@ -35,6 +35,11 @@ export interface TokensToStore {
    * derive it from either the ID-token (preferred) or from the access token.
    */
   username?: string;
+  /**
+   * The authentication method used to obtain these tokens
+   * Helps the refresh mechanism determine how to refresh tokens
+   */
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
 }
 export interface TokensFromStorage {
   accessToken?: string;
@@ -43,6 +48,47 @@ export interface TokensFromStorage {
   expireAt?: Date;
   username: string;
   deviceKey?: string;
+  /** The authentication method used with these tokens */
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+}
+
+/**
+ * Store the authentication method used for the current user
+ * This helps refresh token logic determine how to refresh tokens
+ */
+export async function storeAuthMethod(
+  username: string,
+  authMethod: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT"
+) {
+  if (!username) return;
+  const { clientId, storage, debug } = configure();
+  const key = `Passwordless.${clientId}.${username}.authMethod`;
+  debug?.(`Storing auth method for ${username}: ${authMethod}`);
+  await storage.setItem(key, authMethod);
+}
+
+/**
+ * Retrieve the authentication method used for the current user
+ * Used by refresh token logic to determine how to refresh tokens
+ */
+export async function retrieveAuthMethod(
+  username: string
+): Promise<"SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined> {
+  if (!username) return undefined;
+  const { clientId, storage } = configure();
+  const key = `Passwordless.${clientId}.${username}.authMethod`;
+  const authMethod = await storage.getItem(key);
+
+  if (
+    authMethod === "SRP" ||
+    authMethod === "FIDO2" ||
+    authMethod === "PLAINTEXT" ||
+    authMethod === "REDIRECT"
+  ) {
+    return authMethod;
+  }
+
+  return undefined;
 }
 
 export async function storeTokens(tokens: TokensToStore) {
@@ -113,6 +159,14 @@ export async function storeTokens(tokens: TokensToStore) {
         tokens.refreshToken
       )
     );
+  }
+
+  // Store auth method if provided - this is critical for refresh token handling
+  if (tokens.authMethod) {
+    debug?.(
+      `[storeTokens] Storing auth method for ${username}: ${tokens.authMethod}`
+    );
+    promises.push(storeAuthMethod(username, tokens.authMethod));
   }
 
   // Persist device key if supplied
@@ -190,6 +244,9 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   // Always get the device key separately, as it should persist across sessions
   const deviceKey = await retrieveDeviceKey(username);
 
+  // Get the stored auth method for this user
+  const authMethod = await retrieveAuthMethod(username);
+
   return {
     idToken: idToken ?? undefined,
     accessToken: accessToken ?? undefined,
@@ -197,6 +254,7 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     expireAt: expireAt ? new Date(expireAt) : undefined,
     username,
     deviceKey,
+    authMethod,
   };
 }
 

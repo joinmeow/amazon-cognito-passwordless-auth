@@ -29,14 +29,28 @@ export interface TokensFromSignIn {
    * - If false: Device is already remembered based on user pool settings
    */
   userConfirmationNecessary?: boolean;
+  /**
+   * The authentication method used to obtain these tokens
+   * Used for token refresh to determine how to refresh tokens
+   */
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
 }
 export interface TokensFromRefresh {
   accessToken: string;
-  idToken: string;
+  /**
+   * ID token may be missing in some OAuth flows using custom
+   * authorization servers or when the openid scope is not requested
+   */
+  idToken?: string;
   expireAt: Date;
   username: string;
   deviceKey?: string;
   refreshToken?: string;
+  /**
+   * The authentication method used to obtain these tokens
+   * Used for token refresh to determine how to refresh tokens
+   */
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
 }
 
 export const busyState = [

@@ -227,6 +227,7 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
       idToken: id_token,
       refreshToken: refresh_token ?? undefined,
       expireAt,
+      authMethod: "REDIRECT",
     });
     debug?.("Tokens successfully stored from implicit flow");
   }
@@ -352,6 +353,7 @@ async function exchangeCodeForTokens(code: string) {
     idToken: json.id_token,
     refreshToken: json.refresh_token,
     expireAt,
+    authMethod: "REDIRECT",
   });
   debug?.("Tokens successfully stored from code exchange");
 }
