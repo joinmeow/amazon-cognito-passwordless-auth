@@ -15,6 +15,8 @@
 import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
 import { storeTokens } from "./storage.js";
+import { parseJwtPayload } from "./util.js";
+import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
 const STATE_KEY = "cognito_oauth_state";
 const PKCE_KEY = "cognito_oauth_pkce";
@@ -219,7 +221,16 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
       throw new Error("Tokens missing in implicit flow");
     }
 
-    const expireAt = new Date(Date.now() + Number(expires_in ?? "3600") * 1000);
+    // Derive expiry from the access-token's exp claim (server time) to avoid
+    // issues with client-clock skew. Fall back to the expires_in field only if
+    // parsing fails.
+    let expireAt: Date;
+    try {
+      const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(access_token);
+      expireAt = new Date(exp * 1000);
+    } catch {
+      expireAt = new Date(Date.now() + Number(expires_in ?? "3600") * 1000);
+    }
     debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
 
     await storeTokens({
@@ -345,7 +356,18 @@ async function exchangeCodeForTokens(code: string) {
     `Tokens received - Access token: ${json.access_token ? "present" : "missing"}, ID token: ${json.id_token ? "present" : "missing"}, Refresh token: ${json.refresh_token ? "present" : "missing"}, Expires in: ${json.expires_in}s`
   );
 
-  const expireAt = new Date(Date.now() + json.expires_in * 1000);
+  // Derive expiry from the access-token's exp claim (server time) to avoid
+  // issues with client-clock skew. Fall back to the expires_in field only if
+  // parsing fails.
+  let expireAt: Date;
+  try {
+    const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(
+      json.access_token
+    );
+    expireAt = new Date(exp * 1000);
+  } catch {
+    expireAt = new Date(Date.now() + json.expires_in * 1000);
+  }
   debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
 
   await storeTokens({

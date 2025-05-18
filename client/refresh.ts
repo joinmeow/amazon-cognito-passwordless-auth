@@ -22,11 +22,15 @@ import {
 import { getTokensFromRefreshToken } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
+import { parseJwtPayload } from "./util.js";
+import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
 // Simple state tracking
 type RefreshState = {
   isRefreshing: boolean;
   refreshTimer?: ReturnType<typeof setTimeoutWallClock>;
+  /** Wall-clock timestamp (ms) when the current refreshTimer is scheduled to fire */
+  nextRefreshTime?: number;
   lastRefreshTime?: number;
 };
 
@@ -95,12 +99,31 @@ export async function scheduleRefresh({
   }
 
   try {
-    // Clear any existing timer
-    if (refreshState.refreshTimer) {
-      refreshState.refreshTimer();
-      refreshState.refreshTimer = undefined;
-      await storeRefreshScheduleInfo({ isScheduled: false });
-    }
+    // Clear any existing timer **only** if the new schedule would fire earlier
+    // than the currently scheduled refresh (or if no timer is set).
+    const clearExistingTimerIfNeeded = (desiredFireTime: number) => {
+      if (
+        refreshState.refreshTimer &&
+        typeof refreshState.nextRefreshTime === "number" &&
+        // If an existing timer will fire *before* (or at the same time as) the
+        // desired one, keep it – otherwise cancel and reschedule below.
+        refreshState.nextRefreshTime <= desiredFireTime
+      ) {
+        logDebug(
+          `Existing refresh is already scheduled earlier (${new Date(
+            refreshState.nextRefreshTime
+          ).toISOString()}); skipping reschedule`
+        );
+        return false; // keep existing timer
+      }
+
+      if (refreshState.refreshTimer) {
+        refreshState.refreshTimer();
+        refreshState.refreshTimer = undefined;
+        refreshState.nextRefreshTime = undefined;
+      }
+      return true; // need to schedule
+    };
 
     // Restore persisted schedule (e.g. after hard reload)
     const persisted = await getRefreshScheduleInfo();
@@ -181,17 +204,31 @@ export async function scheduleRefresh({
     // Standard case: schedule refresh five minutes before expiry
     const refreshDelay = Math.max(0, timeUntilExpiry - 5 * 60 * 1000);
 
-    // Record scheduling info
-    await storeRefreshScheduleInfo({
-      isScheduled: true,
-      expiryTime: tokenExpiryTime,
-    });
+    // After we have determined `refreshDelay`
+    const desiredFireTime = Date.now() + refreshDelay;
+
+    // Decide if we actually need to (re-)schedule
+    const needToSchedule = clearExistingTimerIfNeeded(desiredFireTime);
+    if (!needToSchedule) {
+      // Make sure schedule info in storage reflects that a timer is active
+      await storeRefreshScheduleInfo({
+        isScheduled: true,
+        expiryTime: tokenExpiryTime,
+      });
+      return; // nothing else to do – keep current timer
+    }
+
+    // Record scheduling info on the global state *before* creating the timer so
+    // concurrent calls have up-to-date information.
+    refreshState.nextRefreshTime = desiredFireTime;
 
     const minutesUntilRefresh = Math.round(refreshDelay / (60 * 1000));
     logDebug(`Scheduling token refresh in ${minutesUntilRefresh} minutes`);
 
     // Set the timer
     refreshState.refreshTimer = setTimeoutWallClock(async () => {
+      // Clear meta as soon as the timer fires (regardless of refresh success)
+      refreshState.nextRefreshTime = undefined;
       try {
         await storeRefreshScheduleInfo({ isScheduled: false });
 
@@ -477,15 +514,27 @@ export async function refreshTokens({
         });
       }
 
+      // Derive a server-authoritative expiry timestamp from the AccessToken's `exp` claim.
+      let expireAt: Date;
+      try {
+        const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(
+          authResult.AuthenticationResult.AccessToken
+        );
+        expireAt = new Date(exp * 1000);
+      } catch {
+        // Fallback to local clock in case of unexpected token format
+        expireAt = new Date(
+          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+        );
+      }
+
       tokensFromRefresh = {
         accessToken: authResult.AuthenticationResult.AccessToken,
         // idToken is optional in OAuth flows
         ...(authResult.AuthenticationResult.IdToken && {
           idToken: authResult.AuthenticationResult.IdToken,
         }),
-        expireAt: new Date(
-          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-        ),
+        expireAt,
         username,
         // As per AWS docs GetTokensFromRefreshToken always returns a new refresh
         // token when rotation is enabled. We still fall back to the previous
