@@ -1,4 +1,4 @@
-# Amazon Cognito Passwordless Auth – React Client
+# Meow Cognito Passwordless Auth – React Client
 
 > A tiny wrapper around the core **amazon-cognito-passwordless-auth** library that gives you first-class React hooks and components.
 >
@@ -227,7 +227,7 @@ const {
 
 ## 6 Local User Cache (optional)
 
-Enables a “last 10 users” switcher:
+Enables a "last 10 users" switcher:
 
 ```tsx
 <PasswordlessContextProvider enableLocalUserCache>
@@ -253,5 +253,7 @@ Enables a “last 10 users” switcher:
 ## 8 Contributing & License
 
 Apache-2.0 © Amazon.com, Inc. and its affiliates.
+
+This is a fork by Meow Technologies Inc. (https://meow.com), based on the original work by Amazon. All modifications are also licensed under Apache-2.0.
 
 Pull requests are welcome – run `npm test` before submitting.

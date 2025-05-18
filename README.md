@@ -1,4 +1,4 @@
-# Amazon Cognito Passwordless Auth (Client)
+# Meow Cognito Passwordless Auth (Client)
 
 A client-side library for implementing passwordless authentication with Amazon Cognito. This package provides the frontend implementation for various **secure** passwordless authentication methods:
 
