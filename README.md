@@ -366,3 +366,9 @@ The library is organized into several modules that handle different aspects of a
 - **Token Management**:
   - `storage.ts` - Token persistence and retrieval
   - `refresh.ts`
+
+## License and Attribution
+
+Apache-2.0 © Amazon.com, Inc. and its affiliates.
+
+This is a fork by Meow Technologies Inc. (https://meow.com), based on the original work by Amazon. All modifications are also licensed under Apache-2.0.
