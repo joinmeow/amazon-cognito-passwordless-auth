@@ -16,7 +16,8 @@ import { IdleState, BusyState, busyState, TokensFromSignIn } from "./model.js";
 import { processTokens } from "./common.js";
 import {
   assertIsChallengeResponse,
-  assertIsAuthenticatedResponse,
+  isAuthenticatedResponse,
+  handleAuthResponse,
   initiateAuth,
   respondToAuthChallenge,
 } from "./cognito-api.js";
@@ -29,6 +30,7 @@ import {
 import { configure } from "./config.js";
 import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
 import { CognitoIdTokenPayload } from "./jwt-model.js";
+import { createDeviceSrpAuthHandler } from "./device.js";
 
 export interface StoredCredential {
   credentialId: string;
@@ -593,28 +595,49 @@ export function authenticateWithFido2({
         session: session,
         abort: abort.signal,
       });
-      assertIsAuthenticatedResponse(authResult);
-      debug?.(`Response from respondToAuthChallenge:`, authResult);
-      const tokens = {
-        accessToken: authResult.AuthenticationResult.AccessToken,
-        idToken: authResult.AuthenticationResult.IdToken,
-        refreshToken: authResult.AuthenticationResult.RefreshToken,
-        expireAt: new Date(
-          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-        ),
-        username: parseJwtPayload<CognitoIdTokenPayload>(
-          authResult.AuthenticationResult.IdToken
-        )["cognito:username"],
-        newDeviceMetadata: authResult.AuthenticationResult.NewDeviceMetadata
-          ? {
-              deviceKey:
-                authResult.AuthenticationResult.NewDeviceMetadata.DeviceKey,
-              deviceGroupKey:
-                authResult.AuthenticationResult.NewDeviceMetadata
-                  .DeviceGroupKey,
-            }
-          : undefined,
-      };
+
+      let tokens;
+      if (isAuthenticatedResponse(authResult)) {
+        debug?.(`Response from respondToAuthChallenge (tokens):`, authResult);
+        tokens = {
+          accessToken: authResult.AuthenticationResult.AccessToken,
+          idToken: authResult.AuthenticationResult.IdToken,
+          refreshToken: authResult.AuthenticationResult.RefreshToken,
+          expireAt: new Date(
+            Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+          ),
+          username: parseJwtPayload<CognitoIdTokenPayload>(
+            authResult.AuthenticationResult.IdToken
+          )["cognito:username"],
+          newDeviceMetadata: authResult.AuthenticationResult.NewDeviceMetadata
+            ? {
+                deviceKey:
+                  authResult.AuthenticationResult.NewDeviceMetadata.DeviceKey,
+                deviceGroupKey:
+                  authResult.AuthenticationResult.NewDeviceMetadata
+                    .DeviceGroupKey,
+              }
+            : undefined,
+        };
+      } else {
+        // Handle follow-up DEVICE_SRP_AUTH / DEVICE_PASSWORD_VERIFIER challenge chain
+        debug?.(
+          `Received follow-up challenge (${authResult.ChallengeName}). Delegating to handleAuthResponse.`
+        );
+
+        // Pre-create a device handler if we know the device key; if not, handleAuthResponse will create one lazily
+        const deviceHandler = existingDeviceKey
+          ? await createDeviceSrpAuthHandler(username, existingDeviceKey)
+          : undefined;
+
+        tokens = await handleAuthResponse({
+          authResponse: authResult,
+          username: username,
+          deviceHandler,
+          clientMetadata,
+          abort: abort.signal,
+        });
+      }
 
       // Always process tokens first - this handles device confirmation, storage, and refresh scheduling
       const processedTokens = (await processTokens(

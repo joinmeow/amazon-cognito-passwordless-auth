@@ -122,7 +122,6 @@ export async function storeTokens(tokens: TokensToStore) {
 
   // --------- 2. Prepare key prefixes ---------
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-  const customKeyPrefix = `Passwordless.${clientId}`;
 
   // --------- 3. Parse access token for scope (always present) ---------
   const { scope: accessTokenScope, sub: accessSub } =
@@ -211,13 +210,6 @@ export async function storeTokens(tokens: TokensToStore) {
     )
   );
 
-  promises.push(
-    storage.setItem(
-      `${customKeyPrefix}.${username}.expireAt`,
-      tokens.expireAt.toISOString()
-    )
-  );
-
   // --------- 6. Execute writes ---------
   await Promise.all(promises.filter(Boolean));
 
@@ -229,48 +221,35 @@ export async function storeTokens(tokens: TokensToStore) {
 export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   const { clientId, storage } = configure();
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-  const customKeyPrefix = `Passwordless.${clientId}`;
   const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
   if (!username) {
     return;
   }
-  const [accessToken, idToken, refreshToken, expireAt] = await Promise.all([
+  const [accessToken, idToken, refreshToken] = await Promise.all([
     storage.getItem(`${amplifyKeyPrefix}.${username}.accessToken`),
     storage.getItem(`${amplifyKeyPrefix}.${username}.idToken`),
     storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
-    storage.getItem(`${customKeyPrefix}.${username}.expireAt`),
   ]);
 
-  // ---------- 🔐  Validate / derive reliable expiry timestamp ----------
+  // ---------- 🔐  Derive reliable expiry timestamp ----------
   let expireAtDate: Date | undefined;
   const { debug } = configure();
 
-  // a) If a string is present and parses to a valid date → use it
-  if (expireAt && !Number.isNaN(Date.parse(expireAt))) {
-    expireAtDate = new Date(expireAt);
-  }
-
-  // b) Otherwise, or if the date is clearly invalid (<1970 or NaN), derive
-  //    it from the access-token's `exp` claim (if we have one).
-  if (!expireAtDate && accessToken) {
+  if (accessToken) {
     try {
       const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
       if (typeof exp === "number" && exp > 0) {
         expireAtDate = new Date(exp * 1000);
-        debug?.(
-          `[retrieveTokens] Reconstructed expireAt from accessToken: ${expireAtDate.toISOString()}`
-        );
       }
     } catch (err) {
       debug?.("[retrieveTokens] Failed to parse exp from accessToken:", err);
     }
   }
 
-  // c) Safety-net: if we still don't have a valid future expiry timestamp,
-  //    discard all tokens – they are either tampered with or already expired.
+  // Safety-net: if we don't have a valid future expiry timestamp, discard all tokens
   if (!expireAtDate || expireAtDate.valueOf() <= Date.now()) {
     debug?.(
-      "[retrieveTokens] Stored tokens missing valid future expireAt. Dropping cached tokens."
+      "[retrieveTokens] Tokens missing valid future expiry. Dropping cached tokens."
     );
     return undefined;
   }
