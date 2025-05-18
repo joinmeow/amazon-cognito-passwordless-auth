@@ -1664,8 +1664,8 @@ export function useTotpMfa() {
       // Generate QR code URL if we have a username from tokensParsed
       if (tokensParsed?.idToken && result.SecretCode) {
         const username =
-          tokensParsed.idToken["cognito:username"] ||
           tokensParsed.idToken.email ||
+          tokensParsed.idToken["cognito:username"] ||
           "";
         const { totp } = configure();
         // With the default value in the configure function, this will always have a value
