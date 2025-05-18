@@ -16,7 +16,6 @@ import { IdleState, BusyState, busyState, TokensFromSignIn } from "./model.js";
 import { processTokens } from "./common.js";
 import {
   assertIsChallengeResponse,
-  assertIsAuthenticatedResponse,
   isAuthenticatedResponse,
   handleAuthResponse,
   initiateAuth,
@@ -628,12 +627,12 @@ export function authenticateWithFido2({
 
         // Pre-create a device handler if we know the device key; if not, handleAuthResponse will create one lazily
         const deviceHandler = existingDeviceKey
-          ? await createDeviceSrpAuthHandler(username!, existingDeviceKey)
+          ? await createDeviceSrpAuthHandler(username, existingDeviceKey)
           : undefined;
 
         tokens = await handleAuthResponse({
           authResponse: authResult,
-          username: username!,
+          username: username,
           deviceHandler,
           clientMetadata,
           abort: abort.signal,
