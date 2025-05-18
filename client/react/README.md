@@ -1,6 +1,6 @@
 # Meow Cognito Passwordless Auth – React Client
 
-> A tiny wrapper around the core **amazon-cognito-passwordless-auth** library that gives you first-class React hooks and components.
+> A tiny wrapper around the core **@joinmeow/cognito-passwordless-auth** library that gives you first-class React hooks and components.
 >
 > • React 17+
 > • TypeScript friendly
@@ -11,13 +11,13 @@
 ## 1 Install & Configure
 
 ```bash
-npm i amazon-cognito-passwordless-auth
+npm i @joinmeow/cognito-passwordless-auth
 ```
 
 ```tsx
 // main.tsx
-import { configure } from "amazon-cognito-passwordless-auth";
-import { PasswordlessContextProvider } from "amazon-cognito-passwordless-auth/react";
+import { configure } from "@joinmeow/cognito-passwordless-auth";
+import { PasswordlessContextProvider } from "@joinmeow/cognito-passwordless-auth/react";
 
 configure({
   clientId: "<USER_POOL_CLIENT_ID>",
