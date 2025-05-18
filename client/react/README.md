@@ -1,14 +1,14 @@
 # Amazon Cognito Passwordless Auth – React Client
 
 > A tiny wrapper around the core **amazon-cognito-passwordless-auth** library that gives you first-class React hooks and components.
-> 
+>
 > • React 17+
 > • TypeScript friendly
 > • Works with **FIDO2 / WebAuthn**, **SRP (Secure Remote Password)**, Cognito **Hosted-UI** providers (Google, Apple …) and regular plaintext passwords.
 
 ---
 
-## 1  Install & Configure
+## 1 Install & Configure
 
 ```bash
 npm i amazon-cognito-passwordless-auth
@@ -21,18 +21,18 @@ import { PasswordlessContextProvider } from "amazon-cognito-passwordless-auth/re
 
 configure({
   clientId: "<USER_POOL_CLIENT_ID>",
-  cognitoIdpEndpoint: "eu-west-1",           // Region or custom endpoint
-  userPoolId: "<USER_POOL_ID>",             // Needed for SRP
+  cognitoIdpEndpoint: "eu-west-1", // Region or custom endpoint
+  userPoolId: "<USER_POOL_ID>", // Needed for SRP
   fido2: {
-    baseUrl: "<API Gateway URL>/fido2",     // Required for WebAuthn
+    baseUrl: "<API Gateway URL>/fido2", // Required for WebAuthn
     rp: { id: "example.com", name: "Example" },
   },
   hostedUi: {
     domain: "example.auth.eu-west-1.amazoncognito.com",
     redirectUriSignIn: "http://localhost:5173/",
   },
-  totp: { issuer: "Example" },               // Optional – TOTP MFA
-  debug: console.log,                        // See what happens under the hood
+  totp: { issuer: "Example" }, // Optional – TOTP MFA
+  debug: console.log, // See what happens under the hood
 });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -44,7 +44,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 
 ---
 
-## 2  Quick Tour of the Hook
+## 2 Quick Tour of the Hook
 
 ```tsx
 const {
@@ -52,45 +52,54 @@ const {
   authenticateWithFido2,
   authenticateWithSRP,
   authenticateWithPlaintextPassword,
-  signInWithRedirect,          // Cognito Hosted-UI (e.g. Google)
+  signInWithRedirect, // Cognito Hosted-UI (e.g. Google)
 
   /* tokens */
-  tokens, tokensParsed,
-  refreshTokens, forceRefreshTokens,
+  tokens,
+  tokensParsed,
+  refreshTokens,
+  forceRefreshTokens,
   isRefreshingTokens,
 
   /* device auth */
   deviceKey,
-  confirmDevice, forgetDevice, clearDeviceKey,
+  confirmDevice,
+  forgetDevice,
+  clearDeviceKey,
 
   /* FIDO2 */
-  fido2Credentials, creatingCredential,
+  fido2Credentials,
+  creatingCredential,
   fido2CreateCredential,
 
   /* MFA */
   totpMfaStatus,
 
   /* status */
-  signInStatus, signingInStatus, busy, lastError,
+  signInStatus,
+  signingInStatus,
+  busy,
+  lastError,
 } = usePasswordless();
 ```
 
 Common `signInStatus` values:
 
-| Value | Meaning |
-|-------|---------|
-| `CHECKING` | reading tokens from storage |
-| `SIGNED_IN` | valid tokens in memory |
+| Value                | Meaning                        |
+| -------------------- | ------------------------------ |
+| `CHECKING`           | reading tokens from storage    |
+| `SIGNED_IN`          | valid tokens in memory         |
 | `REFRESHING_SIGN_IN` | background refresh in progress |
-| `NOT_SIGNED_IN` | no (or expired) tokens |
+| `NOT_SIGNED_IN`      | no (or expired) tokens         |
 
 ---
 
-## 3  Authentication Flows (High-level)
+## 3 Authentication Flows (High-level)
 
 Below diagrams mirror the actual TypeScript implementation in `client/`. Dashed arrows are **optional** messages.
 
-### 3.1  FIDO2 / WebAuthn
+### 3.1 FIDO2 / WebAuthn
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -111,7 +120,8 @@ sequenceDiagram
     H-->>C: signedIn Promise resolves
 ```
 
-### 3.2  SRP Password
+### 3.2 SRP Password
+
 ```mermaid
 sequenceDiagram
     participant C as Component
@@ -132,7 +142,8 @@ sequenceDiagram
     H-->>C: signedIn resolves (after optional rememberDevice)
 ```
 
-### 3.3  Hosted UI Redirect (Google, Apple, OIDC)
+### 3.3 Hosted UI Redirect (Google, Apple, OIDC)
+
 ```mermaid
 flowchart TD
     subgraph Browser
@@ -144,7 +155,8 @@ flowchart TD
     A -->|parse| usePasswordless
 ```
 
-### 3.4  Token Lifecycle
+### 3.4 Token Lifecycle
+
 ```mermaid
 sequenceDiagram
     participant Timer as Scheduler
@@ -161,7 +173,8 @@ sequenceDiagram
     H-->>Timer: reschedule
 ```
 
-### 3.5  Sign Out
+### 3.5 Sign Out
+
 ```mermaid
 sequenceDiagram
     participant C as Component
@@ -176,7 +189,7 @@ sequenceDiagram
 
 ---
 
-## 4  Device Authentication (“Remember this device?”)
+## 4 Device Authentication (“Remember this device?”)
 
 After a successful **MFA**-protected sign-in Cognito may return `newDeviceMetadata`.
 
@@ -193,21 +206,26 @@ Subsequent sign-ins from the same device include the `deviceKey` and Cognito ski
 
 ---
 
-## 5  TOTP MFA Setup
+## 5 TOTP MFA Setup
 
 ```tsx
 const {
-  setupStatus, secretCode, qrCodeUrl,
-  beginSetup, verifySetup, resetSetup,
+  setupStatus,
+  secretCode,
+  qrCodeUrl,
+  beginSetup,
+  verifySetup,
+  resetSetup,
 } = useTotpMfa();
 ```
-* `beginSetup()` → gets secret + QR code
-* call `verifySetup("123456")` after user enters code
-* state machine in `setupStatus` (IDLE → GENERATING → READY → VERIFYING → VERIFIED)
+
+- `beginSetup()` → gets secret + QR code
+- call `verifySetup("123456")` after user enters code
+- state machine in `setupStatus` (IDLE → GENERATING → READY → VERIFYING → VERIFIED)
 
 ---
 
-## 6  Local User Cache (optional)
+## 6 Local User Cache (optional)
 
 Enables a “last 10 users” switcher:
 
@@ -221,18 +239,18 @@ Enables a “last 10 users” switcher:
 
 ---
 
-## 7  Troubleshooting
+## 7 Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Infinite refresh loop | Verify system clock & check `configure({ debug })` output |
+| Symptom                              | Fix                                                                          |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| Infinite refresh loop                | Verify system clock & check `configure({ debug })` output                    |
 | 404 `/authenticators/list` after SRP | Don't call FIDO APIs when `authMethod === "SRP"` (library already does this) |
-| Multiple `RevokeToken`s | Pass `skipTokenRevocation:true` to `signOut()` if you handle it yourself |
-| "Invalid refresh token" | User signed out on another device → catch error, call `signOut()` |
+| Multiple `RevokeToken`s              | Pass `skipTokenRevocation:true` to `signOut()` if you handle it yourself     |
+| "Invalid refresh token"              | User signed out on another device → catch error, call `signOut()`            |
 
 ---
 
-## 8  Contributing & License
+## 8 Contributing & License
 
 Apache-2.0 © Amazon.com, Inc. and its affiliates.
 
