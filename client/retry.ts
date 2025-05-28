@@ -26,7 +26,10 @@ export function createFetchWithRetry(
         res = await fetchFn(input, init);
       } catch (err: unknown) {
         // Rethrow immediately on abort
-        if (init?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+        if (
+          init?.signal?.aborted ||
+          (err instanceof Error && err.name === "AbortError")
+        ) {
           throw err;
         }
         // Network error: retry or give up
