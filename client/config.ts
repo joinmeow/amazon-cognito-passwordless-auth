@@ -13,6 +13,8 @@
  * language governing permissions and limitations under the License.
  */
 
+import { createFetchWithRetry } from "./retry.js";
+
 interface Headers {
   [key: string]: string;
 }
@@ -172,12 +174,15 @@ export function configure(config?: ConfigInput) {
       cognitoIdpEndpoint = `https://${cognitoIdpEndpoint}`;
     }
 
+    // Wrap the user-provided or default fetch in retry logic (pass debug callback)
+    const baseFetch = (config.fetch ?? Defaults.fetch).bind(globalThis);
+
     config_ = {
       ...config,
       cognitoIdpEndpoint,
       crypto: config.crypto ?? Defaults.crypto,
       storage: config.storage ?? Defaults.storage,
-      fetch: (config.fetch ?? Defaults.fetch).bind(globalThis),
+      fetch: createFetchWithRetry(baseFetch, config.debug),
       location: config.location ?? Defaults.location,
       history: config.history ?? Defaults.history,
       totp: config.totp ?? {
