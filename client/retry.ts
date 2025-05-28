@@ -1,3 +1,17 @@
+/**
+ * Copyright Amazon.com, Inc. and its affiliates. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"). You
+ * may not use this file except in compliance with the License. A copy of
+ * the License is located at
+ *
+ *     http://aws.amazon.com/apache2.0/
+ *
+ * or in the "license" file accompanying this file. This file is
+ * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+ * ANY KIND, either express or implied. See the License for the specific
+ * language governing permissions and limitations under the License.
+ */
 import type { MinimalFetch, MinimalResponse } from "./config.js";
 
 /**
@@ -20,7 +34,28 @@ export function createFetchWithRetry(
     }
   ): Promise<MinimalResponse> => {
     type ResponseWithStatus = MinimalResponse & { status?: number };
+    // Helper to wait with abort support
+    const wait = (ms: number): Promise<void> => {
+      if (init?.signal?.aborted) {
+        return Promise.reject(new DOMException("Aborted", "AbortError"));
+      }
+      return new Promise((resolve, reject) => {
+        const id = setTimeout(resolve, ms);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(id);
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true }
+        );
+      });
+    };
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // Abort before starting the attempt
+      if (init?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       let res: MinimalResponse;
       try {
         res = await fetchFn(input, init);
@@ -42,7 +77,7 @@ export function createFetchWithRetry(
         }
         const backoff = baseDelayMs * 2 ** (attempt - 1);
         const jitter = Math.random() * baseDelayMs;
-        await new Promise((r) => setTimeout(r, backoff + jitter));
+        await wait(backoff + jitter);
         continue;
       }
 
@@ -61,7 +96,7 @@ export function createFetchWithRetry(
       }
       const backoff = baseDelayMs * 2 ** (attempt - 1);
       const jitter = Math.random() * baseDelayMs;
-      await new Promise((r) => setTimeout(r, backoff + jitter));
+      await wait(backoff + jitter);
     }
     // (should never reach here)
     return fetchFn(input, init);
