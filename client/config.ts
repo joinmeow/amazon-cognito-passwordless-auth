@@ -145,6 +145,8 @@ export interface Config {
     /** Use authorization-code or implicit flow. Defaults to 'code'. */
     responseType?: "code" | "token";
   };
+  /** Whether to use the new GetTokensFromRefreshToken API. Default: true */
+  useGetTokensFromRefreshToken?: boolean;
 }
 
 export type ConfigWithDefaults = Config &
@@ -193,6 +195,8 @@ export function configure(config?: ConfigInput) {
           config.tokenRefresh?.inactivityThreshold ?? 30 * 60 * 1000, // 30 minutes
         useActivityTracking: config.tokenRefresh?.useActivityTracking ?? true,
       },
+      /** Whether to use the new GetTokensFromRefreshToken API. Default: true */
+      useGetTokensFromRefreshToken: config.useGetTokensFromRefreshToken ?? true,
     };
     if (config.hostedUi) {
       config_.hostedUi = {

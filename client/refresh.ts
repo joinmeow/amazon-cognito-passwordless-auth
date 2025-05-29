@@ -19,7 +19,7 @@ import {
   storeRefreshScheduleInfo,
   getRefreshScheduleInfo,
 } from "./storage.js";
-import { getTokensFromRefreshToken } from "./cognito-api.js";
+import { getTokensFromRefreshToken, initiateAuth } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
@@ -442,26 +442,19 @@ export async function refreshTokens({
     let tokensFromRefresh: TokensFromRefresh;
 
     try {
-      // Check auth method to determine the right refresh approach
-      const { debug } = configure();
-
-      // We'll use OAuth refresh if:
-      // 1. User authenticated with REDIRECT method (OAuth flow)
-      // 2. hostedUi is configured as a fallback
+      // Determine refresh approach: OAuth for REDIRECT, else refresh token API or InitiateAuth
+      const { debug, useGetTokensFromRefreshToken } = configure();
       let authResult;
-      const { hostedUi } = configure();
-
       if (authMethod === "REDIRECT") {
         debug?.(
           "Using OAuth token endpoint for refresh since auth method is REDIRECT"
         );
+        // OAuth refresh
         const oauthResult = await refreshTokensViaOAuth({
           refreshToken,
           deviceKey,
           abort,
         });
-
-        // Transform OAuth response to match our expected format
         authResult = {
           AuthenticationResult: {
             AccessToken: oauthResult.accessToken,
@@ -471,47 +464,25 @@ export async function refreshTokens({
             TokenType: "Bearer",
           },
         };
-      } else if (hostedUi && !authMethod) {
-        // If we don't know the auth method but hostedUi is configured, try OAuth as fallback
-        debug?.(
-          "No auth method found but hostedUi is configured, trying OAuth refresh"
-        );
-        try {
-          const oauthResult = await refreshTokensViaOAuth({
-            refreshToken,
-            deviceKey,
-            abort,
-          });
-
-          // Transform OAuth response to match our expected format
-          authResult = {
-            AuthenticationResult: {
-              AccessToken: oauthResult.accessToken,
-              IdToken: oauthResult.idToken,
-              RefreshToken: oauthResult.refreshToken,
-              ExpiresIn: oauthResult.expiresIn,
-              TokenType: "Bearer",
-            },
-          };
-        } catch (err) {
-          debug?.("OAuth refresh failed, falling back to Cognito API:", err);
-          // Fall back to Cognito API
+      } else {
+        if (useGetTokensFromRefreshToken) {
+          debug?.(
+            `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
+          );
           authResult = await getTokensFromRefreshToken({
             refreshToken,
             deviceKey,
             abort,
           });
+        } else {
+          debug?.("Using InitiateAuth REFRESH_TOKEN flow");
+          authResult = await initiateAuth({
+            authflow: "REFRESH_TOKEN",
+            authParameters: { REFRESH_TOKEN: refreshToken },
+            deviceKey,
+            abort,
+          });
         }
-      } else {
-        // Use Cognito API for SRP, FIDO2, PLAINTEXT and unknown auth methods
-        debug?.(
-          `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
-        );
-        authResult = await getTokensFromRefreshToken({
-          refreshToken,
-          deviceKey,
-          abort,
-        });
       }
 
       // Derive a server-authoritative expiry timestamp from the AccessToken's `exp` claim.

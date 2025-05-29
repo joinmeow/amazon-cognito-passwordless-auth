@@ -62,6 +62,8 @@ interface RefreshResponse {
   AuthenticationResult: {
     AccessToken: string;
     IdToken: string;
+    /** Optional refresh token from InitiateAuth with REFRESH_TOKEN flow */
+    RefreshToken?: string;
     ExpiresIn: number;
     TokenType: string;
   };
