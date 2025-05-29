@@ -1,0 +1,13 @@
+# Test files
+test/
+jest.config.js
+
+# TypeScript config for tests
+test/tsconfig.json
+
+# Other development files
+.github/
+.eslintrc.cjs
+.prettierrc
+.prettierignore
+.eslintignore

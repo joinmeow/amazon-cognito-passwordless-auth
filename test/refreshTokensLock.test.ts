@@ -1,0 +1,84 @@
+import { configure } from "../client/config.js";
+import { refreshTokens } from "../client/refresh.js";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const base64UrlEncode = (str: string) =>
+  btoa(str)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+// Create a simple JWT token for testing
+const createMockJWT = (payload: any) => {
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64UrlEncode(JSON.stringify(payload));
+  return `${header}.${body}.signature`;
+};
+
+describe('RefreshTokens Lock', () => {
+  test('should serialize concurrent refresh calls', async () => {
+    // Configure test environment with fetch stub
+    let callCount = 0;
+    const callOrder: number[] = [];
+    const dummyFetch = async (input: string | URL, init?: any) => {
+      callCount++;
+      callOrder.push(callCount);
+      await sleep(100);
+      
+      const accessToken = createMockJWT({
+        sub: "user123",
+        username: "testuser",
+        exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
+        iat: Math.floor(Date.now() / 1000),
+      });
+      
+      return {
+        ok: true,
+        json: async () => ({
+          access_token: accessToken,
+          id_token: createMockJWT({
+            sub: "user123",
+            "cognito:username": "testuser",
+            email: "test@example.com",
+            exp: Math.floor(Date.now() / 1000) + 3600,
+            iat: Math.floor(Date.now() / 1000),
+          }),
+          refresh_token: `refresh-${callCount}`,
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+      } as any;
+    };
+    
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      fetch: dummyFetch,
+      useGetTokensFromRefreshToken: false, // force OAuth path
+    });
+
+    // Define dummy tokens payload with proper JWT
+    const dummyTokens = {
+      refreshToken: "initialRefresh",
+      username: "testuser",
+      expireAt: new Date(Date.now() + 60000),
+      authMethod: "REDIRECT" as const,
+      accessToken: createMockJWT({
+        sub: "user123",
+        username: "testuser",
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        iat: Math.floor(Date.now() / 1000),
+      }),
+    };
+
+    // Invoke two concurrent refreshTokens calls
+    const p1 = refreshTokens({ tokens: dummyTokens } as any);
+    const p2 = refreshTokens({ tokens: dummyTokens } as any);
+
+    await Promise.all([p1, p2]);
+
+    // Verify that the stub was called sequentially (locking) not in parallel
+    expect(callOrder).toEqual([1, 2]);
+  });
+}); 

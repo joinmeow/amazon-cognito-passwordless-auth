@@ -80,11 +80,8 @@ function logDebug(message: string, error?: unknown): void {
   }
 }
 
-/**
- * Schedule a token refresh so it fires ~5 minutes before expiry
- * (or immediately if expiry is near). Wall-clock timers survive tab sleep.
- */
-export async function scheduleRefresh({
+// Extract original implementation into a helper
+async function scheduleRefreshUnlocked({
   abort,
   tokensCb,
   isRefreshingCb,
@@ -142,7 +139,7 @@ export async function scheduleRefresh({
           `Restoring persisted refresh timer to fire in ${Math.round(delay / 1000)}s`
         );
         refreshState.refreshTimer = setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, delay);
         return;
       }
@@ -188,11 +185,12 @@ export async function scheduleRefresh({
           tokensCb,
           isRefreshingCb,
           tokens,
+          force: true,
         });
 
         // Schedule next refresh with a small delay to avoid race conditions
         setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, 2000);
       } catch (err) {
         logDebug("Failed to refresh token:", err);
@@ -242,16 +240,17 @@ export async function scheduleRefresh({
           tokensCb: async (refreshedTokens) => {
             await tokensCb?.(refreshedTokens);
             // Chain the next schedule after successful refresh
-            void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+            void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
           },
           isRefreshingCb,
           tokens: latestTokens,
+          force: true,
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
         // Try again with backoff
         setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, 30000); // 30 second backoff
       }
     }, refreshDelay);
@@ -272,6 +271,30 @@ export async function scheduleRefresh({
   } catch (err) {
     logDebug("Error scheduling refresh:", err);
   }
+}
+
+// Atomic wrapper with per-user lock
+export async function scheduleRefresh(
+  args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
+): Promise<void> {
+  const { clientId, debug } = configure();
+  const tokens0 = await retrieveTokens();
+  const userIdentifier = tokens0?.username;
+  if (!userIdentifier) {
+    // No user found, run unlocked
+    debug?.("scheduleRefresh: no user, running unlocked");
+    return scheduleRefreshUnlocked(args);
+  }
+
+  const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
+  // Acquire lock and execute schedule logic
+  debug?.("scheduleRefresh: waiting for lock", lockKey);
+  const result = await withStorageLock(lockKey, async () => {
+    debug?.("scheduleRefresh: lock acquired", lockKey);
+    return scheduleRefreshUnlocked(args);
+  });
+  debug?.("scheduleRefresh: lock released", lockKey);
+  return result;
 }
 
 /**
@@ -585,10 +608,18 @@ export async function refreshTokens({
     }
   };
   // Execute with lock, or bypass lock when forcing
+  const { debug } = configure();
   if (force) {
+    debug?.("refreshTokens: force=true, bypassing lock", lockKey);
     return doRefresh();
   }
-  return withStorageLock(lockKey, doRefresh);
+  debug?.("refreshTokens: waiting for lock", lockKey);
+  const result = await withStorageLock(lockKey, async () => {
+    debug?.("refreshTokens: lock acquired", lockKey);
+    return doRefresh();
+  });
+  debug?.("refreshTokens: lock released", lockKey);
+  return result;
 }
 
 /**
