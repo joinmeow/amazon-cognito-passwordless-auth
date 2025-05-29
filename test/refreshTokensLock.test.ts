@@ -1,39 +1,43 @@
 import { configure } from "../client/config.js";
 import { refreshTokens } from "../client/refresh.js";
+import type { MinimalResponse } from "../client/config.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const base64UrlEncode = (str: string) =>
-  btoa(str)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 // Create a simple JWT token for testing
-const createMockJWT = (payload: any) => {
+const createMockJWT = (payload: Record<string, unknown>) => {
   const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const body = base64UrlEncode(JSON.stringify(payload));
   return `${header}.${body}.signature`;
 };
 
-describe('RefreshTokens Lock', () => {
-  test('should serialize concurrent refresh calls', async () => {
+describe("RefreshTokens Lock", () => {
+  test("should serialize concurrent refresh calls", async () => {
     // Configure test environment with fetch stub
     let callCount = 0;
     const callOrder: number[] = [];
-    const dummyFetch = async (input: string | URL, init?: any) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const dummyFetch = async (_input: string | URL, _init?: { 
+      signal?: AbortSignal; 
+      headers?: Record<string, string>; 
+      method?: string; 
+      body?: string; 
+    }) => {
       callCount++;
       callOrder.push(callCount);
       await sleep(100);
-      
+
       const accessToken = createMockJWT({
         sub: "user123",
         username: "testuser",
         exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
         iat: Math.floor(Date.now() / 1000),
       });
-      
-      return {
+
+      const response: MinimalResponse = {
         ok: true,
         json: async () => ({
           access_token: accessToken,
@@ -48,9 +52,10 @@ describe('RefreshTokens Lock', () => {
           expires_in: 3600,
           token_type: "Bearer",
         }),
-      } as any;
+      };
+      return response;
     };
-    
+
     configure({
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
@@ -73,12 +78,12 @@ describe('RefreshTokens Lock', () => {
     };
 
     // Invoke two concurrent refreshTokens calls
-    const p1 = refreshTokens({ tokens: dummyTokens } as any);
-    const p2 = refreshTokens({ tokens: dummyTokens } as any);
+    const p1 = refreshTokens({ tokens: dummyTokens });
+    const p2 = refreshTokens({ tokens: dummyTokens });
 
     await Promise.all([p1, p2]);
 
     // Verify that the stub was called sequentially (locking) not in parallel
     expect(callOrder).toEqual([1, 2]);
   });
-}); 
+});

@@ -1,6 +1,6 @@
 // Jest setup file
 // Mock browser globals that might be needed
-Object.defineProperty(globalThis, 'localStorage', {
+Object.defineProperty(globalThis, "localStorage", {
   value: {
     store: new Map<string, string>(),
     getItem(key: string) {
@@ -20,7 +20,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 });
 
 // Mock fetch for tests
-Object.defineProperty(globalThis, 'fetch', {
+Object.defineProperty(globalThis, "fetch", {
   value: jest.fn(() =>
     Promise.resolve({
       ok: true,
@@ -31,10 +31,11 @@ Object.defineProperty(globalThis, 'fetch', {
 });
 
 // Mock TextDecoder
-Object.defineProperty(globalThis, 'TextDecoder', {
+Object.defineProperty(globalThis, "TextDecoder", {
   value: class TextDecoder {
     decode(buffer: ArrayBuffer | Uint8Array): string {
-      const uint8Array = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
+      const uint8Array =
+        buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
       return String.fromCharCode(...Array.from(uint8Array));
     }
   },
@@ -42,12 +43,12 @@ Object.defineProperty(globalThis, 'TextDecoder', {
 });
 
 // jsdom already provides document, just ensure it has the properties we need
-if (typeof document !== 'undefined') {
-  Object.defineProperty(document, 'hidden', {
+if (typeof document !== "undefined") {
+  Object.defineProperty(document, "hidden", {
     value: false,
     writable: true,
   });
 }
 
 // Extend Jest timeout for async operations
-jest.setTimeout(10000); 
+jest.setTimeout(10000);

@@ -35,8 +35,8 @@ interface LockData {
  */
 function generateLockId(): string {
   // Use crypto.randomUUID if available, fallback to timestamp + random
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
+  if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.randomUUID) {
+    return globalThis.crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
@@ -47,8 +47,15 @@ function generateLockId(): string {
 function parseLockData(value: string | null | undefined): LockData | null {
   if (!value) return null;
   try {
-    const data = JSON.parse(value);
-    if (typeof data.id === 'string' && typeof data.timestamp === 'number') {
+    const data = JSON.parse(value) as unknown;
+    if (
+      data &&
+      typeof data === 'object' &&
+      'id' in data &&
+      typeof data.id === 'string' &&
+      'timestamp' in data &&
+      typeof data.timestamp === 'number'
+    ) {
       return data as LockData;
     }
   } catch {
@@ -87,13 +94,16 @@ export async function withStorageLock<T>(
     releaseInProcess = resolve;
   });
   inProcessLockMap.set(key, nextLockPromise);
-  
+
   // Wait for any previous in-process lock holders, but respect timeout
   const startTime = Date.now();
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`Timeout acquiring lock: ${key}`)), timeoutMs);
+    setTimeout(
+      () => reject(new Error(`Timeout acquiring lock: ${key}`)),
+      timeoutMs
+    );
   });
-  
+
   try {
     await Promise.race([previous, timeoutPromise]);
   } catch (err) {
@@ -104,7 +114,7 @@ export async function withStorageLock<T>(
     }
     throw err;
   }
-  
+
   // Adjust remaining timeout after waiting in queue
   const elapsedTime = Date.now() - startTime;
   const remainingTimeout = Math.max(0, timeoutMs - elapsedTime);
@@ -120,23 +130,23 @@ export async function withStorageLock<T>(
   const start = Date.now();
   let lockReleased = false;
   const isBrowser =
-    typeof window !== "undefined" && typeof window.addEventListener === "function";
+    typeof globalThis !== "undefined" && typeof globalThis.addEventListener === "function";
   let onStorage: (e: StorageEvent) => void = () => {};
-  
+
   // Generate unique lock ID for this attempt
   const lockId = generateLockId();
   const lockData: LockData = {
     id: lockId,
     timestamp: Date.now(),
   };
-  
+
   if (isBrowser) {
     onStorage = (e: StorageEvent) => {
       if (e.key === key && (!e.newValue || e.newValue !== JSON.stringify(lockData))) {
         lockReleased = true;
       }
     };
-    window.addEventListener("storage", onStorage);
+    globalThis.addEventListener("storage", onStorage);
   }
 
   try {
@@ -165,7 +175,7 @@ export async function withStorageLock<T>(
     }
   } finally {
     if (isBrowser) {
-      window.removeEventListener("storage", onStorage);
+      globalThis.removeEventListener("storage", onStorage);
     }
   }
 
@@ -201,13 +211,15 @@ export async function withStorageLock<T>(
       debug?.("withStorageLock: storage error during lock acquisition", key, err);
       // Handle storage errors (quota exceeded, disabled storage, etc.)
       if (attempt === maxAcquisitionAttempts) {
-        throw new Error(`Failed to acquire lock due to storage error: ${err}`);
+        throw new Error(`Failed to acquire lock due to storage error: ${String(err)}`);
       }
     }
   }
-  
+
   if (!acquired) {
-    throw new Error(`Failed to acquire lock after ${maxAcquisitionAttempts} attempts: ${key}`);
+    throw new Error(
+      `Failed to acquire lock after ${maxAcquisitionAttempts} attempts: ${key}`
+    );
   }
 
   try {
@@ -218,17 +230,20 @@ export async function withStorageLock<T>(
       // Only remove our lock
       const currentValue = await storage.getItem(key);
       const currentLock = parseLockData(currentValue);
-      
+
       if (currentLock && currentLock.id === lockId) {
         await storage.removeItem(key);
       } else {
-        debug?.("withStorageLock: lock already released or taken by another process", key);
+        debug?.(
+          "withStorageLock: lock already released or taken by another process",
+          key
+        );
       }
     } catch (err) {
       // Log but don't throw - the operation succeeded
       debug?.("withStorageLock: error releasing lock", key, err);
     }
-    
+
     // Release in-process FIFO lock
     releaseInProcess!();
     // Clean up map entry if this was the last in queue
