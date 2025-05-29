@@ -19,14 +19,15 @@ describe("RefreshTokens Lock", () => {
     // Configure test environment with fetch stub
     let callCount = 0;
     const callOrder: number[] = [];
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const dummyFetch = async (
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       _input: string | URL,
-      _init?: {
-        signal?: AbortSignal;
-        headers?: Record<string, string>;
-        method?: string;
-        body?: string;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      _init?: { 
+        signal?: AbortSignal; 
+        headers?: Record<string, string>; 
+        method?: string; 
+        body?: string; 
       }
     ) => {
       callCount++;
