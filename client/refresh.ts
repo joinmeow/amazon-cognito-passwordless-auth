@@ -501,7 +501,10 @@ export async function refreshTokens({
               abort,
             });
           } catch (err) {
-            if (err instanceof Error && err.name === "RefreshTokenReuseException") {
+            if (
+              err instanceof Error &&
+              err.name === "RefreshTokenReuseException"
+            ) {
               debug?.(
                 "Refresh token reuse detected; retrying with latest stored refresh token"
               );
