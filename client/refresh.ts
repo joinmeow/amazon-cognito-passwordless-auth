@@ -289,10 +289,15 @@ export async function scheduleRefresh(
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
   // Acquire lock and execute schedule logic
   debug?.("scheduleRefresh: waiting for lock", lockKey);
-  const result = await withStorageLock(lockKey, async () => {
-    debug?.("scheduleRefresh: lock acquired", lockKey);
-    return scheduleRefreshUnlocked(args);
-  });
+  const result = await withStorageLock(
+    lockKey,
+    async () => {
+      debug?.("scheduleRefresh: lock acquired", lockKey);
+      return scheduleRefreshUnlocked(args);
+    },
+    undefined,
+    args.abort
+  );
   debug?.("scheduleRefresh: lock released", lockKey);
   return result;
 }
@@ -503,35 +508,64 @@ export async function refreshTokens({
             debug?.(
               `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
             );
-            // Try refresh, retry once on reuse error
-            try {
-              authResult = await getTokensFromRefreshToken({
-                refreshToken,
-                deviceKey,
-                abort,
-              });
-            } catch (err) {
-              if (
-                err instanceof Error &&
-                err.name === "RefreshTokenReuseException"
-              ) {
-                debug?.(
-                  "Refresh token reuse detected; retrying with latest stored refresh token"
-                );
-                const latestStored = await retrieveTokens();
-                const latestToken = latestStored?.refreshToken;
-                if (latestToken && latestToken !== refreshToken) {
-                  authResult = await getTokensFromRefreshToken({
-                    refreshToken: latestToken,
-                    deviceKey,
-                    abort,
-                  });
+            // Try refresh, retry once on reuse error or transient network errors
+            let lastError: Error | undefined;
+            let currentRefreshToken = refreshToken; // Mutable copy for retries
+            const maxRetries = 2;
+
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+              try {
+                authResult = await getTokensFromRefreshToken({
+                  refreshToken: currentRefreshToken,
+                  deviceKey,
+                  abort,
+                });
+                break; // Success, exit retry loop
+              } catch (err) {
+                lastError = err as Error;
+
+                if (
+                  err instanceof Error &&
+                  err.name === "RefreshTokenReuseException"
+                ) {
+                  debug?.(
+                    "Refresh token reuse detected; retrying with latest stored refresh token"
+                  );
+                  const latestStored = await retrieveTokens();
+                  const latestToken = latestStored?.refreshToken;
+                  if (latestToken && latestToken !== currentRefreshToken) {
+                    currentRefreshToken = latestToken; // Update for next attempt
+                    continue; // Retry with new token
+                  } else {
+                    throw err; // No new token available
+                  }
+                } else if (
+                  attempt < maxRetries &&
+                  err instanceof Error &&
+                  (err.name === "NetworkError" ||
+                    err.message.includes("fetch") ||
+                    err.message.includes("network") ||
+                    err.message.includes("timeout"))
+                ) {
+                  debug?.(
+                    `Transient network error on attempt ${attempt}/${maxRetries}, retrying:`,
+                    err.message
+                  );
+                  // Small delay before retry
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, 1000 * attempt)
+                  );
+                  continue;
                 } else {
-                  throw err;
+                  throw err; // Non-retryable error or max attempts reached
                 }
-              } else {
-                throw err;
               }
+            }
+
+            if (!authResult) {
+              throw (
+                lastError || new Error("Failed to refresh tokens after retries")
+              );
             }
           } else {
             debug?.("Using InitiateAuth REFRESH_TOKEN flow");
@@ -614,10 +648,15 @@ export async function refreshTokens({
     return doRefresh();
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
-  const result = await withStorageLock(lockKey, async () => {
-    debug?.("refreshTokens: lock acquired", lockKey);
-    return doRefresh();
-  });
+  const result = await withStorageLock(
+    lockKey,
+    async () => {
+      debug?.("refreshTokens: lock acquired", lockKey);
+      return doRefresh();
+    },
+    undefined,
+    abort
+  );
   debug?.("refreshTokens: lock released", lockKey);
   return result;
 }

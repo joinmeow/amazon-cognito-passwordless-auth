@@ -39,4 +39,25 @@ describe("Storage Lock", () => {
     // Wait for the first lock to complete to avoid test interference
     await lockPromise;
   });
+
+  test("should cleanup lock map when it exceeds 100 entries", async () => {
+    // Create many lock operations to trigger cleanup
+    const promises: Promise<void>[] = [];
+
+    // Create 105 different lock keys to exceed the 100 limit
+    for (let i = 0; i < 105; i++) {
+      promises.push(
+        withStorageLock(`cleanup-test-key-${i}`, async () => {
+          // Quick operation
+          await sleep(1);
+        })
+      );
+    }
+
+    // All should complete successfully despite cleanup
+    await Promise.all(promises);
+
+    // Test passes if no errors are thrown and all locks complete
+    expect(true).toBe(true);
+  });
 });

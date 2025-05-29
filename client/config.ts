@@ -196,7 +196,16 @@ export function configure(config?: ConfigInput) {
         useActivityTracking: config.tokenRefresh?.useActivityTracking ?? true,
       },
       /** Whether to use the new GetTokensFromRefreshToken API. Default: true */
-      useGetTokensFromRefreshToken: config.useGetTokensFromRefreshToken ?? true,
+      useGetTokensFromRefreshToken:
+        typeof config.useGetTokensFromRefreshToken === "boolean"
+          ? config.useGetTokensFromRefreshToken
+          : config.useGetTokensFromRefreshToken == null
+            ? true
+            : (() => {
+                throw new Error(
+                  `Invalid configuration: useGetTokensFromRefreshToken must be a boolean, got ${typeof config.useGetTokensFromRefreshToken}`
+                );
+              })(),
     };
     if (config.hostedUi) {
       config_.hostedUi = {

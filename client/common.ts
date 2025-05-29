@@ -283,10 +283,15 @@ export const signOut = (props?: {
     };
     if (lockKey) {
       debug?.("signOut: waiting for lock", lockKey);
-      const result = await withStorageLock(lockKey, async () => {
-        debug?.("signOut: lock acquired", lockKey);
-        return doSignOut();
-      });
+      const result = await withStorageLock(
+        lockKey,
+        async () => {
+          debug?.("signOut: lock acquired", lockKey);
+          return doSignOut();
+        },
+        undefined,
+        abort.signal
+      );
       debug?.("signOut: lock released", lockKey);
       return result;
     }

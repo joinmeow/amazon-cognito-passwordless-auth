@@ -20,12 +20,15 @@ describe("RefreshTokens Lock", () => {
     let callCount = 0;
     const callOrder: number[] = [];
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const dummyFetch = async (_input: string | URL, _init?: { 
-      signal?: AbortSignal; 
-      headers?: Record<string, string>; 
-      method?: string; 
-      body?: string; 
-    }) => {
+    const dummyFetch = async (
+      _input: string | URL,
+      _init?: {
+        signal?: AbortSignal;
+        headers?: Record<string, string>;
+        method?: string;
+        body?: string;
+      }
+    ) => {
       callCount++;
       callOrder.push(callCount);
       await sleep(100);
