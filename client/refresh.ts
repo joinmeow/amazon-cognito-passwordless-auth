@@ -394,6 +394,30 @@ export async function refreshTokens({
   tokens?: TokenPayload;
   force?: boolean;
 } = {}): Promise<TokensFromRefresh> {
+  // Shared in-flight guard across tabs (per-user)
+  const { clientId, storage } = configure();
+  // Determine user identifier (username or sub)
+  let userIdentifier: string | undefined = tokens?.username;
+  if (!userIdentifier) {
+    const storedTokens = await retrieveTokens();
+    userIdentifier = storedTokens?.username;
+  }
+  if (!userIdentifier) {
+    throw new Error("Cannot determine user identity for refresh lock");
+  }
+  const inFlightKey = `Passwordless.${clientId}.${userIdentifier}.refreshTokenInFlight`;
+  if (!force) {
+    const existing = await storage.getItem(inFlightKey);
+    if (existing === "true") {
+      logDebug(
+        `Token refresh already in progress in another tab for ${userIdentifier}, skipping`
+      );
+      throw new Error("Token refresh already in progress");
+    }
+  }
+  // Mark as in-flight (shared)
+  await storage.setItem(inFlightKey, "true");
+
   // Prevent concurrent refreshes
   if (refreshState.isRefreshing && !force) {
     logDebug("Token refresh already in progress");
@@ -469,11 +493,33 @@ export async function refreshTokens({
           debug?.(
             `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
           );
-          authResult = await getTokensFromRefreshToken({
-            refreshToken,
-            deviceKey,
-            abort,
-          });
+          // Try refresh, retry once on reuse error
+          try {
+            authResult = await getTokensFromRefreshToken({
+              refreshToken,
+              deviceKey,
+              abort,
+            });
+          } catch (err) {
+            if (err instanceof Error && err.name === "RefreshTokenReuseException") {
+              debug?.(
+                "Refresh token reuse detected; retrying with latest stored refresh token"
+              );
+              const latestStored = await retrieveTokens();
+              const latestToken = latestStored?.refreshToken;
+              if (latestToken && latestToken !== refreshToken) {
+                authResult = await getTokensFromRefreshToken({
+                  refreshToken: latestToken,
+                  deviceKey,
+                  abort,
+                });
+              } else {
+                throw err;
+              }
+            } else {
+              throw err;
+            }
+          }
         } else {
           debug?.("Using InitiateAuth REFRESH_TOKEN flow");
           authResult = await initiateAuth({
@@ -544,6 +590,12 @@ export async function refreshTokens({
 
     return processedTokens as TokensFromRefresh;
   } finally {
+    // Clear shared in-flight flag
+    try {
+      await storage.removeItem(inFlightKey);
+    } catch {
+      // ignore errors
+    }
     refreshState.isRefreshing = false;
     isRefreshingCb?.(false);
   }
