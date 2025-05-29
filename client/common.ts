@@ -29,6 +29,7 @@ import {
 } from "./model.js";
 import { scheduleRefresh } from "./refresh.js";
 import { handleDeviceConfirmation } from "./device.js";
+import { withStorageLock } from "./lock.js";
 
 /**
  * Process tokens after authentication or refresh.
@@ -205,70 +206,97 @@ export const signOut = (props?: {
 
   const tokenRevocationTracker = new Set<string>();
 
+  // Wrap sign-out in per-user storage lock
   const signedOut = (async () => {
-    try {
-      const tokens = await retrieveTokens();
-      if (abort.signal.aborted) {
-        debug?.("Aborting sign-out");
-        currentStatus && statusCb?.(currentStatus);
-        return;
-      }
-      if (!tokens) {
-        debug?.("No tokens in storage to delete");
-        props?.tokensRemovedLocallyCb?.();
-        statusCb?.("SIGNED_OUT");
-        return;
-      }
-      const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-      const customKeyPrefix = `Passwordless.${clientId}`;
-      await Promise.all([
-        storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.idToken`),
-        storage.removeItem(
-          `${amplifyKeyPrefix}.${tokens.username}.accessToken`
-        ),
-        storage.removeItem(
-          `${amplifyKeyPrefix}.${tokens.username}.refreshToken`
-        ),
-        storage.removeItem(
-          `${amplifyKeyPrefix}.${tokens.username}.tokenScopesString`
-        ),
-        storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.userData`),
-        storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
-        storage.removeItem(`${customKeyPrefix}.${tokens.username}.expireAt`),
-        storage.removeItem(
-          `Passwordless.${clientId}.${tokens.username}.refreshingTokens`
-        ),
-        // Note: We do NOT remove deviceKey - it should persist between sessions
-      ]);
-      props?.tokensRemovedLocallyCb?.();
-
-      if (
-        tokens.refreshToken &&
-        !tokenRevocationTracker.has(tokens.refreshToken) &&
-        !skipTokenRevocation
-      ) {
-        try {
-          tokenRevocationTracker.add(tokens.refreshToken);
-          await revokeToken({
-            abort: undefined,
-            refreshToken: tokens.refreshToken,
-          });
-          debug?.("Successfully revoked refresh token");
-        } catch (revokeError) {
-          debug?.(
-            "Error revoking token, but continuing sign-out process:",
-            revokeError
-          );
+    // Determine lock key per user
+    const tokens0 = await retrieveTokens();
+    const userIdentifier = tokens0?.username;
+    const lockKey = userIdentifier
+      ? `Passwordless.${clientId}.${userIdentifier}.refreshLock`
+      : undefined;
+    // Run sign-out logic under lock if we have a user
+    const doSignOut = async () => {
+      try {
+        debug?.("signOut: performing sign-out for user", userIdentifier);
+        const tokens = await retrieveTokens();
+        if (abort.signal.aborted) {
+          debug?.("Aborting sign-out");
+          currentStatus && statusCb?.(currentStatus);
+          return;
         }
-      }
+        if (!tokens) {
+          debug?.("No tokens in storage to delete");
+          props?.tokensRemovedLocallyCb?.();
+          statusCb?.("SIGNED_OUT");
+          return;
+        }
+        const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+        const customKeyPrefix = `Passwordless.${clientId}`;
+        await Promise.all([
+          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.idToken`),
+          storage.removeItem(
+            `${amplifyKeyPrefix}.${tokens.username}.accessToken`
+          ),
+          storage.removeItem(
+            `${amplifyKeyPrefix}.${tokens.username}.refreshToken`
+          ),
+          storage.removeItem(
+            `${amplifyKeyPrefix}.${tokens.username}.tokenScopesString`
+          ),
+          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.userData`),
+          storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
+          storage.removeItem(`${customKeyPrefix}.${tokens.username}.expireAt`),
+          storage.removeItem(
+            `Passwordless.${clientId}.${tokens.username}.refreshingTokens`
+          ),
+          // Note: We do NOT remove deviceKey - it should persist between sessions
+        ]);
+        props?.tokensRemovedLocallyCb?.();
 
-      statusCb?.("SIGNED_OUT");
-    } catch (err) {
-      if (abort.signal.aborted) return;
-      debug?.("Error during sign-out:", err);
-      currentStatus && statusCb?.(currentStatus);
-      throw err;
+        if (
+          tokens.refreshToken &&
+          !tokenRevocationTracker.has(tokens.refreshToken) &&
+          !skipTokenRevocation
+        ) {
+          try {
+            tokenRevocationTracker.add(tokens.refreshToken);
+            await revokeToken({
+              abort: undefined,
+              refreshToken: tokens.refreshToken,
+            });
+            debug?.("Successfully revoked refresh token");
+          } catch (revokeError) {
+            debug?.(
+              "Error revoking token, but continuing sign-out process:",
+              revokeError
+            );
+          }
+        }
+
+        statusCb?.("SIGNED_OUT");
+      } catch (err) {
+        if (abort.signal.aborted) return;
+        debug?.("Error during sign-out:", err);
+        currentStatus && statusCb?.(currentStatus);
+        throw err;
+      }
+    };
+    if (lockKey) {
+      debug?.("signOut: waiting for lock", lockKey);
+      const result = await withStorageLock(
+        lockKey,
+        async () => {
+          debug?.("signOut: lock acquired", lockKey);
+          return doSignOut();
+        },
+        undefined,
+        abort.signal
+      );
+      debug?.("signOut: lock released", lockKey);
+      return result;
     }
+    debug?.("signOut: no lock key, running unlocked");
+    return doSignOut();
   })();
   return {
     signedOut,

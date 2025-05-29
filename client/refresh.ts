@@ -19,11 +19,12 @@ import {
   storeRefreshScheduleInfo,
   getRefreshScheduleInfo,
 } from "./storage.js";
-import { getTokensFromRefreshToken } from "./cognito-api.js";
+import { getTokensFromRefreshToken, initiateAuth } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
+import { withStorageLock } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -79,11 +80,8 @@ function logDebug(message: string, error?: unknown): void {
   }
 }
 
-/**
- * Schedule a token refresh so it fires ~5 minutes before expiry
- * (or immediately if expiry is near). Wall-clock timers survive tab sleep.
- */
-export async function scheduleRefresh({
+// Extract original implementation into a helper
+async function scheduleRefreshUnlocked({
   abort,
   tokensCb,
   isRefreshingCb,
@@ -141,7 +139,7 @@ export async function scheduleRefresh({
           `Restoring persisted refresh timer to fire in ${Math.round(delay / 1000)}s`
         );
         refreshState.refreshTimer = setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, delay);
         return;
       }
@@ -187,11 +185,12 @@ export async function scheduleRefresh({
           tokensCb,
           isRefreshingCb,
           tokens,
+          force: true,
         });
 
         // Schedule next refresh with a small delay to avoid race conditions
         setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, 2000);
       } catch (err) {
         logDebug("Failed to refresh token:", err);
@@ -241,16 +240,17 @@ export async function scheduleRefresh({
           tokensCb: async (refreshedTokens) => {
             await tokensCb?.(refreshedTokens);
             // Chain the next schedule after successful refresh
-            void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+            void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
           },
           isRefreshingCb,
           tokens: latestTokens,
+          force: true,
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
         // Try again with backoff
         setTimeoutWallClock(() => {
-          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, 30000); // 30 second backoff
       }
     }, refreshDelay);
@@ -271,6 +271,35 @@ export async function scheduleRefresh({
   } catch (err) {
     logDebug("Error scheduling refresh:", err);
   }
+}
+
+// Atomic wrapper with per-user lock
+export async function scheduleRefresh(
+  args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
+): Promise<void> {
+  const { clientId, debug } = configure();
+  const tokens0 = await retrieveTokens();
+  const userIdentifier = tokens0?.username;
+  if (!userIdentifier) {
+    // No user found, run unlocked
+    debug?.("scheduleRefresh: no user, running unlocked");
+    return scheduleRefreshUnlocked(args);
+  }
+
+  const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
+  // Acquire lock and execute schedule logic
+  debug?.("scheduleRefresh: waiting for lock", lockKey);
+  const result = await withStorageLock(
+    lockKey,
+    async () => {
+      debug?.("scheduleRefresh: lock acquired", lockKey);
+      return scheduleRefreshUnlocked(args);
+    },
+    undefined,
+    args.abort
+  );
+  debug?.("scheduleRefresh: lock released", lockKey);
+  return result;
 }
 
 /**
@@ -394,96 +423,77 @@ export async function refreshTokens({
   tokens?: TokenPayload;
   force?: boolean;
 } = {}): Promise<TokensFromRefresh> {
-  // Prevent concurrent refreshes
-  if (refreshState.isRefreshing && !force) {
-    logDebug("Token refresh already in progress");
-    throw new Error("Token refresh already in progress");
+  // Per-user cross-tab lock
+  const { clientId } = configure();
+  // Determine user identifier (username or sub)
+  let userIdentifier: string | undefined = tokens?.username;
+  if (!userIdentifier) {
+    const storedTokens = await retrieveTokens();
+    userIdentifier = storedTokens?.username;
   }
-
-  // Set refreshing state
-  refreshState.isRefreshing = true;
-  isRefreshingCb?.(true);
-
-  try {
-    // Get tokens if not provided
-    if (!tokens) {
-      tokens = await retrieveTokens();
+  if (!userIdentifier) {
+    throw new Error("Cannot determine user identity for refresh lock");
+  }
+  const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
+  // Internal logic wrapped as a function
+  const doRefresh = async (): Promise<TokensFromRefresh> => {
+    // Prevent concurrent in-tab refreshes
+    if (refreshState.isRefreshing && !force) {
+      logDebug("Token refresh already in progress");
+      throw new Error("Token refresh already in progress");
     }
-
-    // Extract token properties safely
-    const refreshToken = tokens?.refreshToken;
-    const username = tokens?.username;
-    const deviceKey = tokens?.deviceKey;
-    const expireAt = tokens?.expireAt;
-    const authMethod = tokens?.authMethod;
-
-    // Basic validation
-    if (!refreshToken || !username) {
-      throw new Error("Cannot refresh without refresh token and username");
-    }
-
-    // Log refresh attempt
-    if (expireAt) {
-      const timeUntilExpiry = expireAt.valueOf() - Date.now();
-      if (timeUntilExpiry > 0) {
-        logDebug(
-          force
-            ? `Force refreshing token that expires in ${Math.round(timeUntilExpiry / 1000)}s`
-            : `Refreshing token (at half expiration time) that expires in ${Math.round(timeUntilExpiry / 1000)}s`
-        );
-      } else {
-        logDebug(
-          `Refreshing expired token (${Math.abs(Math.round(timeUntilExpiry / 1000))}s ago)`
-        );
-      }
-    }
-
-    // Perform the token refresh
-    let tokensFromRefresh: TokensFromRefresh;
 
     try {
-      // Check auth method to determine the right refresh approach
-      const { debug } = configure();
+      // Get tokens if not provided
+      if (!tokens) {
+        tokens = await retrieveTokens();
+      }
 
-      // We'll use OAuth refresh if:
-      // 1. User authenticated with REDIRECT method (OAuth flow)
-      // 2. hostedUi is configured as a fallback
-      let authResult;
-      const { hostedUi } = configure();
+      // Extract token properties safely
+      const refreshToken = tokens?.refreshToken;
+      const username = tokens?.username;
+      const deviceKey = tokens?.deviceKey;
+      const expireAt = tokens?.expireAt;
+      const authMethod = tokens?.authMethod;
 
-      if (authMethod === "REDIRECT") {
-        debug?.(
-          "Using OAuth token endpoint for refresh since auth method is REDIRECT"
-        );
-        const oauthResult = await refreshTokensViaOAuth({
-          refreshToken,
-          deviceKey,
-          abort,
-        });
+      // Basic validation
+      if (!refreshToken || !username) {
+        throw new Error("Cannot refresh without refresh token and username");
+      }
 
-        // Transform OAuth response to match our expected format
-        authResult = {
-          AuthenticationResult: {
-            AccessToken: oauthResult.accessToken,
-            IdToken: oauthResult.idToken,
-            RefreshToken: oauthResult.refreshToken,
-            ExpiresIn: oauthResult.expiresIn,
-            TokenType: "Bearer",
-          },
-        };
-      } else if (hostedUi && !authMethod) {
-        // If we don't know the auth method but hostedUi is configured, try OAuth as fallback
-        debug?.(
-          "No auth method found but hostedUi is configured, trying OAuth refresh"
-        );
-        try {
+      // Log refresh attempt
+      if (expireAt) {
+        const timeUntilExpiry = expireAt.valueOf() - Date.now();
+        if (timeUntilExpiry > 0) {
+          logDebug(
+            force
+              ? `Force refreshing token that expires in ${Math.round(timeUntilExpiry / 1000)}s`
+              : `Refreshing token (at half expiration time) that expires in ${Math.round(timeUntilExpiry / 1000)}s`
+          );
+        } else {
+          logDebug(
+            `Refreshing expired token (${Math.abs(Math.round(timeUntilExpiry / 1000))}s ago)`
+          );
+        }
+      }
+
+      // Perform the token refresh
+      let tokensFromRefresh: TokensFromRefresh;
+
+      try {
+        // Determine refresh approach: OAuth for REDIRECT, else refresh token API or InitiateAuth
+        const { debug, useGetTokensFromRefreshToken } = configure();
+        let authResult;
+        if (authMethod === "REDIRECT") {
+          debug?.(
+            "Using OAuth token endpoint for refresh since auth method is REDIRECT"
+          );
+          // OAuth refresh
           const oauthResult = await refreshTokensViaOAuth({
             refreshToken,
             deviceKey,
             abort,
           });
-
-          // Transform OAuth response to match our expected format
           authResult = {
             AuthenticationResult: {
               AccessToken: oauthResult.accessToken,
@@ -493,89 +503,162 @@ export async function refreshTokens({
               TokenType: "Bearer",
             },
           };
-        } catch (err) {
-          debug?.("OAuth refresh failed, falling back to Cognito API:", err);
-          // Fall back to Cognito API
-          authResult = await getTokensFromRefreshToken({
-            refreshToken,
-            deviceKey,
-            abort,
-          });
+        } else {
+          if (useGetTokensFromRefreshToken) {
+            debug?.(
+              `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
+            );
+            // Try refresh, retry once on reuse error or transient network errors
+            let lastError: Error | undefined;
+            let currentRefreshToken = refreshToken; // Mutable copy for retries
+            const maxRetries = 2;
+
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+              try {
+                authResult = await getTokensFromRefreshToken({
+                  refreshToken: currentRefreshToken,
+                  deviceKey,
+                  abort,
+                });
+                break; // Success, exit retry loop
+              } catch (err) {
+                lastError = err as Error;
+
+                if (
+                  err instanceof Error &&
+                  err.name === "RefreshTokenReuseException"
+                ) {
+                  debug?.(
+                    "Refresh token reuse detected; retrying with latest stored refresh token"
+                  );
+                  const latestStored = await retrieveTokens();
+                  const latestToken = latestStored?.refreshToken;
+                  if (latestToken && latestToken !== currentRefreshToken) {
+                    currentRefreshToken = latestToken; // Update for next attempt
+                    continue; // Retry with new token
+                  } else {
+                    throw err; // No new token available
+                  }
+                } else if (
+                  attempt < maxRetries &&
+                  err instanceof Error &&
+                  (err.name === "NetworkError" ||
+                    err.message.includes("fetch") ||
+                    err.message.includes("network") ||
+                    err.message.includes("timeout"))
+                ) {
+                  debug?.(
+                    `Transient network error on attempt ${attempt}/${maxRetries}, retrying:`,
+                    err.message
+                  );
+                  // Small delay before retry
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, 1000 * attempt)
+                  );
+                  continue;
+                } else {
+                  throw err; // Non-retryable error or max attempts reached
+                }
+              }
+            }
+
+            if (!authResult) {
+              throw (
+                lastError || new Error("Failed to refresh tokens after retries")
+              );
+            }
+          } else {
+            debug?.("Using InitiateAuth REFRESH_TOKEN flow");
+            authResult = await initiateAuth({
+              authflow: "REFRESH_TOKEN",
+              authParameters: { REFRESH_TOKEN: refreshToken },
+              deviceKey,
+              abort,
+            });
+          }
         }
-      } else {
-        // Use Cognito API for SRP, FIDO2, PLAINTEXT and unknown auth methods
-        debug?.(
-          `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
+
+        // Derive a server-authoritative expiry timestamp from the AccessToken's `exp` claim.
+        let expireAt: Date;
+        try {
+          const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(
+            authResult.AuthenticationResult.AccessToken
+          );
+          expireAt = new Date(exp * 1000);
+        } catch {
+          // Fallback to local clock in case of unexpected token format
+          expireAt = new Date(
+            Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
+          );
+        }
+
+        tokensFromRefresh = {
+          accessToken: authResult.AuthenticationResult.AccessToken,
+          // idToken is optional in OAuth flows
+          ...(authResult.AuthenticationResult.IdToken && {
+            idToken: authResult.AuthenticationResult.IdToken,
+          }),
+          expireAt,
+          username,
+          // As per AWS docs GetTokensFromRefreshToken always returns a new refresh
+          // token when rotation is enabled. We still fall back to the previous
+          // value as a safeguard when rotation is disabled.
+          refreshToken:
+            authResult.AuthenticationResult.RefreshToken ?? refreshToken,
+          ...(deviceKey && { deviceKey }),
+          // Preserve the authentication method for future refreshes
+          ...(authMethod && { authMethod }),
+        };
+
+        logDebug(
+          `Token refreshed; new refresh token received: ${authResult.AuthenticationResult.RefreshToken ? "yes" : "no"}, expires in ${authResult.AuthenticationResult.ExpiresIn}s`
         );
-        authResult = await getTokensFromRefreshToken({
-          refreshToken,
-          deviceKey,
-          abort,
-        });
+      } catch (error) {
+        logDebug("Token refresh failed:", error);
+        throw error;
       }
 
-      // Derive a server-authoritative expiry timestamp from the AccessToken's `exp` claim.
-      let expireAt: Date;
-      try {
-        const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(
-          authResult.AuthenticationResult.AccessToken
-        );
-        expireAt = new Date(exp * 1000);
-      } catch {
-        // Fallback to local clock in case of unexpected token format
-        expireAt = new Date(
-          Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
-        );
-      }
-
-      tokensFromRefresh = {
-        accessToken: authResult.AuthenticationResult.AccessToken,
-        // idToken is optional in OAuth flows
-        ...(authResult.AuthenticationResult.IdToken && {
-          idToken: authResult.AuthenticationResult.IdToken,
-        }),
-        expireAt,
-        username,
-        // As per AWS docs GetTokensFromRefreshToken always returns a new refresh
-        // token when rotation is enabled. We still fall back to the previous
-        // value as a safeguard when rotation is disabled.
-        refreshToken:
-          authResult.AuthenticationResult.RefreshToken ?? refreshToken,
-        ...(deviceKey && { deviceKey }),
-        // Preserve the authentication method for future refreshes
-        ...(authMethod && { authMethod }),
-      };
-
+      // Process tokens
       logDebug(
-        `Token refreshed; new refresh token received: ${authResult.AuthenticationResult.RefreshToken ? "yes" : "no"}, expires in ${authResult.AuthenticationResult.ExpiresIn}s`
+        `RefreshTokens: old refreshToken=${refreshToken}, new refreshToken=${tokensFromRefresh.refreshToken}`
       );
-    } catch (error) {
-      logDebug("Token refresh failed:", error);
-      throw error;
+      const processedTokens = await processTokens(tokensFromRefresh, abort);
+
+      // Reset schedule info
+      await storeRefreshScheduleInfo({ isScheduled: false });
+
+      // Update last refresh time
+      refreshState.lastRefreshTime = Date.now();
+
+      // Invoke callback
+      if (tokensCb) {
+        await tokensCb(processedTokens as TokensFromRefresh);
+      }
+
+      return processedTokens as TokensFromRefresh;
+    } finally {
+      refreshState.isRefreshing = false;
+      isRefreshingCb?.(false);
     }
-
-    // Process tokens
-    logDebug(
-      `RefreshTokens: old refreshToken=${refreshToken}, new refreshToken=${tokensFromRefresh.refreshToken}`
-    );
-    const processedTokens = await processTokens(tokensFromRefresh, abort);
-
-    // Reset schedule info
-    await storeRefreshScheduleInfo({ isScheduled: false });
-
-    // Update last refresh time
-    refreshState.lastRefreshTime = Date.now();
-
-    // Invoke callback
-    if (tokensCb) {
-      await tokensCb(processedTokens as TokensFromRefresh);
-    }
-
-    return processedTokens as TokensFromRefresh;
-  } finally {
-    refreshState.isRefreshing = false;
-    isRefreshingCb?.(false);
+  };
+  // Execute with lock, or bypass lock when forcing
+  const { debug } = configure();
+  if (force) {
+    debug?.("refreshTokens: force=true, bypassing lock", lockKey);
+    return doRefresh();
   }
+  debug?.("refreshTokens: waiting for lock", lockKey);
+  const result = await withStorageLock(
+    lockKey,
+    async () => {
+      debug?.("refreshTokens: lock acquired", lockKey);
+      return doRefresh();
+    },
+    undefined,
+    abort
+  );
+  debug?.("refreshTokens: lock released", lockKey);
+  return result;
 }
 
 /**
