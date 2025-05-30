@@ -352,6 +352,506 @@ await beginSetup();
 await verifySetup(userEnteredCode, "My Authenticator");
 ```
 
+### Device Management
+
+The library provides comprehensive device management capabilities for trusted device authentication:
+
+#### React Hook Usage
+
+```jsx
+function DeviceManager() {
+  const {
+    deviceKey,
+    confirmDevice,
+    updateDeviceStatus,
+    forgetDevice,
+    clearDeviceKey,
+    tokens,
+  } = usePasswordless();
+
+  const handleConfirmDevice = async () => {
+    if (deviceKey) {
+      try {
+        await confirmDevice("My Laptop");
+        console.log("Device confirmed successfully");
+      } catch (error) {
+        console.error("Failed to confirm device:", error);
+      }
+    }
+  };
+
+  const handleRememberDevice = async (remember: boolean) => {
+    if (deviceKey) {
+      await updateDeviceStatus({
+        deviceKey,
+        deviceRememberedStatus: remember ? "remembered" : "not_remembered",
+      });
+    }
+  };
+
+  const handleForgetDevice = async () => {
+    try {
+      await forgetDevice(); // Forgets current device
+      // Or forget a specific device: await forgetDevice(specificDeviceKey);
+    } catch (error) {
+      console.error("Failed to forget device:", error);
+    }
+  };
+
+  return (
+    <div>
+      {deviceKey && (
+        <div>
+          <p>Device Key: {deviceKey}</p>
+          <button onClick={handleConfirmDevice}>Confirm This Device</button>
+          <button onClick={() => handleRememberDevice(true)}>
+            Remember This Device
+          </button>
+          <button onClick={() => handleRememberDevice(false)}>
+            Don't Remember This Device
+          </button>
+          <button onClick={handleForgetDevice}>Forget This Device</button>
+          <button onClick={clearDeviceKey}>Clear Local Device Key</button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+#### Device Management Flow
+
+```javascript
+// 1. After successful authentication with MFA, a device key is available
+const { signedIn } = await authenticateWithSRP({
+  username: "user@example.com",
+  password: "password123",
+  rememberDevice: async () => {
+    // This callback is called when userConfirmationNecessary is true
+    return window.confirm("Remember this device for future sign-ins?");
+  },
+});
+
+// 2. The device is automatically confirmed and optionally remembered
+const tokens = await signedIn;
+
+// 3. Manually manage device status later
+if (tokens.deviceKey) {
+  // Update device status
+  await updateDeviceStatus({
+    deviceKey: tokens.deviceKey,
+    deviceRememberedStatus: "remembered",
+  });
+
+  // Or forget the device entirely
+  await forgetDevice(tokens.deviceKey);
+}
+```
+
+### FIDO2 Credential Management
+
+Manage WebAuthn/FIDO2 credentials for passwordless authentication:
+
+#### React Hook Usage
+
+```jsx
+function FIDO2Manager() {
+  const {
+    fido2Credentials,
+    creatingCredential,
+    fido2CreateCredential,
+    userVerifyingPlatformAuthenticatorAvailable,
+  } = usePasswordless();
+
+  const handleCreateCredential = async () => {
+    try {
+      await fido2CreateCredential({
+        friendlyName: "My Face ID",
+        userVerification: "required",
+      });
+      console.log("FIDO2 credential created successfully");
+    } catch (error) {
+      console.error("Failed to create FIDO2 credential:", error);
+    }
+  };
+
+  const handleUpdateCredential = async (credential, newName) => {
+    try {
+      await credential.update({ friendlyName: newName });
+      console.log("Credential updated successfully");
+    } catch (error) {
+      console.error("Failed to update credential:", error);
+    }
+  };
+
+  const handleDeleteCredential = async (credential) => {
+    try {
+      await credential.delete();
+      console.log("Credential deleted successfully");
+    } catch (error) {
+      console.error("Failed to delete credential:", error);
+    }
+  };
+
+  return (
+    <div>
+      <h3>FIDO2 Credentials</h3>
+      
+      {userVerifyingPlatformAuthenticatorAvailable && (
+        <button 
+          onClick={handleCreateCredential} 
+          disabled={creatingCredential}
+        >
+          {creatingCredential ? "Creating..." : "Add New Credential"}
+        </button>
+      )}
+
+      {fido2Credentials?.map((credential) => (
+        <div key={credential.credentialId}>
+          <h4>{credential.friendlyName || "Unnamed Credential"}</h4>
+          <p>Created: {new Date(credential.createdAt).toLocaleDateString()}</p>
+          <p>Last Used: {new Date(credential.lastUseDate).toLocaleDateString()}</p>
+          
+          <button 
+            onClick={() => handleUpdateCredential(credential, "New Name")}
+            disabled={credential.busy}
+          >
+            {credential.busy ? "Updating..." : "Update Name"}
+          </button>
+          
+          <button 
+            onClick={() => handleDeleteCredential(credential)}
+            disabled={credential.busy}
+          >
+            {credential.busy ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+#### FIDO2 Authentication Flow
+
+```javascript
+// 1. Check if platform authenticator is available
+if (userVerifyingPlatformAuthenticatorAvailable) {
+  // 2. Create a new credential
+  await fido2CreateCredential({
+    friendlyName: "iPhone Face ID",
+    userVerification: "required",
+  });
+
+  // 3. Sign in with FIDO2
+  const { signedIn } = await authenticateWithFido2({
+    username: "user@example.com",
+    // Optional: specify credentials to use
+    credentials: fido2Credentials?.map(c => ({
+      id: c.credentialId,
+      transports: c.transports
+    }))
+  });
+
+  await signedIn;
+}
+```
+
+### Local User Cache Management
+
+The `useLocalUserCache()` hook manages a cache of recently signed-in users for improved UX:
+
+#### Setup and Usage
+
+```jsx
+// 1. Enable local user cache in the provider
+function App() {
+  return (
+    <PasswordlessContextProvider enableLocalUserCache={true}>
+      <YourApp />
+    </PasswordlessContextProvider>
+  );
+}
+
+// 2. Use the cache in your components
+function UserSelector() {
+  const {
+    currentUser,
+    lastSignedInUsers,
+    clearLastSignedInUsers,
+    updateFidoPreference,
+    signingInStatus,
+    authMethod,
+  } = useLocalUserCache();
+
+  const { authenticateWithFido2, authenticateWithSRP } = usePasswordless();
+
+  const handleQuickSignIn = async (user) => {
+    if (user.useFido === "YES" && user.credentials) {
+      // Sign in with FIDO2 using stored credentials
+      await authenticateWithFido2({
+        username: user.username,
+        credentials: user.credentials,
+      });
+    } else {
+      // Fall back to password authentication
+      const password = prompt("Enter your password:");
+      await authenticateWithSRP({
+        username: user.username,
+        password,
+      });
+    }
+  };
+
+  const handleFidoPreferenceChange = (useFido) => {
+    updateFidoPreference({ useFido });
+  };
+
+  return (
+    <div>
+      <h3>Recent Users</h3>
+      
+      {currentUser && (
+        <div>
+          <h4>Current User: {currentUser.username}</h4>
+          <p>Email: {currentUser.email}</p>
+          <p>Auth Method: {currentUser.authMethod}</p>
+          <p>FIDO2 Preference: {currentUser.useFido}</p>
+          
+          <button onClick={() => handleFidoPreferenceChange("YES")}>
+            Enable FIDO2
+          </button>
+          <button onClick={() => handleFidoPreferenceChange("NO")}>
+            Disable FIDO2
+          </button>
+        </div>
+      )}
+
+      <h4>Quick Sign-In</h4>
+      {lastSignedInUsers?.map((user) => (
+        <div key={user.username}>
+          <button onClick={() => handleQuickSignIn(user)}>
+            {user.email || user.username}
+            {user.useFido === "YES" && " (FIDO2)"}
+          </button>
+        </div>
+      ))}
+
+      <button onClick={clearLastSignedInUsers}>
+        Clear User History
+      </button>
+    </div>
+  );
+}
+```
+
+#### StoredUser Object Structure
+
+```typescript
+type StoredUser = {
+  username: string;
+  email?: string;
+  useFido?: "YES" | "NO" | "ASK";
+  credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+};
+```
+
+### Utility Hooks
+
+#### useAwaitableState
+
+Convert any state value into a promise that can be awaited:
+
+```jsx
+function AsyncStateExample() {
+  const [data, setData] = useState(null);
+  const awaitableData = useAwaitableState(data);
+
+  const handleWaitForData = async () => {
+    console.log("Waiting for data...");
+    
+    // This will wait until data is set to a truthy value
+    const result = await awaitableData.awaitable();
+    console.log("Data received:", result);
+  };
+
+  const handleSetData = () => {
+    setData("Hello World");
+    // Resolve the awaitable with the current data value
+    awaitableData.resolve();
+  };
+
+  const handleRejectData = () => {
+    awaitableData.reject(new Error("Data loading failed"));
+  };
+
+  return (
+    <div>
+      <p>Current data: {data}</p>
+      <p>Awaited data: {awaitableData.awaited?.value}</p>
+      
+      <button onClick={handleWaitForData}>Wait for Data</button>
+      <button onClick={handleSetData}>Set Data</button>
+      <button onClick={handleRejectData}>Reject</button>
+    </div>
+  );
+}
+```
+
+## API Reference
+
+### usePasswordless() Hook
+
+Complete reference of all available properties and methods:
+
+#### State Properties
+
+```typescript
+// Token and authentication state
+tokens?: TokensFromStorage               // Raw JWT tokens
+tokensParsed?: {                        // Parsed token contents
+  idToken: CognitoIdTokenPayload;
+  accessToken: CognitoAccessTokenPayload;
+  expireAt: Date;
+}
+signInStatus: string                    // Overall auth status
+signingInStatus: BusyState | IdleState  // Current operation status
+busy: boolean                          // Is any auth operation in progress
+lastError?: Error                      // Last error that occurred
+authMethod?: string                    // Current auth method used
+
+// Token refresh state
+isRefreshingTokens: boolean            // Is token refresh in progress
+
+// FIDO2 state
+userVerifyingPlatformAuthenticatorAvailable?: boolean  // Platform auth available
+fido2Credentials?: Fido2Credential[]   // User's FIDO2 credentials
+creatingCredential: boolean            // Is creating FIDO2 credential
+
+// Device management
+deviceKey: string | null               // Current device key
+
+// TOTP MFA state
+totpMfaStatus: {
+  enabled: boolean;
+  preferred: boolean;
+  availableMfaTypes: string[];
+}
+
+// Activity tracking (when enabled)
+timeSinceLastActivityMs: number | null     // Milliseconds since last activity
+timeSinceLastActivitySeconds: number | null // Seconds since last activity
+```
+
+#### Methods
+
+```typescript
+// Authentication methods
+authenticateWithFido2(options?: {
+  username?: string;
+  credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  clientMetadata?: Record<string, string>;
+}) => Promise<TokensFromSignIn>
+
+authenticateWithSRP(options: {
+  username: string;
+  password: string;
+  smsMfaCode?: () => Promise<string>;
+  otpMfaCode?: () => Promise<string>;
+  newPassword?: () => Promise<string>;
+  clientMetadata?: Record<string, string>;
+  rememberDevice?: () => Promise<boolean>;
+}) => Promise<TokensFromSignIn>
+
+authenticateWithPlaintextPassword(options: {
+  username: string;
+  password: string;
+  smsMfaCode?: () => Promise<string>;
+  otpMfaCode?: () => Promise<string>;
+  clientMetadata?: Record<string, string>;
+  rememberDevice?: () => Promise<boolean>;
+}) => Promise<TokensFromSignIn>
+
+signInWithRedirect(options?: {
+  provider?: string;
+  customState?: string;
+}) => void
+
+signOut(options?: { 
+  skipTokenRevocation?: boolean 
+}) => { signedOut: Promise<void> }
+
+// Token management
+refreshTokens(abort?: AbortSignal) => Promise<void>
+forceRefreshTokens(abort?: AbortSignal) => Promise<void>
+reloadTokensFromStorage() => Promise<void>
+markUserActive() => void  // Mark user as active for activity tracking
+
+// Device management
+confirmDevice(deviceName: string) => Promise<any>
+updateDeviceStatus(options: {
+  deviceKey: string;
+  deviceRememberedStatus: "remembered" | "not_remembered";
+}) => Promise<void>
+forgetDevice(deviceKeyToForget?: string) => Promise<void>
+clearDeviceKey() => void
+
+// FIDO2 credential management
+fido2CreateCredential(...args) => Promise<StoredCredential>
+
+// TOTP MFA
+refreshTotpMfaStatus() => Promise<void>
+```
+
+### useLocalUserCache() Hook
+
+```typescript
+// Properties
+currentUser?: StoredUser               // Currently signed-in user
+lastSignedInUsers?: StoredUser[]       // Last 10 signed-in users
+signingInStatus: BusyState | IdleState // Current signing status
+authMethod?: string                    // Current auth method
+
+// Methods
+updateFidoPreference(options: { 
+  useFido: "YES" | "NO" 
+}) => void
+clearLastSignedInUsers() => void
+```
+
+### useTotpMfa() Hook
+
+```typescript
+// Properties
+setupStatus: "IDLE" | "GENERATING" | "READY" | "VERIFYING" | "VERIFIED" | "ERROR"
+secretCode?: string                    // Secret for QR code
+qrCodeUrl?: string                     // QR code URL
+errorMessage?: string                  // Setup error message
+totpMfaStatus: {                      // Current MFA status
+  enabled: boolean;
+  preferred: boolean;
+  availableMfaTypes: string[];
+}
+
+// Methods
+beginSetup() => Promise<{ SecretCode: string }>
+verifySetup(code: string, deviceName?: string) => Promise<{ Status: string }>
+resetSetup() => void
+```
+
+### useAwaitableState(state) Hook
+
+```typescript
+// Methods
+awaitable() => Promise<T>              // Get current promise
+resolve() => void                      // Resolve with current state
+reject(reason: Error) => void          // Reject the promise
+
+// Properties
+awaited?: { value: T }                 // Resolved value (if any)
+```
+
 ## Library Architecture
 
 The library is organized into several modules that handle different aspects of authentication:
