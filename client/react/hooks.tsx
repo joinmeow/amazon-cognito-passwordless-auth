@@ -196,6 +196,7 @@ const LocalUserCacheContextProvider = (props: {
   // Memoize the context value to prevent unnecessary re-renders
   const memoizedValue = useMemo(
     () => localUserCacheValue,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       localUserCacheValue.currentUser,
       localUserCacheValue.lastSignedInUsers,
@@ -672,6 +673,7 @@ function _usePasswordless() {
       });
 
     return () => abort.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     // Only depend on specific token properties that should trigger refresh
     refreshToken,
@@ -688,6 +690,7 @@ function _usePasswordless() {
   // Use ref to prevent circular dependencies
   const isHandlingIncompleteTokens = useRef(false);
   
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     // Don't run if we're currently handling incomplete tokens to avoid loops
     if (isHandlingIncompleteTokens.current) return;
@@ -729,6 +732,7 @@ function _usePasswordless() {
         isHandlingIncompleteTokens.current = false;
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     // Be specific about token properties that indicate incomplete tokens
     tokens?.accessToken,
@@ -743,6 +747,7 @@ function _usePasswordless() {
   ]);
 
   // At component mount, load tokens from storage
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const abortController = new AbortController();
     const { debug } = configure();
@@ -876,6 +881,7 @@ function _usePasswordless() {
   );
 
   // Determine sign-in status (single authoritative state for UI)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const signInStatus = useMemo(() => {
     // 1️⃣ Initial load – waiting for storage
     if (initiallyRetrievingTokensFromStorage) return "CHECKING";
@@ -921,6 +927,7 @@ function _usePasswordless() {
 
     // 6️⃣ All good
     return "SIGNED_IN";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
