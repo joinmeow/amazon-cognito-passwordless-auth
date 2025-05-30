@@ -110,8 +110,26 @@ export const PasswordlessContextProvider = (props: {
   // Memoize the context value to prevent unnecessary re-renders
   const memoizedValue = useMemo(
     () => passwordlessValue,
-    // Include the entire object since we return it directly
-    [passwordlessValue]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      // State values that might change
+      passwordlessValue.tokens,
+      passwordlessValue.tokensParsed,
+      passwordlessValue.isRefreshingTokens,
+      passwordlessValue.lastError,
+      passwordlessValue.signingInStatus,
+      passwordlessValue.busy,
+      passwordlessValue.signInStatus,
+      passwordlessValue.userVerifyingPlatformAuthenticatorAvailable,
+      passwordlessValue.fido2Credentials,
+      passwordlessValue.creatingCredential,
+      passwordlessValue.deviceKey,
+      passwordlessValue.totpMfaStatus,
+      passwordlessValue.timeSinceLastActivityMs,
+      passwordlessValue.timeSinceLastActivitySeconds,
+      // Functions are already memoized with useCallback, so they're stable
+      // We don't need to include them in dependencies
+    ]
   );
 
   return (
@@ -662,18 +680,20 @@ function _usePasswordless() {
       .then((tokens) => {
         if (!mounted) return; // Check if still mounted
 
-        // Process the raw tokens first
-        _setTokens(tokens);
+        // Process the raw tokens first - only if still mounted
+        if (mounted) {
+          _setTokens(tokens);
 
-        // Parse tokens with special handling for OAuth
-        parseAndSetTokens(tokens);
+          // Parse tokens with special handling for OAuth
+          parseAndSetTokens(tokens);
 
-        // If these are tokens from OAuth/REDIRECT, update the signing in status
-        if (tokens?.authMethod === "REDIRECT") {
-          debug?.(
-            "Setting signingInStatus to SIGNED_IN_WITH_REDIRECT based on retrieved tokens"
-          );
-          setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
+          // If these are tokens from OAuth/REDIRECT, update the signing in status
+          if (tokens?.authMethod === "REDIRECT") {
+            debug?.(
+              "Setting signingInStatus to SIGNED_IN_WITH_REDIRECT based on retrieved tokens"
+            );
+            setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
+          }
         }
       })
       .catch((err) => {
@@ -681,7 +701,9 @@ function _usePasswordless() {
 
         debug?.("Failed to retrieve tokens from storage:", err);
         // Make sure signInStatus gets recalculated on error
-        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+        if (mounted) {
+          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+        }
       })
       .finally(() => {
         if (mounted) {
@@ -900,58 +922,30 @@ function _usePasswordless() {
   useEffect(() => {
     if (!isSignedIn || !tokens?.accessToken) return;
 
-    const abort = new AbortController();
-    let mounted = true;
+    const abortController = new AbortController();
 
-    // Just try to get MFA settings, but don't make a big deal if they're not there
-    getUser({ accessToken: tokens.accessToken, abort: abort.signal })
+    // Get MFA settings for the signed-in user
+    getUser({ accessToken: tokens.accessToken, abort: abortController.signal })
       .then((user) => {
-        if (!mounted || abort.signal.aborted) return;
+        if (abortController.signal.aborted) return;
 
-        try {
-          // If we have a valid user object with MFA settings, use them
-          if (user && typeof user === "object" && !("__type" in user)) {
-            const hasMfa =
-              user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false;
-            const preferredMfa =
-              user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
+        // If we have a valid user object with MFA settings, use them
+        if (user && typeof user === "object" && !("__type" in user)) {
+          const hasMfa =
+            user.UserMFASettingList?.includes("SOFTWARE_TOKEN_MFA") || false;
+          const preferredMfa =
+            user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
 
-            dispatch({
-              type: "SET_TOTP_MFA_STATUS",
-              payload: {
-                enabled: hasMfa,
-                preferred: preferredMfa,
-                availableMfaTypes: user.UserMFASettingList || [],
-              },
-            });
-          } else {
-            // Default to no MFA settings
-            dispatch({
-              type: "SET_TOTP_MFA_STATUS",
-              payload: {
-                enabled: false,
-                preferred: false,
-                availableMfaTypes: [],
-              },
-            });
-          }
-        } catch (e) {
-          // Just suppress errors and use default values
-          if (mounted) {
-            dispatch({
-              type: "SET_TOTP_MFA_STATUS",
-              payload: {
-                enabled: false,
-                preferred: false,
-                availableMfaTypes: [],
-              },
-            });
-          }
-        }
-      })
-      .catch(() => {
-        // If anything fails, just default to no MFA settings
-        if (mounted && !abort.signal.aborted) {
+          dispatch({
+            type: "SET_TOTP_MFA_STATUS",
+            payload: {
+              enabled: hasMfa,
+              preferred: preferredMfa,
+              availableMfaTypes: user.UserMFASettingList || [],
+            },
+          });
+        } else {
+          // Default to no MFA
           dispatch({
             type: "SET_TOTP_MFA_STATUS",
             payload: {
@@ -961,11 +955,23 @@ function _usePasswordless() {
             },
           });
         }
+      })
+      .catch(() => {
+        if (abortController.signal.aborted) return;
+        
+        // If anything fails, just default to no MFA
+        dispatch({
+          type: "SET_TOTP_MFA_STATUS",
+          payload: {
+            enabled: false,
+            preferred: false,
+            availableMfaTypes: [],
+          },
+        });
       });
 
     return () => {
-      mounted = false;
-      abort.abort();
+      abortController.abort();
     };
   }, [isSignedIn, tokens?.accessToken]);
 
