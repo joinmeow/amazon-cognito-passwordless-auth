@@ -67,6 +67,7 @@ import React, {
   useCallback,
   useMemo,
   useRef,
+  useReducer,
 } from "react";
 import { signInWithRedirect as hostedSignInWithRedirect } from "../hosted-oauth.js";
 
@@ -104,8 +105,17 @@ export const PasswordlessContextProvider = (props: {
   children: React.ReactNode;
   enableLocalUserCache?: boolean;
 }) => {
+  const passwordlessValue = _usePasswordless();
+
+  // Memoize the context value to prevent unnecessary re-renders
+  const memoizedValue = useMemo(
+    () => passwordlessValue,
+    // Include the entire object since we return it directly
+    [passwordlessValue]
+  );
+
   return (
-    <PasswordlessContext.Provider value={_usePasswordless()}>
+    <PasswordlessContext.Provider value={memoizedValue}>
       {props.enableLocalUserCache ? (
         <LocalUserCacheContextProvider>
           {props.children}
@@ -139,31 +149,243 @@ type Fido2Credential = StoredCredential & {
 
 type UsePasswordless = ReturnType<typeof _usePasswordless>;
 
-function _usePasswordless() {
-  const [signingInStatus, setSigninInStatus] = useState<BusyState | IdleState>(
-    "SIGNED_OUT"
-  );
-  const [
-    initiallyRetrievingTokensFromStorage,
-    setInitiallyRetrievingTokensFromStorage,
-  ] = useState(true);
-  const [tokens, _setTokens] = useState<TokensFromStorage>();
-  const [tokensParsed, setTokensParsed] = useState<{
+// Define state shape for useReducer
+interface PasswordlessState {
+  signingInStatus: BusyState | IdleState;
+  initiallyRetrievingTokensFromStorage: boolean;
+  tokens?: TokensFromStorage;
+  tokensParsed?: {
     idToken: CognitoIdTokenPayload;
     accessToken: CognitoAccessTokenPayload;
     expireAt: Date;
-  }>();
-  const [lastError, setLastError] = useState<Error>();
-  const [
+  };
+  lastError?: Error;
+  userVerifyingPlatformAuthenticatorAvailable?: boolean;
+  creatingCredential: boolean;
+  fido2Credentials?: Fido2Credential[];
+  deviceKey: string | null;
+  isSchedulingRefresh?: boolean;
+  isRefreshingTokens?: boolean;
+  recheckSignInStatus: number;
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  totpMfaStatus: {
+    enabled: boolean;
+    preferred: boolean;
+    availableMfaTypes: string[];
+  };
+  lastActivityAt: number;
+  nowTick: number;
+  isAttemptingExpiredTokenRefresh: boolean;
+}
+
+// Define action types
+type PasswordlessAction =
+  | { type: "SET_SIGNING_STATUS"; payload: BusyState | IdleState }
+  | { type: "SET_INITIAL_LOADING"; payload: boolean }
+  | { type: "SET_TOKENS"; payload: TokensFromStorage | undefined }
+  | { type: "SET_TOKENS_PARSED"; payload: PasswordlessState["tokensParsed"] }
+  | { type: "SET_ERROR"; payload: Error | undefined }
+  | { type: "SET_PLATFORM_AUTHENTICATOR"; payload: boolean }
+  | { type: "SET_CREATING_CREDENTIAL"; payload: boolean }
+  | { type: "SET_FIDO2_CREDENTIALS"; payload: Fido2Credential[] | undefined }
+  | {
+      type: "UPDATE_FIDO2_CREDENTIAL";
+      payload: { credentialId: string } & Partial<Fido2Credential>;
+    }
+  | { type: "DELETE_FIDO2_CREDENTIAL"; payload: string }
+  | { type: "SET_DEVICE_KEY"; payload: string | null }
+  | {
+      type: "SET_REFRESH_STATUS";
+      isScheduling?: boolean;
+      isRefreshing?: boolean;
+    }
+  | { type: "INCREMENT_RECHECK_STATUS" }
+  | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
+  | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
+  | { type: "SET_LAST_ACTIVITY"; payload: number }
+  | { type: "SET_NOW_TICK"; payload: number }
+  | { type: "SET_ATTEMPTING_EXPIRED_REFRESH"; payload: boolean }
+  | { type: "SIGN_OUT" };
+
+// Initial state
+const initialPasswordlessState: PasswordlessState = {
+  signingInStatus: "SIGNED_OUT",
+  initiallyRetrievingTokensFromStorage: true,
+  creatingCredential: false,
+  deviceKey: null,
+  recheckSignInStatus: 0,
+  totpMfaStatus: {
+    enabled: false,
+    preferred: false,
+    availableMfaTypes: [],
+  },
+  lastActivityAt: Date.now(),
+  nowTick: Date.now(),
+  isAttemptingExpiredTokenRefresh: false,
+};
+
+// Reducer function
+function passwordlessReducer(
+  state: PasswordlessState,
+  action: PasswordlessAction
+): PasswordlessState {
+  switch (action.type) {
+    case "SET_SIGNING_STATUS":
+      return { ...state, signingInStatus: action.payload };
+
+    case "SET_INITIAL_LOADING":
+      return { ...state, initiallyRetrievingTokensFromStorage: action.payload };
+
+    case "SET_TOKENS":
+      return { ...state, tokens: action.payload };
+
+    case "SET_TOKENS_PARSED":
+      return { ...state, tokensParsed: action.payload };
+
+    case "SET_ERROR":
+      return { ...state, lastError: action.payload };
+
+    case "SET_PLATFORM_AUTHENTICATOR":
+      return {
+        ...state,
+        userVerifyingPlatformAuthenticatorAvailable: action.payload,
+      };
+
+    case "SET_CREATING_CREDENTIAL":
+      return { ...state, creatingCredential: action.payload };
+
+    case "SET_FIDO2_CREDENTIALS":
+      return { ...state, fido2Credentials: action.payload };
+
+    case "UPDATE_FIDO2_CREDENTIAL": {
+      if (!state.fido2Credentials) return state;
+      const index = state.fido2Credentials.findIndex(
+        (c) => c.credentialId === action.payload.credentialId
+      );
+      if (index === -1) return state;
+      const updated = [...state.fido2Credentials];
+      // eslint-disable-next-line security/detect-object-injection
+      updated[index] = { ...updated[index], ...action.payload };
+      return { ...state, fido2Credentials: updated };
+    }
+
+    case "DELETE_FIDO2_CREDENTIAL":
+      return {
+        ...state,
+        fido2Credentials: state.fido2Credentials?.filter(
+          (c) => c.credentialId !== action.payload
+        ),
+      };
+
+    case "SET_DEVICE_KEY":
+      return { ...state, deviceKey: action.payload };
+
+    case "SET_REFRESH_STATUS":
+      return {
+        ...state,
+        ...(action.isScheduling !== undefined && {
+          isSchedulingRefresh: action.isScheduling,
+        }),
+        ...(action.isRefreshing !== undefined && {
+          isRefreshingTokens: action.isRefreshing,
+        }),
+      };
+
+    case "INCREMENT_RECHECK_STATUS":
+      return { ...state, recheckSignInStatus: state.recheckSignInStatus + 1 };
+
+    case "SET_AUTH_METHOD":
+      return { ...state, authMethod: action.payload };
+
+    case "SET_TOTP_MFA_STATUS":
+      return { ...state, totpMfaStatus: action.payload };
+
+    case "SET_LAST_ACTIVITY":
+      return { ...state, lastActivityAt: action.payload };
+
+    case "SET_NOW_TICK":
+      return { ...state, nowTick: action.payload };
+
+    case "SET_ATTEMPTING_EXPIRED_REFRESH":
+      return { ...state, isAttemptingExpiredTokenRefresh: action.payload };
+
+    case "SIGN_OUT":
+      return {
+        ...initialPasswordlessState,
+        signingInStatus: "SIGNED_OUT",
+        initiallyRetrievingTokensFromStorage: false,
+        userVerifyingPlatformAuthenticatorAvailable:
+          state.userVerifyingPlatformAuthenticatorAvailable,
+      };
+
+    default:
+      return state;
+  }
+}
+
+function _usePasswordless() {
+  // Use reducer instead of multiple useState calls
+  const [state, dispatch] = useReducer(
+    passwordlessReducer,
+    initialPasswordlessState
+  );
+
+  // Destructure commonly used values from state for convenience
+  const {
+    signingInStatus,
+    initiallyRetrievingTokensFromStorage,
+    tokens,
+    tokensParsed,
+    lastError,
     userVerifyingPlatformAuthenticatorAvailable,
-    setUserVerifyingPlatformAuthenticatorAvailable,
-  ] = useState<boolean>();
-  const [creatingCredential, setCreatingCredential] = useState(false);
-  const [fido2Credentials, setFido2Credentials] = useState<Fido2Credential[]>();
-  const [deviceKey, setDeviceKey] = useState<string | null>(() => {
-    // Will be populated when tokens are loaded during component initialization
-    return null;
-  });
+    creatingCredential,
+    fido2Credentials,
+    deviceKey,
+    isSchedulingRefresh,
+    isRefreshingTokens,
+    recheckSignInStatus,
+    authMethod,
+    totpMfaStatus,
+    lastActivityAt,
+    nowTick,
+    isAttemptingExpiredTokenRefresh,
+  } = state;
+
+  // Helper functions for common dispatch actions
+  const setSigninInStatus = useCallback((status: BusyState | IdleState) => {
+    dispatch({ type: "SET_SIGNING_STATUS", payload: status });
+  }, []);
+
+  const setLastError = useCallback((error: Error | undefined) => {
+    dispatch({ type: "SET_ERROR", payload: error });
+  }, []);
+
+  const _setTokens = useCallback((tokens: TokensFromStorage | undefined) => {
+    dispatch({ type: "SET_TOKENS", payload: tokens });
+  }, []);
+
+  const setTokensParsed = useCallback(
+    (parsed: PasswordlessState["tokensParsed"]) => {
+      dispatch({ type: "SET_TOKENS_PARSED", payload: parsed });
+    },
+    []
+  );
+
+  const setIsRefreshingTokens = useCallback((isRefreshing: boolean) => {
+    dispatch({ type: "SET_REFRESH_STATUS", isRefreshing });
+  }, []);
+
+  // Unused - commented out to fix ESLint warning
+  // const setDeviceKey = useCallback((key: string | null) => {
+  //   dispatch({ type: "SET_DEVICE_KEY", payload: key });
+  // }, []);
+
+  // const setFido2Credentials = useCallback(
+  //   (credentials: Fido2Credential[] | undefined) => {
+  //     dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: credentials });
+  //   },
+  //   []
+  // );
 
   /** Translate authMethod → the corresponding *SIGNED_IN_WITH_* status */
   const signedInStatusForAuth = useCallback(
@@ -188,55 +410,30 @@ function _usePasswordless() {
 
   const updateFido2Credential = useCallback(
     (update: { credentialId: string } & Partial<Fido2Credential>) =>
-      setFido2Credentials((state) => {
-        if (!state) return state;
-        const index = state.findIndex(
-          (i) => i.credentialId === update.credentialId
-        );
-        if (index === -1) return state;
-        // eslint-disable-next-line security/detect-object-injection
-        state[index] = { ...state[index], ...update };
-        return [...state];
-      }),
+      dispatch({ type: "UPDATE_FIDO2_CREDENTIAL", payload: update }),
     []
   );
   const deleteFido2Credential = useCallback(
     (credentialId: string) =>
-      setFido2Credentials((state) =>
-        state?.filter(
-          (remainingAuthenticator) =>
-            credentialId !== remainingAuthenticator.credentialId
-        )
-      ),
+      dispatch({ type: "DELETE_FIDO2_CREDENTIAL", payload: credentialId }),
     []
   );
-  const [isSchedulingRefresh, setIsSchedulingRefresh] = useState<boolean>();
-  const [isRefreshingTokens, setIsRefreshingTokens] = useState<boolean>();
-  const [recheckSignInStatus, setRecheckSignInStatus] = useState(0);
-  const [authMethod, setAuthMethod] = useState<
-    "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined
-  >();
-  const [totpMfaStatus, setTotpMfaStatus] = useState<{
-    enabled: boolean;
-    preferred: boolean;
-    availableMfaTypes: string[];
-  }>({
-    enabled: false,
-    preferred: false,
-    availableMfaTypes: [],
-  });
-  /** Timestamp (ms) of the last detected user interaction */
-  const [lastActivityAt, setLastActivityAt] = useState<number>(() =>
-    Date.now()
-  );
 
-  /** Local clock tick (updates every second) so the UI can react to inactivity duration */
-  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  // Get activity tracking configuration (memoized to avoid calling configure() on every render)
+  const useActivityTracking = useMemo(() => {
+    const { tokenRefresh } = configure();
+    return tokenRefresh?.useActivityTracking ?? false;
+  }, []);
 
-  // 1️⃣  Attach lightweight listeners to detect user activity
+  // 1️⃣  Attach lightweight listeners to detect user activity (only if activity tracking is enabled)
   useEffect(() => {
-    if (typeof globalThis.addEventListener === "undefined") return;
-    const activityHandler = () => setLastActivityAt(Date.now());
+    if (
+      !useActivityTracking ||
+      typeof globalThis.addEventListener === "undefined"
+    )
+      return;
+    const activityHandler = () =>
+      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
     const events: (keyof WindowEventMap)[] = [
       "mousemove",
       "mousedown",
@@ -251,22 +448,28 @@ function _usePasswordless() {
       events.forEach((evt) =>
         globalThis.removeEventListener(evt, activityHandler)
       );
-  }, []);
+  }, [useActivityTracking]);
 
   // 2️⃣  Keep an internal clock running so React renders every second and derived
-  //      inactivity duration stays fresh. Very cheap (1-sec interval, cleared on unmount).
+  //      inactivity duration stays fresh. Only run if activity tracking is enabled.
   useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    if (!useActivityTracking) return;
+    const id = setInterval(
+      () => dispatch({ type: "SET_NOW_TICK", payload: Date.now() }),
+      1000
+    );
     return () => clearInterval(id);
-  }, []);
+  }, [useActivityTracking]);
 
   /** Helper function for consumers – milliseconds since last activity */
-  const timeSinceLastActivityMs = nowTick - lastActivityAt;
+  const timeSinceLastActivityMs = useActivityTracking
+    ? nowTick - lastActivityAt
+    : 0;
 
   // At component mount, check sign-in status
   useEffect(() => {
     setLastError(undefined);
-  }, []);
+  }, [setLastError]);
   const busy = busyState.includes(signingInStatus as BusyState);
 
   /**
@@ -275,62 +478,67 @@ function _usePasswordless() {
    * an ID-token by synthesising a minimal one from the access-token claims so the
    * rest of the library can continue to treat the user as signed-in.
    */
-  const parseAndSetTokens = useCallback((tokens?: TokensFromStorage) => {
-    if (!tokens) {
-      setTokensParsed(undefined);
-      return;
-    }
-
-    const { accessToken, expireAt, idToken } = tokens;
-
-    // OAuth/Hosted-UI flow – ID-token can be missing
-    if (accessToken && expireAt && tokens.authMethod === "REDIRECT") {
-      try {
-        const accessTokenParsed =
-          parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
-
-        setTokensParsed({
-          accessToken: accessTokenParsed,
-          idToken: {
-            sub: accessTokenParsed.sub,
-            "cognito:username": accessTokenParsed.username,
-            exp: accessTokenParsed.exp,
-            iat: accessTokenParsed.iat,
-            ...(idToken ? parseJwtPayload<CognitoIdTokenPayload>(idToken) : {}),
-          } as CognitoIdTokenPayload,
-          expireAt,
-        });
-      } catch (err) {
-        const { debug } = configure();
-        debug?.("Failed to parse tokens for OAuth flow:", err);
+  const parseAndSetTokens = useCallback(
+    (tokens?: TokensFromStorage) => {
+      if (!tokens) {
         setTokensParsed(undefined);
+        return;
       }
-      return;
-    }
 
-    // Standard flows – expect both access & ID token
-    if (accessToken && expireAt) {
-      try {
-        if (idToken) {
+      const { accessToken, expireAt, idToken } = tokens;
+
+      // OAuth/Hosted-UI flow – ID-token can be missing
+      if (accessToken && expireAt && tokens.authMethod === "REDIRECT") {
+        try {
+          const accessTokenParsed =
+            parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+
           setTokensParsed({
-            idToken: parseJwtPayload<CognitoIdTokenPayload>(idToken),
-            accessToken:
-              parseJwtPayload<CognitoAccessTokenPayload>(accessToken),
+            accessToken: accessTokenParsed,
+            idToken: {
+              sub: accessTokenParsed.sub,
+              "cognito:username": accessTokenParsed.username,
+              exp: accessTokenParsed.exp,
+              iat: accessTokenParsed.iat,
+              ...(idToken
+                ? parseJwtPayload<CognitoIdTokenPayload>(idToken)
+                : {}),
+            } as CognitoIdTokenPayload,
             expireAt,
           });
-        } else {
-          // Non-OAuth flows must provide an ID-token
+        } catch (err) {
+          const { debug } = configure();
+          debug?.("Failed to parse tokens for OAuth flow:", err);
           setTokensParsed(undefined);
         }
-      } catch (err) {
-        const { debug } = configure();
-        debug?.("Failed to parse tokens:", err);
+        return;
+      }
+
+      // Standard flows – expect both access & ID token
+      if (accessToken && expireAt) {
+        try {
+          if (idToken) {
+            setTokensParsed({
+              idToken: parseJwtPayload<CognitoIdTokenPayload>(idToken),
+              accessToken:
+                parseJwtPayload<CognitoAccessTokenPayload>(accessToken),
+              expireAt,
+            });
+          } else {
+            // Non-OAuth flows must provide an ID-token
+            setTokensParsed(undefined);
+          }
+        } catch (err) {
+          const { debug } = configure();
+          debug?.("Failed to parse tokens:", err);
+          setTokensParsed(undefined);
+        }
+      } else {
         setTokensParsed(undefined);
       }
-    } else {
-      setTokensParsed(undefined);
-    }
-  }, []);
+    },
+    [setTokensParsed]
+  );
 
   // ---------------------------------------------------------------------------
   // ♻️  Schedule automatic token refresh and keep auth status stable
@@ -349,43 +557,25 @@ function _usePasswordless() {
     }
 
     const abort = new AbortController();
-    let isRefreshInProgress = false;
 
     // Indicate that we are about to schedule or run a refresh operation
-    setIsSchedulingRefresh(true);
+    dispatch({ type: "SET_REFRESH_STATUS", isScheduling: true });
 
     scheduleRefresh({
       abort: abort.signal,
       tokensCb: (newTokens) => {
         if (newTokens) {
-          _setTokens((prev) => {
-            const merged = { ...prev, ...newTokens } as TokensFromStorage;
-            parseAndSetTokens(merged);
-            return merged;
-          });
-
-          const newStatus = signedInStatusForAuth(
-            newTokens.authMethod ?? authMethodFromTokens
-          );
-          newStatus && setSigninInStatus(newStatus);
-        } else if (isRefreshInProgress) {
-          // Avoid flicker to SIGNED_OUT while a scheduled refresh is underway
-          const { debug } = configure();
-          debug?.(
-            "Token refresh returned null/undefined but avoiding SIGNED_OUT state"
-          );
-
-          const status = signedInStatusForAuth(authMethodFromTokens);
-          status && setSigninInStatus(status);
-
-          setRecheckSignInStatus((s) => s + 1);
+          const merged = { ...tokens, ...newTokens } as TokensFromStorage;
+          _setTokens(merged);
+          parseAndSetTokens(merged);
         } else {
-          setRecheckSignInStatus((s) => s + 1);
+          _setTokens(undefined);
+          parseAndSetTokens(undefined);
+          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
         }
       },
       isRefreshingCb: (isRefreshing) => {
-        isRefreshInProgress = isRefreshing;
-        setIsRefreshingTokens(isRefreshing);
+        dispatch({ type: "SET_REFRESH_STATUS", isRefreshing: isRefreshing });
 
         const status = signedInStatusForAuth(authMethodFromTokens);
         status && setSigninInStatus(status);
@@ -398,11 +588,10 @@ function _usePasswordless() {
         const status = signedInStatusForAuth(authMethodFromTokens);
         status && setSigninInStatus(status);
 
-        setRecheckSignInStatus((s) => s + 1);
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
       })
       .finally(() => {
-        setIsSchedulingRefresh(false);
-        isRefreshInProgress = false;
+        dispatch({ type: "SET_REFRESH_STATUS", isScheduling: false });
       });
 
     return () => abort.abort();
@@ -413,52 +602,66 @@ function _usePasswordless() {
     authMethodFromTokens,
     signedInStatusForAuth,
     parseAndSetTokens,
+    setSigninInStatus,
+    tokens,
   ]);
 
-  // If we have an incomplete token bundle (edge-case: storage was tampered with)
-  // attempt a one-off refresh to heal the state.
-  if (
-    tokens &&
-    (!tokens.accessToken || !tokens.expireAt) &&
-    !isRefreshingTokens &&
-    !isSchedulingRefresh &&
-    authMethod !== "SRP" &&
-    signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
-    signingInStatus !== "SIGNED_IN_WITH_PASSWORD" &&
-    signingInStatus !== "SIGNED_IN_WITH_REDIRECT" &&
-    signingInStatus !== "STARTING_SIGN_IN_WITH_REDIRECT"
-  ) {
-    const { debug } = configure();
-    debug?.("Detected incomplete tokens, attempting refresh");
+  // Handle incomplete token bundle (edge-case: storage was tampered with)
+  // Move this to useEffect to avoid side effects during render
+  useEffect(() => {
+    if (
+      tokens &&
+      (!tokens.accessToken || !tokens.expireAt) &&
+      !isRefreshingTokens &&
+      !isSchedulingRefresh &&
+      authMethod !== "SRP" &&
+      signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
+      signingInStatus !== "SIGNED_IN_WITH_PASSWORD" &&
+      signingInStatus !== "SIGNED_IN_WITH_REDIRECT" &&
+      signingInStatus !== "STARTING_SIGN_IN_WITH_REDIRECT"
+    ) {
+      const { debug } = configure();
+      debug?.("Detected incomplete tokens, attempting refresh");
 
-    refreshTokens({
-      tokensCb: (newTokens) => {
-        if (newTokens) {
-          _setTokens((prev) => {
-            const merged = { ...prev, ...newTokens } as TokensFromStorage;
+      refreshTokens({
+        tokensCb: (newTokens) => {
+          if (newTokens) {
+            const merged = { ...tokens, ...newTokens } as TokensFromStorage;
             parseAndSetTokens(merged);
-            return merged;
-          });
-        } else {
-          _setTokens(undefined);
-          parseAndSetTokens(undefined);
-          setRecheckSignInStatus((s) => s + 1);
-        }
-      },
-      isRefreshingCb: setIsRefreshingTokens,
-    }).catch(() => {
-      _setTokens(undefined);
-      parseAndSetTokens(undefined);
-      setRecheckSignInStatus((s) => s + 1);
-    });
-  }
+            _setTokens(merged);
+          } else {
+            _setTokens(undefined);
+            parseAndSetTokens(undefined);
+            dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+          }
+        },
+        isRefreshingCb: setIsRefreshingTokens,
+      }).catch(() => {
+        _setTokens(undefined);
+        parseAndSetTokens(undefined);
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+      });
+    }
+  }, [
+    tokens,
+    isRefreshingTokens,
+    isSchedulingRefresh,
+    authMethod,
+    signingInStatus,
+    parseAndSetTokens,
+    _setTokens,
+    setIsRefreshingTokens,
+  ]);
 
   // At component mount, load tokens from storage
   useEffect(() => {
+    let mounted = true;
     // First, retrieve tokens from storage
     const { debug } = configure();
     retrieveTokens()
       .then((tokens) => {
+        if (!mounted) return; // Check if still mounted
+
         // Process the raw tokens first
         _setTokens(tokens);
 
@@ -474,12 +677,22 @@ function _usePasswordless() {
         }
       })
       .catch((err) => {
+        if (!mounted) return; // Check if still mounted
+
         debug?.("Failed to retrieve tokens from storage:", err);
         // Make sure signInStatus gets recalculated on error
-        setRecheckSignInStatus((s) => s + 1);
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
       })
-      .finally(() => setInitiallyRetrievingTokensFromStorage(false));
-  }, [parseAndSetTokens]);
+      .finally(() => {
+        if (mounted) {
+          dispatch({ type: "SET_INITIAL_LOADING", payload: false });
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
 
   // 🛠  Keep tokensParsed in sync even if some paths bypass the helper wrapper
   useEffect(() => {
@@ -493,9 +706,8 @@ function _usePasswordless() {
       PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
         .then((res) => {
           if (!cancel.signal.aborted) {
-            setUserVerifyingPlatformAuthenticatorAvailable(res);
+            dispatch({ type: "SET_PLATFORM_AUTHENTICATOR", payload: res });
           }
-          return () => cancel.abort();
         })
         .catch((err) => {
           const { debug } = configure();
@@ -504,8 +716,11 @@ function _usePasswordless() {
             err
           );
         });
+
+      // Return cleanup function from useEffect, not from promise
+      return () => cancel.abort();
     } else {
-      setUserVerifyingPlatformAuthenticatorAvailable(false);
+      dispatch({ type: "SET_PLATFORM_AUTHENTICATOR", payload: false });
     }
   }, []);
 
@@ -589,13 +804,27 @@ function _usePasswordless() {
     // Missing tokens → not signed in
     if (!expiresAt) return "NOT_SIGNED_IN";
 
-    // 4️⃣ Refresh in progress
-    if (isSchedulingRefresh || isRefreshingTokens) return "REFRESHING_SIGN_IN";
+    // 4️⃣ Refresh in progress (including expired token refresh attempts)
+    if (
+      isSchedulingRefresh ||
+      isRefreshingTokens ||
+      isAttemptingExpiredTokenRefresh
+    )
+      return "REFRESHING_SIGN_IN";
 
     const now = Date.now();
 
-    // 5️⃣ Tokens expired (monotonic check)
-    if (now >= expiresAt.valueOf()) return "NOT_SIGNED_IN";
+    // 5️⃣ Tokens expired - attempt refresh before changing status
+    if (now >= expiresAt.valueOf()) {
+      // Check if we have a refresh token to attempt refresh
+      if (tokens?.refreshToken && !isAttemptingExpiredTokenRefresh) {
+        // Return refreshing status and trigger refresh in useEffect
+        return "REFRESHING_SIGN_IN";
+      }
+
+      // No refresh token available or refresh already attempted and failed
+      return "NOT_SIGNED_IN";
+    }
 
     // 6️⃣ All good
     return "SIGNED_IN";
@@ -607,6 +836,7 @@ function _usePasswordless() {
     isSchedulingRefresh,
     isRefreshingTokens,
     recheckSignInStatus,
+    isAttemptingExpiredTokenRefresh,
   ]);
 
   // Check signInStatus upon token expiry
@@ -620,58 +850,64 @@ function _usePasswordless() {
         "Checking signInStatus as tokens have expired at:",
         tokens.expireAt?.toISOString()
       );
-      setRecheckSignInStatus((s) => s + 1);
+      dispatch({ type: "INCREMENT_RECHECK_STATUS" });
     }, checkIn);
   }, [tokens?.expireAt]);
 
   // Track FIDO2 authenticators for the user
   const isSignedIn =
     signInStatus === "SIGNED_IN" || signInStatus === "REFRESHING_SIGN_IN";
-  const revalidateFido2Credentials = () => {
+  const revalidateFido2Credentials = useCallback(() => {
     const { debug } = configure();
 
     // Only proceed when signed in (list credentials even after SRP)
     if (!isSignedIn) {
       debug?.("Not signed in, skipping credential listing");
-      setFido2Credentials(undefined);
-      return () => {};
+      dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+      return;
     }
 
     // Only proceed with operations if signed in
     const cancel = new AbortController();
-    // List credentials for signed-in user
-    if (isSignedIn) {
-      debug?.("Listing FIDO2 credentials");
-      fido2ListCredentials()
-        .then((res) => {
-          if (!cancel.signal.aborted) {
-            debug?.("Fetched FIDO2 credentials:", res.authenticators);
-            setFido2Credentials(res.authenticators.map(toFido2Credential));
-          }
-        })
-        .catch((err) => {
-          debug?.("Failed to list credentials:", err);
-        });
-      return () => cancel.abort();
-    }
 
-    return () => {};
-  };
-  useEffect(revalidateFido2Credentials, [
-    isSignedIn,
-    toFido2Credential,
-    authMethod,
-  ]);
+    // List credentials for signed-in user
+    debug?.("Listing FIDO2 credentials");
+    fido2ListCredentials()
+      .then((res) => {
+        if (!cancel.signal.aborted) {
+          debug?.("Fetched FIDO2 credentials:", res.authenticators);
+          dispatch({
+            type: "SET_FIDO2_CREDENTIALS",
+            payload: res.authenticators.map(toFido2Credential),
+          });
+        }
+      })
+      .catch((err) => {
+        if (!cancel.signal.aborted) {
+          debug?.("Failed to list credentials:", err);
+        }
+      });
+
+    return () => cancel.abort();
+  }, [isSignedIn, toFido2Credential]);
+
+  useEffect(() => {
+    const cleanup = revalidateFido2Credentials();
+    return cleanup;
+  }, [revalidateFido2Credentials]);
 
   // Fetch TOTP MFA status when the user is signed in
   useEffect(() => {
     if (!isSignedIn || !tokens?.accessToken) return;
 
     const abort = new AbortController();
+    let mounted = true;
 
     // Just try to get MFA settings, but don't make a big deal if they're not there
     getUser({ accessToken: tokens.accessToken, abort: abort.signal })
       .then((user) => {
+        if (!mounted || abort.signal.aborted) return;
+
         try {
           // If we have a valid user object with MFA settings, use them
           if (user && typeof user === "object" && !("__type" in user)) {
@@ -680,38 +916,57 @@ function _usePasswordless() {
             const preferredMfa =
               user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
 
-            setTotpMfaStatus({
-              enabled: hasMfa,
-              preferred: preferredMfa,
-              availableMfaTypes: user.UserMFASettingList || [],
+            dispatch({
+              type: "SET_TOTP_MFA_STATUS",
+              payload: {
+                enabled: hasMfa,
+                preferred: preferredMfa,
+                availableMfaTypes: user.UserMFASettingList || [],
+              },
             });
           } else {
             // Default to no MFA settings
-            setTotpMfaStatus({
-              enabled: false,
-              preferred: false,
-              availableMfaTypes: [],
+            dispatch({
+              type: "SET_TOTP_MFA_STATUS",
+              payload: {
+                enabled: false,
+                preferred: false,
+                availableMfaTypes: [],
+              },
             });
           }
         } catch (e) {
           // Just suppress errors and use default values
-          setTotpMfaStatus({
-            enabled: false,
-            preferred: false,
-            availableMfaTypes: [],
-          });
+          if (mounted) {
+            dispatch({
+              type: "SET_TOTP_MFA_STATUS",
+              payload: {
+                enabled: false,
+                preferred: false,
+                availableMfaTypes: [],
+              },
+            });
+          }
         }
       })
       .catch(() => {
         // If anything fails, just default to no MFA settings
-        setTotpMfaStatus({
-          enabled: false,
-          preferred: false,
-          availableMfaTypes: [],
-        });
+        if (mounted && !abort.signal.aborted) {
+          dispatch({
+            type: "SET_TOTP_MFA_STATUS",
+            payload: {
+              enabled: false,
+              preferred: false,
+              availableMfaTypes: [],
+            },
+          });
+        }
       });
 
-    return () => abort.abort();
+    return () => {
+      mounted = false;
+      abort.abort();
+    };
   }, [isSignedIn, tokens?.accessToken]);
 
   useEffect(() => {
@@ -728,8 +983,68 @@ function _usePasswordless() {
       _setTokens(next);
       parseAndSetTokens(next);
     },
-    [parseAndSetTokens]
+    [parseAndSetTokens, _setTokens]
   );
+
+  // Handle expired token refresh when signInStatus is REFRESHING_SIGN_IN
+  useEffect(() => {
+    if (
+      signInStatus === "REFRESHING_SIGN_IN" &&
+      tokens?.refreshToken &&
+      !isAttemptingExpiredTokenRefresh
+    ) {
+      const now = Date.now();
+      const isOAuth = tokens?.authMethod === "REDIRECT";
+      const expiresAt = isOAuth ? tokens?.expireAt : tokensParsed?.expireAt;
+
+      // Only refresh if tokens are actually expired
+      if (expiresAt && now >= expiresAt.valueOf()) {
+        const { debug } = configure();
+        debug?.("Tokens expired, attempting refresh");
+
+        dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: true });
+
+        // Use existing refreshTokens with built-in retry logic
+        refreshTokens({
+          tokensCb: (newTokens) => {
+            dispatch({
+              type: "SET_ATTEMPTING_EXPIRED_REFRESH",
+              payload: false,
+            });
+            if (newTokens) {
+              updateTokens(newTokens);
+              debug?.("Successfully refreshed expired tokens");
+            } else {
+              debug?.("Failed to refresh expired tokens");
+            }
+            return Promise.resolve();
+          },
+          isRefreshingCb: setIsRefreshingTokens,
+          force: true,
+        }).catch((err) => {
+          const { debug } = configure();
+          debug?.("Error refreshing expired tokens:", err);
+          dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: false });
+        });
+      }
+    }
+  }, [
+    signInStatus,
+    tokens,
+    tokensParsed,
+    isAttemptingExpiredTokenRefresh,
+    updateTokens,
+    setIsRefreshingTokens,
+  ]);
+
+  // Reset expired token refresh flag when tokens change successfully
+  useEffect(() => {
+    if (tokens && isAttemptingExpiredTokenRefresh) {
+      const { debug } = configure();
+      debug?.("Tokens updated, resetting expired token refresh flag");
+      dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: false });
+    }
+  }, [tokens, isAttemptingExpiredTokenRefresh]);
 
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
@@ -802,7 +1117,13 @@ function _usePasswordless() {
     },
     /** Mark the user as active to potentially trigger token refresh */
     markUserActive: () => {
-      setLastActivityAt(Date.now());
+      if (!useActivityTracking) {
+        // Provide feedback that activity tracking is disabled
+        const { debug } = configure();
+        debug?.("markUserActive called but activity tracking is disabled");
+        return;
+      }
+      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
       // Schedule a refresh if tokens exist but only if we're not currently refreshing
       if (tokens && !isRefreshingTokens) {
         // Using void to properly handle the promise
@@ -951,7 +1272,7 @@ function _usePasswordless() {
         }
 
         // Clear deviceKey in state
-        setDeviceKey(null);
+        dispatch({ type: "SET_DEVICE_KEY", payload: null });
       }
     },
     /**
@@ -969,37 +1290,44 @@ function _usePasswordless() {
       }
 
       // Clear deviceKey in state
-      setDeviceKey(null);
+      dispatch({ type: "SET_DEVICE_KEY", payload: null });
     },
     /** Register a FIDO2 credential with the Relying Party */
     fido2CreateCredential: (
       ...args: Parameters<typeof fido2CreateCredential>
     ) => {
-      setCreatingCredential(true);
+      dispatch({ type: "SET_CREATING_CREDENTIAL", payload: true });
       return fido2CreateCredential(...args)
         .then((storedCredential) => {
-          setFido2Credentials((state) => {
-            const credential = toFido2Credential(storedCredential);
-            return state ? state.concat([credential]) : [credential];
+          const credential = toFido2Credential(storedCredential);
+          dispatch({
+            type: "SET_FIDO2_CREDENTIALS",
+            payload: fido2Credentials
+              ? [...fido2Credentials, credential]
+              : [credential],
           });
           return storedCredential;
         })
-        .finally(() => setCreatingCredential(false));
+        .finally(() =>
+          dispatch({ type: "SET_CREATING_CREDENTIAL", payload: false })
+        );
     },
     /** Sign out */
     signOut: (options?: { skipTokenRevocation?: boolean }) => {
-      setLastError(undefined);
-      setAuthMethod(undefined);
+      dispatch({ type: "SET_ERROR", payload: undefined });
+      dispatch({ type: "SET_AUTH_METHOD", payload: undefined });
       const signingOut = signOut({
         statusCb: setSigninInStatus,
         tokensRemovedLocallyCb: () => {
           _setTokens(undefined);
-          setFido2Credentials(undefined);
+          dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
         },
         currentStatus: signingInStatus,
         skipTokenRevocation: options?.skipTokenRevocation,
       });
-      signingOut.signedOut.catch((error: Error) => setLastError(error));
+      signingOut.signedOut.catch((error: Error) =>
+        dispatch({ type: "SET_ERROR", payload: error })
+      );
       return signingOut;
     },
     /** Sign in with FIDO2 (e.g. Face ID or Touch) */
@@ -1015,8 +1343,8 @@ function _usePasswordless() {
     } = {}) => {
       const { debug } = configure();
       debug?.("Starting FIDO2 sign-in (hook)");
-      setLastError(undefined);
-      setAuthMethod("FIDO2");
+      dispatch({ type: "SET_ERROR", payload: undefined });
+      dispatch({ type: "SET_AUTH_METHOD", payload: "FIDO2" });
       const signinIn = authenticateWithFido2({
         username,
         credentials,
@@ -1026,12 +1354,15 @@ function _usePasswordless() {
           // 1) Update tokens in state and deviceKey
           updateTokens(newTokens);
           if (newTokens.deviceKey) {
-            setDeviceKey(newTokens.deviceKey);
+            dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
           } else {
             try {
               const existing = await getRememberedDevice(newTokens.username);
               if (existing?.deviceKey) {
-                setDeviceKey(existing.deviceKey);
+                dispatch({
+                  type: "SET_DEVICE_KEY",
+                  payload: existing.deviceKey,
+                });
               }
             } catch {
               // ignore
@@ -1069,7 +1400,7 @@ function _usePasswordless() {
         },
       });
       signinIn.signedIn.catch((error: Error) => {
-        setLastError(error);
+        dispatch({ type: "SET_ERROR", payload: error });
       });
       return signinIn;
     },
@@ -1109,13 +1440,13 @@ function _usePasswordless() {
       const { debug } = configure();
       debug?.("Starting SRP authentication process");
 
-      setLastError(undefined);
+      dispatch({ type: "SET_ERROR", payload: undefined });
 
       // Clear any existing FIDO2 credentials to prevent unwanted checks
-      setFido2Credentials(undefined);
+      dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
 
       // Set auth method before authentication starts
-      setAuthMethod("SRP");
+      dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
 
       const signinIn = authenticateWithSRP({
         username,
@@ -1130,9 +1461,9 @@ function _usePasswordless() {
             debug?.(
               "SRP authentication successful, reinforcing SRP auth method"
             );
-            setAuthMethod("SRP");
+            dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
             // Explicitly clear FIDO2 credentials again to prevent any listing attempts
-            setFido2Credentials(undefined);
+            dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
           }
         },
         tokensCb: async (newTokens: TokensFromSignIn) => {
@@ -1143,12 +1474,12 @@ function _usePasswordless() {
           debug?.(
             "Authentication completed, ensuring SRP auth method is preserved"
           );
-          setAuthMethod("SRP");
-          setFido2Credentials(undefined);
+          dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
+          dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
 
           // Ensure device key is updated if present
           if (newTokens.deviceKey) {
-            setDeviceKey(newTokens.deviceKey);
+            dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
           }
 
           // Force sign-in status update after setting tokens
@@ -1202,14 +1533,14 @@ function _usePasswordless() {
         .then(() => {
           debug?.("SRP authentication promise resolved successfully");
           // One final check to ensure auth method is still SRP after promise resolves
-          setAuthMethod("SRP");
+          dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
         })
         .catch((error: Error) => {
           debug?.("SRP authentication failed:", error);
           // If authentication fails, make sure to clean up properly
-          setLastError(error);
+          dispatch({ type: "SET_ERROR", payload: error });
           // Keep the auth method as SRP to prevent FIDO2 operations
-          setAuthMethod("SRP");
+          dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
         });
 
       return signinIn;
@@ -1233,8 +1564,8 @@ function _usePasswordless() {
       clientMetadata?: Record<string, string>;
       rememberDevice?: () => Promise<boolean>;
     }) => {
-      setLastError(undefined);
-      setAuthMethod("PLAINTEXT");
+      dispatch({ type: "SET_ERROR", payload: undefined });
+      dispatch({ type: "SET_AUTH_METHOD", payload: "PLAINTEXT" });
       const signinIn = authenticateWithPlaintextPassword({
         username,
         password,
@@ -1284,7 +1615,9 @@ function _usePasswordless() {
           }
         },
       });
-      signinIn.signedIn.catch((error: Error) => setLastError(error));
+      signinIn.signedIn.catch((error: Error) =>
+        dispatch({ type: "SET_ERROR", payload: error })
+      );
       return signinIn;
     },
     /** The current status of TOTP MFA for the user */
@@ -1303,32 +1636,45 @@ function _usePasswordless() {
           const preferredMfa =
             user.PreferredMfaSetting === "SOFTWARE_TOKEN_MFA";
 
-          setTotpMfaStatus({
-            enabled: hasMfa,
-            preferred: preferredMfa,
-            availableMfaTypes: user.UserMFASettingList || [],
+          dispatch({
+            type: "SET_TOTP_MFA_STATUS",
+            payload: {
+              enabled: hasMfa,
+              preferred: preferredMfa,
+              availableMfaTypes: user.UserMFASettingList || [],
+            },
           });
         } else {
           // Default to no MFA
-          setTotpMfaStatus({
-            enabled: false,
-            preferred: false,
-            availableMfaTypes: [],
+          dispatch({
+            type: "SET_TOTP_MFA_STATUS",
+            payload: {
+              enabled: false,
+              preferred: false,
+              availableMfaTypes: [],
+            },
           });
         }
       } catch (error) {
         // Just default to no MFA on any error
-        setTotpMfaStatus({
-          enabled: false,
-          preferred: false,
-          availableMfaTypes: [],
+        dispatch({
+          type: "SET_TOTP_MFA_STATUS",
+          payload: {
+            enabled: false,
+            preferred: false,
+            availableMfaTypes: [],
+          },
         });
       }
     },
     /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
-    timeSinceLastActivityMs,
+    timeSinceLastActivityMs: useActivityTracking
+      ? timeSinceLastActivityMs
+      : null,
     /** Seconds (rounded) since the last user activity */
-    timeSinceLastActivitySeconds: Math.round(timeSinceLastActivityMs / 1000),
+    timeSinceLastActivitySeconds: useActivityTracking
+      ? Math.round(timeSinceLastActivityMs / 1000)
+      : null,
     /** Re-load the latest token bundle from storage and push it into context */
     reloadTokensFromStorage: async () => {
       const latest = await retrieveTokens();
@@ -1344,9 +1690,12 @@ function _usePasswordless() {
     } = {}) => {
       const { debug } = configure();
       debug?.("Starting sign-in via Hosted UI redirect");
-      setLastError(undefined);
-      setAuthMethod("REDIRECT");
-      setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
+      dispatch({ type: "SET_ERROR", payload: undefined });
+      dispatch({ type: "SET_AUTH_METHOD", payload: "REDIRECT" });
+      dispatch({
+        type: "SET_SIGNING_STATUS",
+        payload: "STARTING_SIGN_IN_WITH_REDIRECT",
+      });
       void hostedSignInWithRedirect({ provider, customState });
     },
   };
@@ -1601,26 +1950,40 @@ export function useAwaitableState<T>(state: T) {
   const reject = useRef<(reason: Error) => void>();
   const awaitable = useRef<Promise<T>>();
   const [awaited, setAwaited] = useState<{ value: T }>();
+
   const renewPromise = useCallback(() => {
+    // Don't chain infinitely - just create a new promise
     awaitable.current = new Promise<T>((_resolve, _reject) => {
       resolve.current = _resolve;
       reject.current = _reject;
-    })
-      .then((value) => {
-        setAwaited({ value });
-        return value;
-      })
-      .finally(renewPromise);
+    }).then((value) => {
+      setAwaited({ value });
+      return value;
+    });
+    // Remove the .finally(renewPromise) to prevent infinite chain
   }, []);
-  useEffect(renewPromise, [renewPromise]);
+
+  // Initial setup
+  useEffect(() => {
+    renewPromise();
+  }, [renewPromise]);
+
+  // Reset awaited when state changes
   useEffect(() => setAwaited(undefined), [state]);
+
   return {
     /** Call to get the current awaitable (promise) */
     awaitable: () => awaitable.current!,
     /** Resolve the current awaitable (promise) with the current value of state */
-    resolve: () => resolve.current!(state),
+    resolve: () => {
+      resolve.current!(state);
+      renewPromise(); // Renew after resolving, not in finally
+    },
     /** Reject the current awaitable (promise) */
-    reject: (reason: Error) => reject.current!(reason),
+    reject: (reason: Error) => {
+      reject.current!(reason);
+      renewPromise(); // Renew after rejecting, not in finally
+    },
     /** That value of awaitable (promise) once it resolves. This is undefined if (1) awaitable is not yet resolved or (2) the state has changed since awaitable was resolved */
     awaited,
   };

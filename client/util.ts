@@ -56,18 +56,57 @@ export function parseJwtPayload<
  */
 export function setTimeoutWallClock<T>(cb: () => T, ms: number) {
   const executeAt = Date.now() + ms;
-  const i = setInterval(() => {
-    if (Date.now() >= executeAt) {
-      clearInterval(i);
-      cb();
-    }
-  }, 1000);
 
-  // unref the interval if we can, so that e.g. when running in Node.js
-  // this interval would not block program exit:
-  if (typeof i.unref === "function") i.unref();
+  // For short delays (< 30 seconds), use the original approach
+  if (ms < 30000) {
+    const i = setInterval(() => {
+      if (Date.now() >= executeAt) {
+        clearInterval(i);
+        cb();
+      }
+    }, 1000);
 
-  return () => clearInterval(i);
+    // unref the interval if we can, so that e.g. when running in Node.js
+    // this interval would not block program exit:
+    if (typeof i.unref === "function") i.unref();
+
+    return () => clearInterval(i);
+  }
+
+  // For long delays, use a hybrid approach:
+  // 1. Use setTimeout for most of the delay
+  // 2. Switch to interval checking only in the final 30 seconds
+  const initialDelay = ms - 30000; // All but the last 30 seconds
+  // eslint-disable-next-line prefer-const
+  let timeoutId: ReturnType<typeof setTimeout>;
+  let intervalId: ReturnType<typeof setInterval>;
+  let cancelled = false;
+
+  const cleanup = () => {
+    cancelled = true;
+    if (timeoutId) clearTimeout(timeoutId);
+    if (intervalId) clearInterval(intervalId);
+  };
+
+  // First phase: use setTimeout for the bulk of the delay
+  timeoutId = setTimeout(() => {
+    if (cancelled) return;
+
+    // Second phase: use interval for the final 30 seconds to handle sleep/wake
+    intervalId = setInterval(() => {
+      if (cancelled) return;
+      if (Date.now() >= executeAt) {
+        clearInterval(intervalId);
+        cb();
+      }
+    }, 1000);
+
+    if (typeof intervalId.unref === "function") intervalId.unref();
+  }, initialDelay);
+
+  if (typeof timeoutId.unref === "function") timeoutId.unref();
+
+  return cleanup;
 }
 
 export function currentBrowserLocationWithoutFragmentIdentifier() {

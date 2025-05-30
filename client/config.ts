@@ -54,7 +54,7 @@ export interface Config {
      * Whether to base token refreshes on user activity.
      * When true, tokens are refreshed based on user interactions.
      * When false, tokens are refreshed based on wall-clock time.
-     * Default: true
+     * Default: false
      */
     useActivityTracking?: boolean;
   };
@@ -193,7 +193,7 @@ export function configure(config?: ConfigInput) {
       tokenRefresh: {
         inactivityThreshold:
           config.tokenRefresh?.inactivityThreshold ?? 30 * 60 * 1000, // 30 minutes
-        useActivityTracking: config.tokenRefresh?.useActivityTracking ?? true,
+        useActivityTracking: config.tokenRefresh?.useActivityTracking ?? false,
       },
       /** Whether to use the new GetTokensFromRefreshToken API. Default: true */
       useGetTokensFromRefreshToken:
