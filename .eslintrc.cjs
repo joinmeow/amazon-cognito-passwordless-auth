@@ -70,6 +70,7 @@ function getClientOverrides(basedir) {
         "crypto",
         "fetch",
       ],
+      "react-hooks/exhaustive-deps": "warn",
     },
     plugins: ["react", "@typescript-eslint", "header", "import"],
   };
