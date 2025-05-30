@@ -23,11 +23,11 @@ describe("RefreshTokens Lock", () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       _input: string | URL,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      _init?: { 
-        signal?: AbortSignal; 
-        headers?: Record<string, string>; 
-        method?: string; 
-        body?: string; 
+      _init?: {
+        signal?: AbortSignal;
+        headers?: Record<string, string>;
+        method?: string;
+        body?: string;
       }
     ) => {
       callCount++;

@@ -27,7 +27,8 @@
     "dist:client": "rm -rf dist/client && npm run gen-types:client && cd client && npx tsc --outdir ../dist/client && node ../dist-create-package.cjs client module",
     "dist": "npm run dist:client",
     "prepack": "npm run dist",
-    "test": "jest"
+    "test": "jest",
+    "lint": "eslint . --ext .ts,.tsx"
   },
   "exports": {
     ".": {
