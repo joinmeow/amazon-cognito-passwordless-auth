@@ -378,7 +378,7 @@ function DeviceManager() {
 
   const handleConfirmDevice = async () => {
     if (!deviceKey) return;
-    
+
     try {
       setLoading(true);
       setError(null);
@@ -394,7 +394,7 @@ function DeviceManager() {
 
   const handleRememberDevice = async (remember: boolean) => {
     if (!deviceKey) return;
-    
+
     try {
       setLoading(true);
       setError(null);
@@ -427,7 +427,7 @@ function DeviceManager() {
   return (
     <div>
       {error && <div style={{color: 'red'}}>Error: {error}</div>}
-      
+
       {deviceKey && (
         <div>
           <p>Device Key: {deviceKey}</p>
@@ -527,7 +527,7 @@ function FIDO2Manager() {
     if (!window.confirm("Are you sure you want to delete this credential?")) {
       return;
     }
-    
+
     try {
       setError(null);
       await credential.delete();
@@ -541,44 +541,53 @@ function FIDO2Manager() {
   return (
     <div>
       <h3>FIDO2 Credentials</h3>
-      
-      {error && <div style={{color: 'red'}}>Error: {error}</div>}
-      
+
+      {error && <div style={{ color: "red" }}>Error: {error}</div>}
+
       {userVerifyingPlatformAuthenticatorAvailable && (
-        <button 
-          onClick={handleCreateCredential} 
-          disabled={creatingCredential}
-        >
+        <button onClick={handleCreateCredential} disabled={creatingCredential}>
           {creatingCredential ? "Creating..." : "Add New Credential"}
         </button>
       )}
 
       {fido2Credentials?.map((credential) => (
-        <div key={credential.credentialId} style={{border: '1px solid #ccc', margin: '10px', padding: '10px'}}>
+        <div
+          key={credential.credentialId}
+          style={{ border: "1px solid #ccc", margin: "10px", padding: "10px" }}
+        >
           <h4>{credential.friendlyName || "Unnamed Credential"}</h4>
           <p>Created: {new Date(credential.createdAt).toLocaleDateString()}</p>
-          <p>Last Used: {new Date(credential.lastUseDate).toLocaleDateString()}</p>
-          
-          <button 
+          <p>
+            Last Used: {new Date(credential.lastUseDate).toLocaleDateString()}
+          </p>
+
+          <button
             onClick={() => {
-              const newName = prompt("Enter new name:", credential.friendlyName);
+              const newName = prompt(
+                "Enter new name:",
+                credential.friendlyName
+              );
               if (newName) handleUpdateCredential(credential, newName);
             }}
             disabled={credential.busy}
           >
             {credential.busy ? "Updating..." : "Update Name"}
           </button>
-          
-          <button 
+
+          <button
             onClick={() => handleDeleteCredential(credential)}
             disabled={credential.busy}
-            style={{marginLeft: '10px', backgroundColor: '#ff4444', color: 'white'}}
+            style={{
+              marginLeft: "10px",
+              backgroundColor: "#ff4444",
+              color: "white",
+            }}
           >
             {credential.busy ? "Deleting..." : "Delete"}
           </button>
         </div>
       ))}
-      
+
       {fido2Credentials?.length === 0 && (
         <p>No FIDO2 credentials registered.</p>
       )}
@@ -601,10 +610,10 @@ if (userVerifyingPlatformAuthenticatorAvailable) {
   const { signedIn } = await authenticateWithFido2({
     username: "user@example.com",
     // Optional: specify credentials to use
-    credentials: fido2Credentials?.map(c => ({
+    credentials: fido2Credentials?.map((c) => ({
       id: c.credentialId,
-      transports: c.transports
-    }))
+      transports: c.transports,
+    })),
   });
 
   await signedIn;
@@ -647,45 +656,53 @@ function UserSelector() {
 
   const { authenticateWithFido2, authenticateWithSRP } = usePasswordless();
 
-  const handleQuickSignIn = useCallback(async (user) => {
-    try {
-      if (user.useFido === "YES" && user.credentials) {
-        // Sign in with FIDO2 using stored credentials
-        await authenticateWithFido2({
-          username: user.username,
-          credentials: user.credentials,
-        });
-      } else {
-        // Fall back to password authentication
-        const password = prompt("Enter your password:");
-        if (password) {
-          await authenticateWithSRP({
+  const handleQuickSignIn = useCallback(
+    async (user) => {
+      try {
+        if (user.useFido === "YES" && user.credentials) {
+          // Sign in with FIDO2 using stored credentials
+          await authenticateWithFido2({
             username: user.username,
-            password,
+            credentials: user.credentials,
           });
+        } else {
+          // Fall back to password authentication
+          const password = prompt("Enter your password:");
+          if (password) {
+            await authenticateWithSRP({
+              username: user.username,
+              password,
+            });
+          }
         }
+      } catch (error) {
+        console.error("Quick sign-in failed:", error);
+        alert("Sign-in failed: " + error.message);
       }
-    } catch (error) {
-      console.error("Quick sign-in failed:", error);
-      alert("Sign-in failed: " + error.message);
-    }
-  }, [authenticateWithFido2, authenticateWithSRP]);
+    },
+    [authenticateWithFido2, authenticateWithSRP]
+  );
 
-  const handleFidoPreferenceChange = useCallback((useFido) => {
-    updateFidoPreference({ useFido });
-  }, [updateFidoPreference]);
+  const handleFidoPreferenceChange = useCallback(
+    (useFido) => {
+      updateFidoPreference({ useFido });
+    },
+    [updateFidoPreference]
+  );
 
   return (
     <div>
       <h3>Recent Users</h3>
-      
+
       {currentUser && (
-        <div style={{border: '1px solid #ccc', padding: '10px', margin: '10px'}}>
+        <div
+          style={{ border: "1px solid #ccc", padding: "10px", margin: "10px" }}
+        >
           <h4>Current User: {currentUser.username}</h4>
           <p>Email: {currentUser.email}</p>
           <p>Auth Method: {currentUser.authMethod}</p>
           <p>FIDO2 Preference: {currentUser.useFido}</p>
-          
+
           <button onClick={() => handleFidoPreferenceChange("YES")}>
             Enable FIDO2
           </button>
@@ -697,8 +714,8 @@ function UserSelector() {
 
       <h4>Quick Sign-In</h4>
       {lastSignedInUsers?.map((user) => (
-        <div key={user.username} style={{margin: '5px 0'}}>
-          <button 
+        <div key={user.username} style={{ margin: "5px 0" }}>
+          <button
             onClick={() => handleQuickSignIn(user)}
             disabled={signingInStatus !== "SIGNED_OUT"}
           >
@@ -708,13 +725,11 @@ function UserSelector() {
         </div>
       ))}
 
-      <button onClick={clearLastSignedInUsers} style={{marginTop: '10px'}}>
+      <button onClick={clearLastSignedInUsers} style={{ marginTop: "10px" }}>
         Clear User History
       </button>
-      
-      {signingInStatus !== "SIGNED_OUT" && (
-        <p>Status: {signingInStatus}</p>
-      )}
+
+      {signingInStatus !== "SIGNED_OUT" && <p>Status: {signingInStatus}</p>}
     </div>
   );
 }
@@ -751,7 +766,7 @@ function AsyncStateExample() {
     try {
       setWaiting(true);
       console.log("Waiting for data...");
-      
+
       // This will wait until data is set to a truthy value
       const result = await awaitableData.awaitable();
       console.log("Data received:", result);
@@ -776,7 +791,7 @@ function AsyncStateExample() {
     <div>
       <p>Current data: {data}</p>
       <p>Awaited data: {awaitableData.awaited?.value}</p>
-      
+
       <button onClick={handleWaitForData} disabled={waiting}>
         {waiting ? "Waiting..." : "Wait for Data"}
       </button>
@@ -866,8 +881,8 @@ signInWithRedirect(options?: {
   customState?: string;
 }) => void
 
-signOut(options?: { 
-  skipTokenRevocation?: boolean 
+signOut(options?: {
+  skipTokenRevocation?: boolean
 }) => { signedOut: Promise<void> }
 
 // Token management
@@ -895,12 +910,13 @@ refreshTotpMfaStatus() => Promise<void>
 ```
 
 > **Note:** Activity tracking features require enabling in your configuration:
+>
 > ```javascript
 > Passwordless.configure({
 >   // ... other configuration
 >   tokenRefresh: {
->     useActivityTracking: true
->   }
+>     useActivityTracking: true,
+>   },
 > });
 > ```
 
@@ -914,8 +930,8 @@ signingInStatus: BusyState | IdleState // Current signing status
 authMethod?: string                    // Current auth method
 
 // Methods
-updateFidoPreference(options: { 
-  useFido: "YES" | "NO" 
+updateFidoPreference(options: {
+  useFido: "YES" | "NO"
 }) => void
 clearLastSignedInUsers() => void
 ```

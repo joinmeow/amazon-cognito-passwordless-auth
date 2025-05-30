@@ -107,7 +107,10 @@ class PasswordlessErrorBoundary extends React.Component<
   { children: React.ReactNode; fallback?: React.ReactNode },
   { hasError: boolean; error?: Error }
 > {
-  constructor(props: { children: React.ReactNode; fallback?: React.ReactNode }) {
+  constructor(props: {
+    children: React.ReactNode;
+    fallback?: React.ReactNode;
+  }) {
     super(props);
     this.state = { hasError: false };
   }
@@ -123,15 +126,17 @@ class PasswordlessErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
-      return this.props.fallback || (
-        <div>
-          <h2>Authentication Error</h2>
-          <p>Something went wrong with the authentication system.</p>
-          <details>
-            <summary>Error Details</summary>
-            <pre>{this.state.error?.message}</pre>
-          </details>
-        </div>
+      return (
+        this.props.fallback || (
+          <div>
+            <h2>Authentication Error</h2>
+            <p>Something went wrong with the authentication system.</p>
+            <details>
+              <summary>Error Details</summary>
+              <pre>{this.state.error?.message}</pre>
+            </details>
+          </div>
+        )
       );
     }
 
@@ -689,12 +694,12 @@ function _usePasswordless() {
   // Handle incomplete token bundle (edge-case: storage was tampered with)
   // Use ref to prevent circular dependencies
   const isHandlingIncompleteTokens = useRef(false);
-  
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     // Don't run if we're currently handling incomplete tokens to avoid loops
     if (isHandlingIncompleteTokens.current) return;
-    
+
     if (
       tokens &&
       (!tokens.accessToken || !tokens.expireAt) &&
