@@ -127,6 +127,7 @@ export const PasswordlessContextProvider = (props: {
       passwordlessValue.totpMfaStatus,
       passwordlessValue.timeSinceLastActivityMs,
       passwordlessValue.timeSinceLastActivitySeconds,
+      passwordlessValue.authMethod,
       // Functions are already memoized with useCallback, so they're stable
       // We don't need to include them in dependencies
     ]
@@ -673,46 +674,53 @@ function _usePasswordless() {
 
   // At component mount, load tokens from storage
   useEffect(() => {
-    let mounted = true;
-    // First, retrieve tokens from storage
+    const abortController = new AbortController();
     const { debug } = configure();
+
+    // Retrieve tokens from storage
     retrieveTokens()
       .then((tokens) => {
-        if (!mounted) return; // Check if still mounted
+        // Check if the operation was aborted
+        if (abortController.signal.aborted) {
+          debug?.("Token retrieval aborted - component unmounted");
+          return;
+        }
 
-        // Process the raw tokens first - only if still mounted
-        if (mounted) {
-          _setTokens(tokens);
+        // Process tokens only if not aborted
+        _setTokens(tokens);
+        parseAndSetTokens(tokens);
 
-          // Parse tokens with special handling for OAuth
-          parseAndSetTokens(tokens);
-
-          // If these are tokens from OAuth/REDIRECT, update the signing in status
-          if (tokens?.authMethod === "REDIRECT") {
-            debug?.(
-              "Setting signingInStatus to SIGNED_IN_WITH_REDIRECT based on retrieved tokens"
-            );
-            setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
-          }
+        // Update signing status for OAuth/REDIRECT tokens
+        if (tokens?.authMethod === "REDIRECT") {
+          debug?.(
+            "Setting signingInStatus to SIGNED_IN_WITH_REDIRECT based on retrieved tokens"
+          );
+          setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
         }
       })
       .catch((err) => {
-        if (!mounted) return; // Check if still mounted
+        // Check if the operation was aborted before handling error
+        if (abortController.signal.aborted) {
+          debug?.(
+            "Token retrieval error handling aborted - component unmounted"
+          );
+          return;
+        }
 
         debug?.("Failed to retrieve tokens from storage:", err);
         // Make sure signInStatus gets recalculated on error
-        if (mounted) {
-          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-        }
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
       })
       .finally(() => {
-        if (mounted) {
+        // Check if the operation was aborted before final state update
+        if (!abortController.signal.aborted) {
           dispatch({ type: "SET_INITIAL_LOADING", payload: false });
         }
       });
 
+    // Cleanup function
     return () => {
-      mounted = false;
+      abortController.abort();
     };
   }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
 
@@ -958,7 +966,7 @@ function _usePasswordless() {
       })
       .catch(() => {
         if (abortController.signal.aborted) return;
-        
+
         // If anything fails, just default to no MFA
         dispatch({
           type: "SET_TOTP_MFA_STATUS",
@@ -1141,6 +1149,9 @@ function _usePasswordless() {
             return Promise.resolve();
           },
           isRefreshingCb: setIsRefreshingTokens,
+        }).catch((err) => {
+          const { debug } = configure();
+          debug?.("Failed to schedule refresh on user activity:", err);
         });
       }
     },
@@ -1702,8 +1713,22 @@ function _usePasswordless() {
         type: "SET_SIGNING_STATUS",
         payload: "STARTING_SIGN_IN_WITH_REDIRECT",
       });
-      void hostedSignInWithRedirect({ provider, customState });
+      hostedSignInWithRedirect({ provider, customState }).catch(
+        (err: unknown) => {
+          debug?.("Failed to initiate redirect sign-in:", err);
+          dispatch({
+            type: "SET_ERROR",
+            payload: err instanceof Error ? err : new Error(String(err)),
+          });
+          dispatch({
+            type: "SET_SIGNING_STATUS",
+            payload: "SIGNIN_WITH_REDIRECT_FAILED",
+          });
+        }
+      );
     },
+    /** The current authentication method used for these tokens */
+    authMethod,
   };
 }
 
@@ -1757,35 +1782,13 @@ function _useLocalUserCache() {
     creatingCredential,
     fido2Credentials,
     signingInStatus,
+    authMethod,
   } = usePasswordless();
-
-  // Access the authMethod directly from the parent context
-  // We need to use another way to access the authMethod value
-  // Since it's not exposed in the usePasswordless() return object
-  // Let's create a local version in this hook
-  const [authMethodLocal, setAuthMethodLocal] = useState<
-    "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined
-  >();
-
-  // Keep our local authMethod in sync with the main one by watching signingInStatus
-  useEffect(() => {
-    if (signingInStatus === "SIGNED_IN_WITH_SRP_PASSWORD") {
-      setAuthMethodLocal("SRP");
-    } else if (signingInStatus === "SIGNED_IN_WITH_PLAINTEXT_PASSWORD") {
-      setAuthMethodLocal("PLAINTEXT");
-    } else if (signingInStatus === "SIGNED_IN_WITH_FIDO2") {
-      setAuthMethodLocal("FIDO2");
-    } else if (signingInStatus === "SIGNED_IN_WITH_REDIRECT") {
-      setAuthMethodLocal("REDIRECT");
-    } else if (signingInStatus === "SIGNED_OUT") {
-      setAuthMethodLocal(undefined);
-    }
-  }, [signingInStatus]);
 
   const idToken = tokensParsed?.idToken;
   // Only consider FIDO2 credentials if we're not using SRP auth
   const hasFido2Credentials =
-    authMethodLocal !== "SRP" && fido2Credentials && !!fido2Credentials.length;
+    authMethod !== "SRP" && fido2Credentials && !!fido2Credentials.length;
   const [lastSignedInUsers, setLastSignedInUsers] = useState<StoredUser[]>();
   const [currentUser, setCurrentUser] = useState<StoredUser>();
   const [fidoPreferenceOverride, setFidoPreferenceOverride] = useState<
@@ -1794,11 +1797,13 @@ function _useLocalUserCache() {
 
   // 1 populate lastSignedInUsers from local storage
   useEffect(() => {
-    void getLastSignedInUsers()
+    getLastSignedInUsers()
       .then(setLastSignedInUsers)
       .catch((err) => {
         const { debug } = configure();
         debug?.("Failed to determine last signed-in users:", err);
+        // Set empty array as fallback to allow the UI to continue functioning
+        setLastSignedInUsers([]);
       });
   }, []);
 
@@ -1812,7 +1817,7 @@ function _useLocalUserCache() {
       username: idToken["cognito:username"],
       email:
         idToken.email && idToken.email_verified ? idToken.email : undefined,
-      authMethod: authMethodLocal,
+      authMethod: authMethod,
     };
     if (lastSignedInUsers) {
       const found = lastSignedInUsers.find(
@@ -1831,12 +1836,12 @@ function _useLocalUserCache() {
     setCurrentUser((state) =>
       JSON.stringify(state) === JSON.stringify(user) ? state : user
     );
-  }, [lastSignedInUsers, idToken, authMethodLocal]);
+  }, [lastSignedInUsers, idToken, authMethod]);
 
   // 3 If user is updated, store in lastSignedInUsers
   useEffect(() => {
     if (currentUser) {
-      void registerSignedInUser(currentUser).catch((err) => {
+      registerSignedInUser(currentUser).catch((err) => {
         const { debug } = configure();
         debug?.("Failed to register last signed-in user:", err);
       });
@@ -1857,7 +1862,7 @@ function _useLocalUserCache() {
   const determineFido = useCallback(
     (user: StoredUser): "YES" | "NO" | "ASK" | "INDETERMINATE" => {
       // Don't enable FIDO2 for SRP auth sessions
-      if (authMethodLocal === "SRP") {
+      if (authMethod === "SRP") {
         return "NO";
       }
 
@@ -1886,7 +1891,7 @@ function _useLocalUserCache() {
       creatingCredential,
       hasFido2Credentials,
       fidoPreferenceOverride,
-      authMethodLocal,
+      authMethod,
     ]
   );
 
@@ -1894,17 +1899,16 @@ function _useLocalUserCache() {
   useEffect(() => {
     if (!currentUser) return;
     // For SRP sign-ins, explicitly disable FIDO2
-    const useFido =
-      authMethodLocal === "SRP" ? "NO" : determineFido(currentUser);
+    const useFido = authMethod === "SRP" ? "NO" : determineFido(currentUser);
     if (useFido === "INDETERMINATE") return;
     setCurrentUser((state) => {
       const update: StoredUser = {
         ...currentUser,
         useFido,
-        authMethod: authMethodLocal ?? currentUser.authMethod,
+        authMethod: authMethod ?? currentUser.authMethod,
         // Clear stored credentials on SRP; otherwise keep FIDO2 list
         credentials:
-          authMethodLocal === "SRP"
+          authMethod === "SRP"
             ? undefined
             : fido2Credentials?.map((c) => ({
                 id: c.credentialId,
@@ -1913,15 +1917,14 @@ function _useLocalUserCache() {
       };
       return JSON.stringify(state) === JSON.stringify(update) ? state : update;
     });
-  }, [currentUser, determineFido, fido2Credentials, authMethodLocal]);
+  }, [currentUser, determineFido, fido2Credentials, authMethod]);
 
   // 5 reset state on signOut
   useEffect(() => {
     if (!currentUser) {
       setFidoPreferenceOverride(undefined);
-      setAuthMethodLocal(undefined);
     }
-  }, [currentUser, authMethodLocal]);
+  }, [currentUser]);
 
   return {
     /** The current signed-in user */
@@ -1929,7 +1932,7 @@ function _useLocalUserCache() {
     /** Update the current user's FIDO2 preference */
     updateFidoPreference: ({ useFido }: { useFido: "YES" | "NO" }) => {
       // Don't allow FIDO2 preference changes in SRP sessions
-      if (authMethodLocal === "SRP" && useFido === "YES") {
+      if (authMethod === "SRP" && useFido === "YES") {
         return;
       }
       setFidoPreferenceOverride(useFido);
@@ -1947,7 +1950,7 @@ function _useLocalUserCache() {
     /** The status of the most recent sign-in attempt */
     signingInStatus,
     /** The current authentication method */
-    authMethod: authMethodLocal,
+    authMethod,
   };
 }
 /** React hook to turn state (or any variable) into a promise that can be awaited */
@@ -1956,6 +1959,7 @@ export function useAwaitableState<T>(state: T) {
   const reject = useRef<(reason: Error) => void>();
   const awaitable = useRef<Promise<T>>();
   const [awaited, setAwaited] = useState<{ value: T }>();
+  const isMounted = useRef(true);
 
   const renewPromise = useCallback(() => {
     // Don't chain infinitely - just create a new promise
@@ -1963,7 +1967,9 @@ export function useAwaitableState<T>(state: T) {
       resolve.current = _resolve;
       reject.current = _reject;
     }).then((value) => {
-      setAwaited({ value });
+      if (isMounted.current) {
+        setAwaited({ value });
+      }
       return value;
     });
     // Remove the .finally(renewPromise) to prevent infinite chain
@@ -1977,18 +1983,33 @@ export function useAwaitableState<T>(state: T) {
   // Reset awaited when state changes
   useEffect(() => setAwaited(undefined), [state]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      isMounted.current = false;
+      // Clear references to prevent memory leaks
+      resolve.current = undefined;
+      reject.current = undefined;
+      awaitable.current = undefined;
+    };
+  }, []);
+
   return {
     /** Call to get the current awaitable (promise) */
     awaitable: () => awaitable.current!,
     /** Resolve the current awaitable (promise) with the current value of state */
     resolve: () => {
-      resolve.current!(state);
-      renewPromise(); // Renew after resolving, not in finally
+      if (resolve.current && isMounted.current) {
+        resolve.current(state);
+        renewPromise(); // Renew after resolving, not in finally
+      }
     },
     /** Reject the current awaitable (promise) */
     reject: (reason: Error) => {
-      reject.current!(reason);
-      renewPromise(); // Renew after rejecting, not in finally
+      if (reject.current && isMounted.current) {
+        reject.current(reason);
+        renewPromise(); // Renew after rejecting, not in finally
+      }
     },
     /** That value of awaitable (promise) once it resolves. This is undefined if (1) awaitable is not yet resolved or (2) the state has changed since awaitable was resolved */
     awaited,
