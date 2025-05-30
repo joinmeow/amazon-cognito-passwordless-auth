@@ -68,6 +68,7 @@ import React, {
   useMemo,
   useRef,
   useReducer,
+  ErrorInfo,
 } from "react";
 import { signInWithRedirect as hostedSignInWithRedirect } from "../hosted-oauth.js";
 
@@ -101,9 +102,47 @@ export function useLocalUserCache() {
   return context;
 }
 
+/** Simple error boundary to catch hook failures */
+class PasswordlessErrorBoundary extends React.Component<
+  { children: React.ReactNode; fallback?: React.ReactNode },
+  { hasError: boolean; error?: Error }
+> {
+  constructor(props: { children: React.ReactNode; fallback?: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    const { debug } = configure();
+    debug?.("PasswordlessErrorBoundary caught error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || (
+        <div>
+          <h2>Authentication Error</h2>
+          <p>Something went wrong with the authentication system.</p>
+          <details>
+            <summary>Error Details</summary>
+            <pre>{this.state.error?.message}</pre>
+          </details>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 export const PasswordlessContextProvider = (props: {
   children: React.ReactNode;
   enableLocalUserCache?: boolean;
+  errorFallback?: React.ReactNode;
 }) => {
   const passwordlessValue = _usePasswordless();
 
@@ -134,24 +173,43 @@ export const PasswordlessContextProvider = (props: {
   );
 
   return (
-    <PasswordlessContext.Provider value={memoizedValue}>
-      {props.enableLocalUserCache ? (
-        <LocalUserCacheContextProvider>
-          {props.children}
-        </LocalUserCacheContextProvider>
-      ) : (
-        props.children
-      )}
-    </PasswordlessContext.Provider>
+    <PasswordlessErrorBoundary fallback={props.errorFallback}>
+      <PasswordlessContext.Provider value={memoizedValue}>
+        {props.enableLocalUserCache ? (
+          <LocalUserCacheContextProvider errorFallback={props.errorFallback}>
+            {props.children}
+          </LocalUserCacheContextProvider>
+        ) : (
+          props.children
+        )}
+      </PasswordlessContext.Provider>
+    </PasswordlessErrorBoundary>
   );
 };
 
 const LocalUserCacheContextProvider = (props: {
   children: React.ReactNode;
+  errorFallback?: React.ReactNode;
 }) => {
+  const localUserCacheValue = _useLocalUserCache();
+
+  // Memoize the context value to prevent unnecessary re-renders
+  const memoizedValue = useMemo(
+    () => localUserCacheValue,
+    [
+      localUserCacheValue.currentUser,
+      localUserCacheValue.lastSignedInUsers,
+      localUserCacheValue.signingInStatus,
+      localUserCacheValue.authMethod,
+      // Functions are already memoized with useCallback, so they're stable
+    ]
+  );
+
   return (
-    <LocalUserCacheContext.Provider value={_useLocalUserCache()}>
-      {props.children}
+    <LocalUserCacheContext.Provider value={memoizedValue}>
+      <PasswordlessErrorBoundary fallback={props.errorFallback}>
+        {props.children}
+      </PasswordlessErrorBoundary>
     </LocalUserCacheContext.Provider>
   );
 };
@@ -438,11 +496,11 @@ function _usePasswordless() {
     []
   );
 
-  // Get activity tracking configuration (memoized to avoid calling configure() on every render)
-  const useActivityTracking = useMemo(() => {
-    const { tokenRefresh } = configure();
-    return tokenRefresh?.useActivityTracking ?? false;
-  }, []);
+  // Get activity tracking configuration
+  // Note: We call configure() on each render to ensure we get the latest config
+  // This is acceptable since configure() is lightweight and config changes are rare
+  const { tokenRefresh } = configure();
+  const useActivityTracking = tokenRefresh?.useActivityTracking ?? false;
 
   // 1️⃣  Attach lightweight listeners to detect user activity (only if activity tracking is enabled)
   useEffect(() => {
@@ -615,19 +673,25 @@ function _usePasswordless() {
 
     return () => abort.abort();
   }, [
-    _setTokens,
+    // Only depend on specific token properties that should trigger refresh
     refreshToken,
     expireAtTime,
     authMethodFromTokens,
+    // These don't depend on tokens changing, so safe to include
     signedInStatusForAuth,
     parseAndSetTokens,
     setSigninInStatus,
-    tokens,
+    _setTokens,
   ]);
 
   // Handle incomplete token bundle (edge-case: storage was tampered with)
-  // Move this to useEffect to avoid side effects during render
+  // Use ref to prevent circular dependencies
+  const isHandlingIncompleteTokens = useRef(false);
+  
   useEffect(() => {
+    // Don't run if we're currently handling incomplete tokens to avoid loops
+    if (isHandlingIncompleteTokens.current) return;
+    
     if (
       tokens &&
       (!tokens.accessToken || !tokens.expireAt) &&
@@ -642,6 +706,8 @@ function _usePasswordless() {
       const { debug } = configure();
       debug?.("Detected incomplete tokens, attempting refresh");
 
+      isHandlingIncompleteTokens.current = true;
+
       refreshTokens({
         tokensCb: (newTokens) => {
           if (newTokens) {
@@ -653,16 +719,20 @@ function _usePasswordless() {
             parseAndSetTokens(undefined);
             dispatch({ type: "INCREMENT_RECHECK_STATUS" });
           }
+          isHandlingIncompleteTokens.current = false;
         },
         isRefreshingCb: setIsRefreshingTokens,
       }).catch(() => {
         _setTokens(undefined);
         parseAndSetTokens(undefined);
         dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+        isHandlingIncompleteTokens.current = false;
       });
     }
   }, [
-    tokens,
+    // Be specific about token properties that indicate incomplete tokens
+    tokens?.accessToken,
+    tokens?.expireAt,
     isRefreshingTokens,
     isSchedulingRefresh,
     authMethod,
@@ -807,13 +877,6 @@ function _usePasswordless() {
 
   // Determine sign-in status (single authoritative state for UI)
   const signInStatus = useMemo(() => {
-    const { debug } = configure();
-    debug?.("Re-evaluating signInStatus", {
-      recheckSignInStatus,
-      opStatus: signingInStatus,
-      authMethod: tokens?.authMethod,
-    });
-
     // 1️⃣ Initial load – waiting for storage
     if (initiallyRetrievingTokensFromStorage) return "CHECKING";
 
@@ -893,8 +956,9 @@ function _usePasswordless() {
     // Only proceed when signed in (list credentials even after SRP)
     if (!isSignedIn) {
       debug?.("Not signed in, skipping credential listing");
-      dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
-      return;
+      // Don't aggressively clear credentials - let sign out handle this
+      // Return a no-op cleanup function to maintain consistent API
+      return () => {};
     }
 
     // Only proceed with operations if signed in
@@ -1031,7 +1095,6 @@ function _usePasswordless() {
             } else {
               debug?.("Failed to refresh expired tokens");
             }
-            return Promise.resolve();
           },
           isRefreshingCb: setIsRefreshingTokens,
           force: true,
@@ -1089,11 +1152,8 @@ function _usePasswordless() {
               newTokens.authMethod ?? tokens?.authMethod
             );
             newStatus && setSigninInStatus(newStatus);
-
-            // Don't return the tokens, return void to match the callback signature
-            return undefined;
           }
-          return Promise.resolve();
+          // Consistent return type - void
         },
         isRefreshingCb: setIsRefreshingTokens,
       });
@@ -1120,11 +1180,8 @@ function _usePasswordless() {
               newTokens.authMethod ?? tokens?.authMethod
             );
             newStatus && setSigninInStatus(newStatus);
-
-            // Don't return the tokens, return void to match the callback signature
-            return undefined;
           }
-          return Promise.resolve();
+          // Consistent return type - void
         },
         isRefreshingCb: setIsRefreshingTokens,
       });
@@ -1146,7 +1203,7 @@ function _usePasswordless() {
             if (newTokens) {
               updateTokens(newTokens);
             }
-            return Promise.resolve();
+            // Consistent return type - void
           },
           isRefreshingCb: setIsRefreshingTokens,
         }).catch((err) => {
@@ -1459,8 +1516,8 @@ function _usePasswordless() {
 
       dispatch({ type: "SET_ERROR", payload: undefined });
 
-      // Clear any existing FIDO2 credentials to prevent unwanted checks
-      dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+      // Don't clear FIDO2 credentials - let the auth method control visibility
+      // dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
 
       // Set auth method before authentication starts
       dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
@@ -1479,8 +1536,7 @@ function _usePasswordless() {
               "SRP authentication successful, reinforcing SRP auth method"
             );
             dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
-            // Explicitly clear FIDO2 credentials again to prevent any listing attempts
-            dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+            // Don't clear credentials here - auth method controls visibility
           }
         },
         tokensCb: async (newTokens: TokensFromSignIn) => {
@@ -1492,7 +1548,7 @@ function _usePasswordless() {
             "Authentication completed, ensuring SRP auth method is preserved"
           );
           dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
-          dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+          // Don't clear credentials here - auth method controls visibility
 
           // Ensure device key is updated if present
           if (newTokens.deviceKey) {
@@ -1500,9 +1556,8 @@ function _usePasswordless() {
           }
 
           // Force sign-in status update after setting tokens
-          const status = signedInStatusForAuth(
-            newTokens.authMethod ?? authMethodFromTokens
-          );
+          // For SRP auth, always use "SRP" to maintain consistency
+          const status = signedInStatusForAuth("SRP");
           status && setSigninInStatus(status);
 
           // After successful authentication, handle remembered device flag if provided
@@ -1786,9 +1841,8 @@ function _useLocalUserCache() {
   } = usePasswordless();
 
   const idToken = tokensParsed?.idToken;
-  // Only consider FIDO2 credentials if we're not using SRP auth
-  const hasFido2Credentials =
-    authMethod !== "SRP" && fido2Credentials && !!fido2Credentials.length;
+  // FIDO2 credentials should be available regardless of auth method
+  const hasFido2Credentials = fido2Credentials && !!fido2Credentials.length;
   const [lastSignedInUsers, setLastSignedInUsers] = useState<StoredUser[]>();
   const [currentUser, setCurrentUser] = useState<StoredUser>();
   const [fidoPreferenceOverride, setFidoPreferenceOverride] = useState<
@@ -1861,7 +1915,7 @@ function _useLocalUserCache() {
 
   const determineFido = useCallback(
     (user: StoredUser): "YES" | "NO" | "ASK" | "INDETERMINATE" => {
-      // Don't enable FIDO2 for SRP auth sessions
+      // Disable FIDO2 UI for SRP auth sessions (credentials still available)
       if (authMethod === "SRP") {
         return "NO";
       }
@@ -1898,22 +1952,20 @@ function _useLocalUserCache() {
   // 4 Update user FIDO preference based on auth method & credentials
   useEffect(() => {
     if (!currentUser) return;
-    // For SRP sign-ins, explicitly disable FIDO2
+    // For SRP sign-ins, explicitly disable FIDO2 UI behavior
     const useFido = authMethod === "SRP" ? "NO" : determineFido(currentUser);
+    // Wait for credentials to be loaded before updating user state
     if (useFido === "INDETERMINATE") return;
     setCurrentUser((state) => {
       const update: StoredUser = {
         ...currentUser,
         useFido,
         authMethod: authMethod ?? currentUser.authMethod,
-        // Clear stored credentials on SRP; otherwise keep FIDO2 list
-        credentials:
-          authMethod === "SRP"
-            ? undefined
-            : fido2Credentials?.map((c) => ({
-                id: c.credentialId,
-                transports: c.transports,
-              })),
+        // Always store credentials regardless of auth method
+        credentials: fido2Credentials?.map((c) => ({
+          id: c.credentialId,
+          transports: c.transports,
+        })),
       };
       return JSON.stringify(state) === JSON.stringify(update) ? state : update;
     });
@@ -1931,10 +1983,7 @@ function _useLocalUserCache() {
     currentUser,
     /** Update the current user's FIDO2 preference */
     updateFidoPreference: ({ useFido }: { useFido: "YES" | "NO" }) => {
-      // Don't allow FIDO2 preference changes in SRP sessions
-      if (authMethod === "SRP" && useFido === "YES") {
-        return;
-      }
+      // Users can always update their FIDO2 preference for future sign-ins
       setFidoPreferenceOverride(useFido);
     },
     /** The list of the 10 last signed-in users in your configured storage (e.g. localStorage) */
@@ -1953,6 +2002,7 @@ function _useLocalUserCache() {
     authMethod,
   };
 }
+
 /** React hook to turn state (or any variable) into a promise that can be awaited */
 export function useAwaitableState<T>(state: T) {
   const resolve = useRef<(value: T) => void>();
@@ -1962,17 +2012,11 @@ export function useAwaitableState<T>(state: T) {
   const isMounted = useRef(true);
 
   const renewPromise = useCallback(() => {
-    // Don't chain infinitely - just create a new promise
+    // Create a new promise without chaining to prevent memory leaks
     awaitable.current = new Promise<T>((_resolve, _reject) => {
       resolve.current = _resolve;
       reject.current = _reject;
-    }).then((value) => {
-      if (isMounted.current) {
-        setAwaited({ value });
-      }
-      return value;
     });
-    // Remove the .finally(renewPromise) to prevent infinite chain
   }, []);
 
   // Initial setup
@@ -2000,15 +2044,18 @@ export function useAwaitableState<T>(state: T) {
     /** Resolve the current awaitable (promise) with the current value of state */
     resolve: () => {
       if (resolve.current && isMounted.current) {
-        resolve.current(state);
-        renewPromise(); // Renew after resolving, not in finally
+        const currentResolve = resolve.current;
+        setAwaited({ value: state });
+        currentResolve(state);
+        renewPromise(); // Create new promise after resolving
       }
     },
     /** Reject the current awaitable (promise) */
     reject: (reason: Error) => {
       if (reject.current && isMounted.current) {
-        reject.current(reason);
-        renewPromise(); // Renew after rejecting, not in finally
+        const currentReject = reject.current;
+        currentReject(reason);
+        renewPromise(); // Create new promise after rejecting
       }
     },
     /** That value of awaitable (promise) once it resolves. This is undefined if (1) awaitable is not yet resolved or (2) the state has changed since awaitable was resolved */

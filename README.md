@@ -93,6 +93,7 @@ await signOut();
 ### Usage in React
 
 ```jsx
+import React, { useState, useEffect } from "react";
 import {
   PasswordlessContextProvider,
   usePasswordless,
@@ -128,7 +129,6 @@ function YourApp() {
   const handleRememberDevice = async (remember) => {
     if (tokens?.deviceKey && tokens?.accessToken) {
       await updateDeviceStatus({
-        accessToken: tokens.accessToken,
         deviceKey: tokens.deviceKey,
         deviceRememberedStatus: remember ? "remembered" : "not_remembered",
       });
@@ -352,6 +352,8 @@ await beginSetup();
 await verifySetup(userEnteredCode, "My Authenticator");
 ```
 
+> **Note:** TOTP MFA setup requires proper configuration. The `issuer` setting controls what name appears in authenticator apps like Google Authenticator or Authy.
+
 ### Device Management
 
 The library provides comprehensive device management capabilities for trusted device authentication:
@@ -359,6 +361,9 @@ The library provides comprehensive device management capabilities for trusted de
 #### React Hook Usage
 
 ```jsx
+import React, { useState } from "react";
+import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
+
 function DeviceManager() {
   const {
     deviceKey,
@@ -368,49 +373,76 @@ function DeviceManager() {
     clearDeviceKey,
     tokens,
   } = usePasswordless();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   const handleConfirmDevice = async () => {
-    if (deviceKey) {
-      try {
-        await confirmDevice("My Laptop");
-        console.log("Device confirmed successfully");
-      } catch (error) {
-        console.error("Failed to confirm device:", error);
-      }
+    if (!deviceKey) return;
+    
+    try {
+      setLoading(true);
+      setError(null);
+      await confirmDevice("My Laptop");
+      console.log("Device confirmed successfully");
+    } catch (error) {
+      console.error("Failed to confirm device:", error);
+      setError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleRememberDevice = async (remember: boolean) => {
-    if (deviceKey) {
+    if (!deviceKey) return;
+    
+    try {
+      setLoading(true);
+      setError(null);
       await updateDeviceStatus({
         deviceKey,
         deviceRememberedStatus: remember ? "remembered" : "not_remembered",
       });
+    } catch (error) {
+      console.error("Failed to update device status:", error);
+      setError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleForgetDevice = async () => {
     try {
+      setLoading(true);
+      setError(null);
       await forgetDevice(); // Forgets current device
       // Or forget a specific device: await forgetDevice(specificDeviceKey);
     } catch (error) {
       console.error("Failed to forget device:", error);
+      setError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <div>
+      {error && <div style={{color: 'red'}}>Error: {error}</div>}
+      
       {deviceKey && (
         <div>
           <p>Device Key: {deviceKey}</p>
-          <button onClick={handleConfirmDevice}>Confirm This Device</button>
-          <button onClick={() => handleRememberDevice(true)}>
+          <button onClick={handleConfirmDevice} disabled={loading}>
+            {loading ? "Confirming..." : "Confirm This Device"}
+          </button>
+          <button onClick={() => handleRememberDevice(true)} disabled={loading}>
             Remember This Device
           </button>
-          <button onClick={() => handleRememberDevice(false)}>
+          <button onClick={() => handleRememberDevice(false)} disabled={loading}>
             Don't Remember This Device
           </button>
-          <button onClick={handleForgetDevice}>Forget This Device</button>
+          <button onClick={handleForgetDevice} disabled={loading}>
+            {loading ? "Forgetting..." : "Forget This Device"}
+          </button>
           <button onClick={clearDeviceKey}>Clear Local Device Key</button>
         </div>
       )}
@@ -455,6 +487,9 @@ Manage WebAuthn/FIDO2 credentials for passwordless authentication:
 #### React Hook Usage
 
 ```jsx
+import React, { useState } from "react";
+import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
+
 function FIDO2Manager() {
   const {
     fido2Credentials,
@@ -462,40 +497,52 @@ function FIDO2Manager() {
     fido2CreateCredential,
     userVerifyingPlatformAuthenticatorAvailable,
   } = usePasswordless();
+  const [error, setError] = useState(null);
 
   const handleCreateCredential = async () => {
     try {
+      setError(null);
       await fido2CreateCredential({
         friendlyName: "My Face ID",
-        userVerification: "required",
       });
       console.log("FIDO2 credential created successfully");
     } catch (error) {
       console.error("Failed to create FIDO2 credential:", error);
+      setError(error.message);
     }
   };
 
   const handleUpdateCredential = async (credential, newName) => {
     try {
+      setError(null);
       await credential.update({ friendlyName: newName });
       console.log("Credential updated successfully");
     } catch (error) {
       console.error("Failed to update credential:", error);
+      setError(error.message);
     }
   };
 
   const handleDeleteCredential = async (credential) => {
+    if (!window.confirm("Are you sure you want to delete this credential?")) {
+      return;
+    }
+    
     try {
+      setError(null);
       await credential.delete();
       console.log("Credential deleted successfully");
     } catch (error) {
       console.error("Failed to delete credential:", error);
+      setError(error.message);
     }
   };
 
   return (
     <div>
       <h3>FIDO2 Credentials</h3>
+      
+      {error && <div style={{color: 'red'}}>Error: {error}</div>}
       
       {userVerifyingPlatformAuthenticatorAvailable && (
         <button 
@@ -507,13 +554,16 @@ function FIDO2Manager() {
       )}
 
       {fido2Credentials?.map((credential) => (
-        <div key={credential.credentialId}>
+        <div key={credential.credentialId} style={{border: '1px solid #ccc', margin: '10px', padding: '10px'}}>
           <h4>{credential.friendlyName || "Unnamed Credential"}</h4>
           <p>Created: {new Date(credential.createdAt).toLocaleDateString()}</p>
           <p>Last Used: {new Date(credential.lastUseDate).toLocaleDateString()}</p>
           
           <button 
-            onClick={() => handleUpdateCredential(credential, "New Name")}
+            onClick={() => {
+              const newName = prompt("Enter new name:", credential.friendlyName);
+              if (newName) handleUpdateCredential(credential, newName);
+            }}
             disabled={credential.busy}
           >
             {credential.busy ? "Updating..." : "Update Name"}
@@ -522,11 +572,16 @@ function FIDO2Manager() {
           <button 
             onClick={() => handleDeleteCredential(credential)}
             disabled={credential.busy}
+            style={{marginLeft: '10px', backgroundColor: '#ff4444', color: 'white'}}
           >
             {credential.busy ? "Deleting..." : "Delete"}
           </button>
         </div>
       ))}
+      
+      {fido2Credentials?.length === 0 && (
+        <p>No FIDO2 credentials registered.</p>
+      )}
     </div>
   );
 }
@@ -540,7 +595,6 @@ if (userVerifyingPlatformAuthenticatorAvailable) {
   // 2. Create a new credential
   await fido2CreateCredential({
     friendlyName: "iPhone Face ID",
-    userVerification: "required",
   });
 
   // 3. Sign in with FIDO2
@@ -564,6 +618,13 @@ The `useLocalUserCache()` hook manages a cache of recently signed-in users for i
 #### Setup and Usage
 
 ```jsx
+import React, { useCallback } from "react";
+import {
+  PasswordlessContextProvider,
+  usePasswordless,
+  useLocalUserCache,
+} from "@joinmeow/cognito-passwordless-auth/react";
+
 // 1. Enable local user cache in the provider
 function App() {
   return (
@@ -586,33 +647,40 @@ function UserSelector() {
 
   const { authenticateWithFido2, authenticateWithSRP } = usePasswordless();
 
-  const handleQuickSignIn = async (user) => {
-    if (user.useFido === "YES" && user.credentials) {
-      // Sign in with FIDO2 using stored credentials
-      await authenticateWithFido2({
-        username: user.username,
-        credentials: user.credentials,
-      });
-    } else {
-      // Fall back to password authentication
-      const password = prompt("Enter your password:");
-      await authenticateWithSRP({
-        username: user.username,
-        password,
-      });
+  const handleQuickSignIn = useCallback(async (user) => {
+    try {
+      if (user.useFido === "YES" && user.credentials) {
+        // Sign in with FIDO2 using stored credentials
+        await authenticateWithFido2({
+          username: user.username,
+          credentials: user.credentials,
+        });
+      } else {
+        // Fall back to password authentication
+        const password = prompt("Enter your password:");
+        if (password) {
+          await authenticateWithSRP({
+            username: user.username,
+            password,
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Quick sign-in failed:", error);
+      alert("Sign-in failed: " + error.message);
     }
-  };
+  }, [authenticateWithFido2, authenticateWithSRP]);
 
-  const handleFidoPreferenceChange = (useFido) => {
+  const handleFidoPreferenceChange = useCallback((useFido) => {
     updateFidoPreference({ useFido });
-  };
+  }, [updateFidoPreference]);
 
   return (
     <div>
       <h3>Recent Users</h3>
       
       {currentUser && (
-        <div>
+        <div style={{border: '1px solid #ccc', padding: '10px', margin: '10px'}}>
           <h4>Current User: {currentUser.username}</h4>
           <p>Email: {currentUser.email}</p>
           <p>Auth Method: {currentUser.authMethod}</p>
@@ -629,17 +697,24 @@ function UserSelector() {
 
       <h4>Quick Sign-In</h4>
       {lastSignedInUsers?.map((user) => (
-        <div key={user.username}>
-          <button onClick={() => handleQuickSignIn(user)}>
+        <div key={user.username} style={{margin: '5px 0'}}>
+          <button 
+            onClick={() => handleQuickSignIn(user)}
+            disabled={signingInStatus !== "SIGNED_OUT"}
+          >
             {user.email || user.username}
             {user.useFido === "YES" && " (FIDO2)"}
           </button>
         </div>
       ))}
 
-      <button onClick={clearLastSignedInUsers}>
+      <button onClick={clearLastSignedInUsers} style={{marginTop: '10px'}}>
         Clear User History
       </button>
+      
+      {signingInStatus !== "SIGNED_OUT" && (
+        <p>Status: {signingInStatus}</p>
+      )}
     </div>
   );
 }
@@ -664,16 +739,27 @@ type StoredUser = {
 Convert any state value into a promise that can be awaited:
 
 ```jsx
+import React, { useState } from "react";
+import { useAwaitableState } from "@joinmeow/cognito-passwordless-auth/react";
+
 function AsyncStateExample() {
   const [data, setData] = useState(null);
   const awaitableData = useAwaitableState(data);
+  const [waiting, setWaiting] = useState(false);
 
   const handleWaitForData = async () => {
-    console.log("Waiting for data...");
-    
-    // This will wait until data is set to a truthy value
-    const result = await awaitableData.awaitable();
-    console.log("Data received:", result);
+    try {
+      setWaiting(true);
+      console.log("Waiting for data...");
+      
+      // This will wait until data is set to a truthy value
+      const result = await awaitableData.awaitable();
+      console.log("Data received:", result);
+    } catch (error) {
+      console.error("Waiting failed:", error);
+    } finally {
+      setWaiting(false);
+    }
   };
 
   const handleSetData = () => {
@@ -691,7 +777,9 @@ function AsyncStateExample() {
       <p>Current data: {data}</p>
       <p>Awaited data: {awaitableData.awaited?.value}</p>
       
-      <button onClick={handleWaitForData}>Wait for Data</button>
+      <button onClick={handleWaitForData} disabled={waiting}>
+        {waiting ? "Waiting..." : "Wait for Data"}
+      </button>
       <button onClick={handleSetData}>Set Data</button>
       <button onClick={handleRejectData}>Reject</button>
     </div>
@@ -752,7 +840,7 @@ authenticateWithFido2(options?: {
   username?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   clientMetadata?: Record<string, string>;
-}) => Promise<TokensFromSignIn>
+}) => { signedIn: Promise<TokensFromSignIn> }
 
 authenticateWithSRP(options: {
   username: string;
@@ -762,7 +850,7 @@ authenticateWithSRP(options: {
   newPassword?: () => Promise<string>;
   clientMetadata?: Record<string, string>;
   rememberDevice?: () => Promise<boolean>;
-}) => Promise<TokensFromSignIn>
+}) => { signedIn: Promise<TokensFromSignIn> }
 
 authenticateWithPlaintextPassword(options: {
   username: string;
@@ -771,7 +859,7 @@ authenticateWithPlaintextPassword(options: {
   otpMfaCode?: () => Promise<string>;
   clientMetadata?: Record<string, string>;
   rememberDevice?: () => Promise<boolean>;
-}) => Promise<TokensFromSignIn>
+}) => { signedIn: Promise<TokensFromSignIn> }
 
 signInWithRedirect(options?: {
   provider?: string;
@@ -798,11 +886,23 @@ forgetDevice(deviceKeyToForget?: string) => Promise<void>
 clearDeviceKey() => void
 
 // FIDO2 credential management
-fido2CreateCredential(...args) => Promise<StoredCredential>
+fido2CreateCredential(options: {
+  friendlyName: string | (() => string | Promise<string>);
+}) => Promise<StoredCredential>
 
 // TOTP MFA
 refreshTotpMfaStatus() => Promise<void>
 ```
+
+> **Note:** Activity tracking features require enabling in your configuration:
+> ```javascript
+> Passwordless.configure({
+>   // ... other configuration
+>   tokenRefresh: {
+>     useActivityTracking: true
+>   }
+> });
+> ```
 
 ### useLocalUserCache() Hook
 
@@ -865,7 +965,7 @@ The library is organized into several modules that handle different aspects of a
   - `device.ts` - Device remembering and authentication
 - **Token Management**:
   - `storage.ts` - Token persistence and retrieval
-  - `refresh.ts`
+  - `refresh.ts` - Token refresh scheduling and automatic renewal
 
 ## License and Attribution
 
