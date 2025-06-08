@@ -200,8 +200,10 @@ async function scheduleRefreshUnlocked({
       return;
     }
 
-    // Standard case: schedule refresh at half the remaining token lifetime
-    const refreshDelay = Math.max(0, timeUntilExpiry / 2);
+    // Standard case: schedule refresh with 30% lifetime buffer (9 min for 30-min tokens)
+    const totalLifetime = 30 * 60 * 1000; // Cognito access tokens are 30 minutes
+    const bufferTime = 0.3 * totalLifetime; // 30% buffer = 9 minutes
+    const refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
 
     // After we have determined `refreshDelay`
     const desiredFireTime = Date.now() + refreshDelay;
