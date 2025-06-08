@@ -708,7 +708,12 @@ if (isBrowserEnvironment()) {
   // Listen for window focus to catch resumed tabs or app focus
   // eslint-disable-next-line no-restricted-globals
   globalThis.window.addEventListener("focus", () => {
-    void scheduleRefresh();
+    // Use same throttling as visibility change to prevent rapid fire
+    const timeThreshold = 60000; // 1 minute
+    const lastRefresh = refreshState.lastRefreshTime || 0;
+    if (Date.now() - lastRefresh > timeThreshold) {
+      void scheduleRefresh();
+    }
   });
 
   // Polling watchdog: re-check every 60s to catch any missed refresh
