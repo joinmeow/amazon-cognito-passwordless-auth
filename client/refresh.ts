@@ -14,11 +14,7 @@
  */
 import { configure, getTokenEndpoint } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import {
-  retrieveTokens,
-  storeRefreshScheduleInfo,
-  getRefreshScheduleInfo,
-} from "./storage.js";
+import { retrieveTokens } from "./storage.js";
 import { getTokensFromRefreshToken, initiateAuth } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
@@ -97,53 +93,16 @@ async function scheduleRefreshUnlocked({
   }
 
   try {
-    // Clear any existing timer **only** if the new schedule would fire earlier
-    // than the currently scheduled refresh (or if no timer is set).
-    const clearExistingTimerIfNeeded = (desiredFireTime: number) => {
-      if (
-        refreshState.refreshTimer &&
-        typeof refreshState.nextRefreshTime === "number" &&
-        // If an existing timer will fire *before* (or at the same time as) the
-        // desired one, keep it – otherwise cancel and reschedule below.
-        refreshState.nextRefreshTime <= desiredFireTime
-      ) {
-        logDebug(
-          `Existing refresh is already scheduled earlier (${new Date(
-            refreshState.nextRefreshTime
-          ).toISOString()}); skipping reschedule`
-        );
-        return false; // keep existing timer
-      }
-
+    // Clear any existing timer. The new schedule will always be the single
+    // source of truth.
+    const clearExistingTimer = () => {
       if (refreshState.refreshTimer) {
         refreshState.refreshTimer();
         refreshState.refreshTimer = undefined;
         refreshState.nextRefreshTime = undefined;
       }
-      return true; // need to schedule
     };
-
-    // Restore persisted schedule (e.g. after hard reload)
-    const persisted = await getRefreshScheduleInfo();
-    if (
-      !refreshState.refreshTimer &&
-      persisted.isScheduled &&
-      persisted.expiryTime
-    ) {
-      const delay = Math.max(
-        0,
-        persisted.expiryTime - Date.now() - 5 * 60 * 1000
-      );
-      if (delay > 0) {
-        logDebug(
-          `Restoring persisted refresh timer to fire in ${Math.round(delay / 1000)}s`
-        );
-        refreshState.refreshTimer = setTimeoutWallClock(() => {
-          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
-        }, delay);
-        return;
-      }
-    }
+    clearExistingTimer();
 
     // Get current tokens
     const tokens = await retrieveTokens();
@@ -174,12 +133,6 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        // Mark as scheduled while we refresh
-        await storeRefreshScheduleInfo({
-          isScheduled: true,
-          expiryTime: tokenExpiryTime,
-        });
-
         await refreshTokens({
           abort,
           tokensCb,
@@ -188,14 +141,12 @@ async function scheduleRefreshUnlocked({
           force: true,
         });
 
-        // Schedule next refresh with a small delay to avoid race conditions
-        setTimeoutWallClock(() => {
-          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
-        }, 2000);
+        // After a successful immediate refresh, schedule the next one normally
+        // This avoids a tight loop if the refresh somehow fails or returns
+        // another short-lived token. We'll rely on the next event (e.g.
+        // visibility change) to trigger a new schedule check.
       } catch (err) {
         logDebug("Failed to refresh token:", err);
-      } finally {
-        await storeRefreshScheduleInfo({ isScheduled: false });
       }
       return;
     }
@@ -243,17 +194,6 @@ async function scheduleRefreshUnlocked({
     // After we have determined `refreshDelay`
     const desiredFireTime = Date.now() + refreshDelay;
 
-    // Decide if we actually need to (re-)schedule
-    const needToSchedule = clearExistingTimerIfNeeded(desiredFireTime);
-    if (!needToSchedule) {
-      // Make sure schedule info in storage reflects that a timer is active
-      await storeRefreshScheduleInfo({
-        isScheduled: true,
-        expiryTime: tokenExpiryTime,
-      });
-      return; // nothing else to do – keep current timer
-    }
-
     // Record scheduling info on the global state *before* creating the timer so
     // concurrent calls have up-to-date information.
     refreshState.nextRefreshTime = desiredFireTime;
@@ -266,8 +206,6 @@ async function scheduleRefreshUnlocked({
       // Clear meta as soon as the timer fires (regardless of refresh success)
       refreshState.nextRefreshTime = undefined;
       try {
-        await storeRefreshScheduleInfo({ isScheduled: false });
-
         // Re-read latest token info to avoid stale data
         const latestTokens = await retrieveTokens();
 
@@ -276,8 +214,9 @@ async function scheduleRefreshUnlocked({
           abort,
           tokensCb: async (refreshedTokens) => {
             await tokensCb?.(refreshedTokens);
-            // Chain the next schedule after successful refresh
-            void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
+            // After a successful refresh, let the next natural event (like
+            // visibility change or watchdog) schedule the subsequent refresh.
+            // This prevents tight loops.
           },
           isRefreshingCb,
           tokens: latestTokens,
@@ -299,7 +238,6 @@ async function scheduleRefreshUnlocked({
         if (refreshState.refreshTimer) {
           refreshState.refreshTimer();
           refreshState.refreshTimer = undefined;
-          void storeRefreshScheduleInfo({ isScheduled: false });
           logDebug("Refresh scheduling aborted");
         }
       },
@@ -661,9 +599,6 @@ export async function refreshTokens({
       );
       const processedTokens = await processTokens(tokensFromRefresh, abort);
 
-      // Reset schedule info
-      await storeRefreshScheduleInfo({ isScheduled: false });
-
       // Update last refresh time
       refreshState.lastRefreshTime = Date.now();
 
@@ -712,13 +647,6 @@ export async function forceRefreshTokens(
     refreshState.refreshTimer = undefined;
   }
 
-  // Clear schedule info
-  try {
-    await storeRefreshScheduleInfo({ isScheduled: false });
-  } catch (err) {
-    logDebug("Error clearing refresh schedule info:", err);
-  }
-
   // Force refresh
   const refreshed = await refreshTokens({
     ...(args ?? {}),
@@ -726,7 +654,7 @@ export async function forceRefreshTokens(
   });
 
   // Resume automatic scheduling after the forced refresh
-  void scheduleRefresh();
+  void scheduleRefresh({ ...args });
 
   return refreshed;
 }
@@ -751,11 +679,21 @@ if (isBrowserEnvironment()) {
     }
   });
 
-  // Polling watchdog: re-check every 60s to catch any missed refresh
-  const WATCHDOG_INTERVAL_MS = 60_000;
+  // Polling watchdog: re-check every 5 minutes to catch any missed refresh
+  // This is a fallback for cases where focus/visibility events are not fired
+  const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
   const startWatchdog = () => {
     setTimeoutWallClock(() => {
-      void scheduleRefresh();
+      // Only schedule a refresh if one isn't already pending and if the tab
+      // is visible, to avoid unnecessary background work.
+      if (!refreshState.refreshTimer && isDocumentVisible()) {
+        const lastRefresh = refreshState.lastRefreshTime || 0;
+        // Add an extra check to ensure we don't refresh too frequently
+        if (Date.now() - lastRefresh > WATCHDOG_INTERVAL_MS) {
+          logDebug("Watchdog is triggering a refresh check");
+          void scheduleRefresh();
+        }
+      }
       startWatchdog();
     }, WATCHDOG_INTERVAL_MS);
   };
