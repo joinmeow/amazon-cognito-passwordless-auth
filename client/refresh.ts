@@ -200,8 +200,8 @@ async function scheduleRefreshUnlocked({
       return;
     }
 
-    // Standard case: schedule refresh five minutes before expiry
-    const refreshDelay = Math.max(0, timeUntilExpiry - 5 * 60 * 1000);
+    // Standard case: schedule refresh at half the remaining token lifetime
+    const refreshDelay = Math.max(0, timeUntilExpiry / 2);
 
     // After we have determined `refreshDelay`
     const desiredFireTime = Date.now() + refreshDelay;
@@ -702,4 +702,20 @@ if (isBrowserEnvironment()) {
     "visibilitychange",
     handleVisibilityChange
   );
+
+  // Listen for window focus to catch resumed tabs or app focus
+  // eslint-disable-next-line no-restricted-globals
+  globalThis.window.addEventListener("focus", () => {
+    void scheduleRefresh();
+  });
+
+  // Polling watchdog: re-check every 60s to catch any missed refresh
+  const WATCHDOG_INTERVAL_MS = 60_000;
+  const startWatchdog = () => {
+    setTimeoutWallClock(() => {
+      void scheduleRefresh();
+      startWatchdog();
+    }, WATCHDOG_INTERVAL_MS);
+  };
+  startWatchdog();
 }
