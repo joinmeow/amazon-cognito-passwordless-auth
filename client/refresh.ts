@@ -202,11 +202,13 @@ async function scheduleRefreshUnlocked({
 
     // Standard case: schedule refresh with dynamic buffer based on actual token lifetime
     let refreshDelay: number;
-    
+
     try {
       // Try to get actual token lifetime from the access token JWT claims
       if (tokens.accessToken) {
-        const payload = parseJwtPayload<CognitoAccessTokenPayload>(tokens.accessToken);
+        const payload = parseJwtPayload<CognitoAccessTokenPayload>(
+          tokens.accessToken
+        );
         if (payload.iat && payload.exp) {
           // Calculate actual token lifetime from JWT claims (in seconds, convert to ms)
           const actualLifetime = (payload.exp - payload.iat) * 1000;
@@ -221,7 +223,7 @@ async function scheduleRefreshUnlocked({
           refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
           logDebug(
             `Using dynamic refresh timing: token lifetime=${Math.round(actualLifetime / 60000)}min, ` +
-            `buffer=${Math.round(bufferTime / 60000)}min, delay=${Math.round(refreshDelay / 60000)}min`
+              `buffer=${Math.round(bufferTime / 60000)}min, delay=${Math.round(refreshDelay / 60000)}min`
           );
         } else {
           throw new Error("Missing iat or exp claims");
