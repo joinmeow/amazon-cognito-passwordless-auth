@@ -200,10 +200,45 @@ async function scheduleRefreshUnlocked({
       return;
     }
 
-    // Standard case: schedule refresh with 30% lifetime buffer (9 min for 30-min tokens)
-    const totalLifetime = 30 * 60 * 1000; // Cognito access tokens are 30 minutes
-    const bufferTime = 0.3 * totalLifetime; // 30% buffer = 9 minutes
-    const refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
+    // Standard case: schedule refresh with dynamic buffer based on actual token lifetime
+    let refreshDelay: number;
+
+    try {
+      // Try to get actual token lifetime from the access token JWT claims
+      if (tokens.accessToken) {
+        const payload = parseJwtPayload<CognitoAccessTokenPayload>(
+          tokens.accessToken
+        );
+        if (payload.iat && payload.exp) {
+          // Calculate actual token lifetime from JWT claims (in seconds, convert to ms)
+          const actualLifetime = (payload.exp - payload.iat) * 1000;
+          // Use 30% of actual lifetime as buffer, but ensure reasonable bounds
+          const bufferTime = Math.max(
+            60000, // Minimum 1 minute buffer
+            Math.min(
+              0.3 * actualLifetime, // 30% of actual lifetime
+              15 * 60 * 1000 // Maximum 15 minutes buffer
+            )
+          );
+          refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
+          logDebug(
+            `Using dynamic refresh timing: token lifetime=${Math.round(actualLifetime / 60000)}min, ` +
+              `buffer=${Math.round(bufferTime / 60000)}min, delay=${Math.round(refreshDelay / 60000)}min`
+          );
+        } else {
+          throw new Error("Missing iat or exp claims");
+        }
+      } else {
+        throw new Error("No access token available");
+      }
+    } catch (err) {
+      // Fallback: use half of remaining time until expiry (previous robust approach)
+      refreshDelay = Math.max(0, timeUntilExpiry / 2);
+      logDebug(
+        `Using fallback refresh timing (half remaining lifetime): delay=${Math.round(refreshDelay / 60000)}min`,
+        err
+      );
+    }
 
     // After we have determined `refreshDelay`
     const desiredFireTime = Date.now() + refreshDelay;
