@@ -14,9 +14,7 @@
  */
 import { configure, getTokenEndpoint } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import {
-  retrieveTokens,
-} from "./storage.js";
+import { retrieveTokens } from "./storage.js";
 import { getTokensFromRefreshToken, initiateAuth } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
