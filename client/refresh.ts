@@ -56,6 +56,14 @@ function handleVisibilityChange() {
     `visibilitychange event: document.hidden=${globalThis.document.hidden}`
   );
   if (isDocumentVisible()) {
+    // Skip if refresh is already in progress or scheduled
+    if (refreshState.isRefreshing || refreshState.refreshTimer) {
+      logDebug(
+        "handleVisibilityChange: refresh already in progress or scheduled, skipping"
+      );
+      return;
+    }
+
     // If page becomes visible and it's been a while since last refresh,
     // check if we need to schedule a refresh
     const timeThreshold = 60000; // 1 minute
@@ -103,6 +111,17 @@ async function scheduleRefreshUnlocked({
     return;
   }
 
+  // Skip if we already have a timer scheduled for the future
+  if (refreshState.refreshTimer && refreshState.nextRefreshTime) {
+    const timeUntilScheduledRefresh = refreshState.nextRefreshTime - Date.now();
+    if (timeUntilScheduledRefresh > 0) {
+      logDebug(
+        `Refresh already scheduled in ${Math.round(timeUntilScheduledRefresh / 60000)} minutes, skipping`
+      );
+      return;
+    }
+  }
+
   try {
     // Clear any existing timer. The new schedule will always be the single
     // source of truth.
@@ -147,7 +166,7 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        await refreshTokens({
+        const refreshedTokens = await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
@@ -155,10 +174,18 @@ async function scheduleRefreshUnlocked({
           force: true,
         });
 
-        // After a successful immediate refresh, schedule the next one normally
-        // This avoids a tight loop if the refresh somehow fails or returns
-        // another short-lived token. We'll rely on the next event (e.g.
-        // visibility change) to trigger a new schedule check.
+        // After a successful immediate refresh, schedule the next refresh
+        // based on the new token's expiry time
+        if (refreshedTokens?.expireAt) {
+          const newTimeUntilExpiry =
+            refreshedTokens.expireAt.valueOf() - Date.now();
+          if (newTimeUntilExpiry > 60000) {
+            // Recursively call ourselves to schedule the next refresh
+            // This will go through the normal scheduling path
+            logDebug("Immediate refresh complete, scheduling next refresh");
+            return scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
+          }
+        }
       } catch (err) {
         logDebug("Failed to refresh token:", err);
       }
@@ -437,6 +464,9 @@ export async function refreshTokens({
     }
 
     try {
+      refreshState.isRefreshing = true;
+      isRefreshingCb?.(true);
+
       // Get tokens if not provided
       if (!tokens) {
         tokens = await retrieveTokens();
@@ -693,6 +723,15 @@ if (isBrowserEnvironment()) {
   globalThis.window.addEventListener("focus", () => {
     // Debug: focus event fired
     logDebug("window focus event fired");
+
+    // Skip if refresh is already in progress or scheduled
+    if (refreshState.isRefreshing || refreshState.refreshTimer) {
+      logDebug(
+        "focus handler: refresh already in progress or scheduled, skipping"
+      );
+      return;
+    }
+
     // Use same throttling as visibility change to prevent rapid fire
     const timeThreshold = 60000; // 1 minute
     const lastRefresh = refreshState.lastRefreshTime || 0;
