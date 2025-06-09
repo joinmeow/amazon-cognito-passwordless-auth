@@ -22,6 +22,7 @@ export async function throwIfNot2xx(res: MinimalResponse) {
   if (res.ok) {
     return res;
   }
+
   const detail = (await res.json()) as { __type: string; message: string };
   let message = detail.message;
   if (detail.__type === "UserLambdaValidationException") {
@@ -30,6 +31,12 @@ export async function throwIfNot2xx(res: MinimalResponse) {
       message = match[1];
     }
   }
+
+  // Add more context for rate limiting errors
+  if (detail.__type === "TooManyRequestsException") {
+    message = `Rate limit exceeded: ${message}. Please wait before retrying.`;
+  }
+
   const err = new Error(message);
   err.name = detail.__type;
   throw err;

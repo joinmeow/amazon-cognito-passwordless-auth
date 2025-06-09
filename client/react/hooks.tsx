@@ -694,6 +694,9 @@ function _usePasswordless() {
   // Handle incomplete token bundle (edge-case: storage was tampered with)
   // Use ref to prevent circular dependencies
   const isHandlingIncompleteTokens = useRef(false);
+  // Track which accessToken we have already used for GetUser, so we only
+  // fetch MFA status once per token rotation (per page load).
+  const lastFetchedMfaTokenRef = useRef<string | undefined>();
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -1002,9 +1005,14 @@ function _usePasswordless() {
     return cleanup;
   }, [revalidateFido2Credentials]);
 
-  // Fetch TOTP MFA status when the user is signed in
+  // Fetch TOTP MFA status when the user is signed in – exactly once per
+  // freshly issued access-token.
   useEffect(() => {
     if (!isSignedIn || !tokens?.accessToken) return;
+
+    // Skip if we've already fetched MFA status for this token value
+    if (tokens.accessToken === lastFetchedMfaTokenRef.current) return;
+    lastFetchedMfaTokenRef.current = tokens.accessToken;
 
     const abortController = new AbortController();
 
@@ -1043,15 +1051,10 @@ function _usePasswordless() {
       .catch(() => {
         if (abortController.signal.aborted) return;
 
-        // If anything fails, just default to no MFA
-        dispatch({
-          type: "SET_TOTP_MFA_STATUS",
-          payload: {
-            enabled: false,
-            preferred: false,
-            availableMfaTypes: [],
-          },
-        });
+        // On error we keep the previously known MFA status to avoid
+        // falsely disabling security-gated UI. Log for debugging.
+        const { debug } = configure();
+        debug?.("getUser failed; retaining previous TOTP MFA status");
       });
 
     return () => {

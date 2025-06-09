@@ -15,15 +15,26 @@
 import type { MinimalFetch, MinimalResponse } from "./config.js";
 
 /**
- * Return a fetch function that will retry on network errors or HTTP 5xx,
- * up to `maxRetries` times with exponential backoff and jitter.
+ * Return a fetch function that will retry on network errors, HTTP 5xx,
+ * and specific retryable 400 errors (TooManyRequestsException,
+ * LimitExceededException, CodeDeliveryFailureException), up to `maxRetries`
+ * times with exponential backoff.
+ *
+ * Uses `Response.clone()` to inspect 400 error bodies without consuming the
+ * original response body.
  */
 export function createFetchWithRetry(
   fetchFn: MinimalFetch,
   debugFn?: (...args: unknown[]) => unknown,
-  maxRetries = 3,
+  maxRetries = 2,
   baseDelayMs = 100
 ): MinimalFetch {
+  const retryableErrors = new Set([
+    "TooManyRequestsException",
+    "LimitExceededException",
+    "CodeDeliveryFailureException",
+  ]);
+
   return async (
     input: string | URL,
     init?: {
@@ -33,7 +44,6 @@ export function createFetchWithRetry(
       body?: string;
     }
   ): Promise<MinimalResponse> => {
-    type ResponseWithStatus = MinimalResponse & { status?: number };
     // Helper to wait with abort support
     const wait = (ms: number): Promise<void> => {
       if (init?.signal?.aborted) {
@@ -51,54 +61,79 @@ export function createFetchWithRetry(
         );
       });
     };
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       // Abort before starting the attempt
       if (init?.signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
       }
-      let res: MinimalResponse;
+
       try {
-        res = await fetchFn(input, init);
+        const res = await fetchFn(input, init);
+        if (res.ok) {
+          return res;
+        }
+        if (res.status === 400) {
+          // Retry on specific 400 errors by cloning the response
+          const nativeRes = res as unknown as Response;
+          if (typeof nativeRes.clone === "function") {
+            let retryErrorType: string | undefined;
+            try {
+              const cloned = nativeRes.clone();
+              const errObj = (await cloned.json()) as { __type?: string };
+              const errorType = errObj.__type;
+              if (errorType && retryableErrors.has(errorType)) {
+                retryErrorType = errorType; // mark for retry after we leave the try/catch
+              }
+            } catch (parseError) {
+              debugFn?.(
+                "Failed to parse error response for retryable type:",
+                parseError
+              );
+            }
+            // Evaluate retry after JSON parse to avoid the thrown error being
+            // swallowed by the try/catch above.
+            if (retryErrorType) {
+              if (attempt === maxRetries) {
+                // On the last attempt, surface the response (like we do for 5xx)
+                return res;
+              }
+              // Throw to trigger retry logic outside of the nested try/catch
+              throw new Error(retryErrorType);
+            }
+          }
+          return res;
+        }
+        // Retry on server errors (5xx), status 0 (network error), or undefined status
+        const status = res.status;
+        if (status === undefined || status === 0 || status >= 500) {
+          if (attempt === maxRetries) {
+            // Final attempt: return response so caller can parse error body
+            return res;
+          }
+          // Retry on transient server or network error
+          throw new Error(`ServerError:${status}`);
+        }
+        return res;
       } catch (err: unknown) {
-        // Rethrow immediately on abort
         if (
           init?.signal?.aborted ||
           (err instanceof Error && err.name === "AbortError")
         ) {
           throw err;
         }
-        // Network error: retry or give up
-        debugFn?.(
-          `fetchWithRetry network error on attempt ${attempt}/${maxRetries} for ${String(input)}`,
-          err
-        );
         if (attempt === maxRetries) {
           throw err;
         }
+        debugFn?.(
+          `fetchWithRetry attempt ${attempt}/${maxRetries} failed:`,
+          err
+        );
         const backoff = baseDelayMs * 2 ** (attempt - 1);
-        const jitter = Math.random() * baseDelayMs;
-        await wait(backoff + jitter);
-        continue;
+        await wait(backoff);
       }
-
-      const { status } = res as ResponseWithStatus;
-      // Return on success or client error
-      if (res.ok || (status !== undefined && status >= 400 && status < 500)) {
-        return res;
-      }
-      // Server error: decide to retry or return
-      debugFn?.(
-        `fetchWithRetry HTTP ${status} on attempt ${attempt}/${maxRetries} for ${String(input)}`
-      );
-      if (attempt === maxRetries) {
-        // Last attempt: return response so downstream can parse JSON body
-        return res;
-      }
-      const backoff = baseDelayMs * 2 ** (attempt - 1);
-      const jitter = Math.random() * baseDelayMs;
-      await wait(backoff + jitter);
     }
-    // (should never reach here)
+    // Fallback
     return fetchFn(input, init);
   };
 }
