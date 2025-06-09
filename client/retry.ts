@@ -16,8 +16,12 @@ import type { MinimalFetch, MinimalResponse } from "./config.js";
 
 /**
  * Return a fetch function that will retry on network errors, HTTP 5xx,
- * and specific retryable 400 errors (TooManyRequestsException, etc.),
- * up to `maxRetries` times with exponential backoff and jitter.
+ * and specific retryable 400 errors (TooManyRequestsException,
+ * LimitExceededException, CodeDeliveryFailureException), up to `maxRetries`
+ * times with exponential backoff.
+ *
+ * Uses `Response.clone()` to inspect 400 error bodies without consuming the
+ * original response body.
  */
 export function createFetchWithRetry(
   fetchFn: MinimalFetch,
@@ -40,26 +44,50 @@ export function createFetchWithRetry(
       body?: string;
     }
   ): Promise<MinimalResponse> => {
-    const wait = (ms: number) => new Promise((res) => setTimeout(res, ms));
+    // Helper to wait with abort support
+    const wait = (ms: number): Promise<void> => {
+      if (init?.signal?.aborted) {
+        return Promise.reject(new DOMException("Aborted", "AbortError"));
+      }
+      return new Promise((resolve, reject) => {
+        const id = setTimeout(resolve, ms);
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(id);
+            reject(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true }
+        );
+      });
+    };
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // Abort before starting the attempt
+      if (init?.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+
       try {
         const res = await fetchFn(input, init);
         if (res.ok) {
           return res;
         }
         if (res.status === 400) {
-          // Parse error response for retryable exception type
-          try {
-            const errObj = (await res.json()) as { __type?: string };
-            const errorType = errObj?.__type;
-            if (errorType && retryableErrors.has(errorType)) {
-              // Retry on this error type
-              throw new Error(errorType);
+          // Retry on specific 400 errors by cloning the response
+          const nativeRes = res as unknown as Response;
+          if (typeof nativeRes.clone === 'function') {
+            try {
+              const cloned = nativeRes.clone();
+              const errObj = (await cloned.json()) as { __type?: string };
+              const errorType = errObj.__type;
+              if (errorType && retryableErrors.has(errorType)) {
+                // Retry on this error type
+                throw new Error(errorType);
+              }
+            } catch (parseError) {
+              debugFn?.("Failed to parse error response for retryable type:", parseError);
             }
-          } catch (parseError) {
-            // If we can't parse the response, don't retry
-            debugFn?.("Failed to parse error response:", parseError);
           }
           return res;
         }
