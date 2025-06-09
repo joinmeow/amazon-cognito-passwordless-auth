@@ -76,7 +76,7 @@ export function createFetchWithRetry(
         if (res.status === 400) {
           // Retry on specific 400 errors by cloning the response
           const nativeRes = res as unknown as Response;
-          if (typeof nativeRes.clone === 'function') {
+          if (typeof nativeRes.clone === "function") {
             try {
               const cloned = nativeRes.clone();
               const errObj = (await cloned.json()) as { __type?: string };
@@ -86,7 +86,10 @@ export function createFetchWithRetry(
                 throw new Error(errorType);
               }
             } catch (parseError) {
-              debugFn?.("Failed to parse error response for retryable type:", parseError);
+              debugFn?.(
+                "Failed to parse error response for retryable type:",
+                parseError
+              );
             }
           }
           return res;
