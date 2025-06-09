@@ -210,6 +210,8 @@ async function scheduleRefreshUnlocked({
 
     // Set the timer
     refreshState.refreshTimer = setTimeoutWallClock(async () => {
+      // Timer has fired: clear the pending timer so watchdog can run
+      refreshState.refreshTimer = undefined;
       // Clear meta as soon as the timer fires (regardless of refresh success)
       refreshState.nextRefreshTime = undefined;
       try {
@@ -597,6 +599,8 @@ export async function refreshTokens({
         );
       } catch (error) {
         logDebug("Token refresh failed:", error);
+        // Prevent infinite retry loops on refresh failure by updating lastRefreshTime
+        refreshState.lastRefreshTime = Date.now();
         throw error;
       }
 
@@ -695,6 +699,8 @@ if (isBrowserEnvironment()) {
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
   const startWatchdog = () => {
     setTimeoutWallClock(() => {
+      // Debug every tick
+      logDebug(`Watchdog tick at ${new Date().toISOString()}`);
       // Only schedule a refresh if one isn't already pending and if the tab
       // is visible, to avoid unnecessary background work.
       if (!refreshState.refreshTimer && isDocumentVisible()) {
