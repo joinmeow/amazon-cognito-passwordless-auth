@@ -77,13 +77,13 @@ export function createFetchWithRetry(
           // Retry on specific 400 errors by cloning the response
           const nativeRes = res as unknown as Response;
           if (typeof nativeRes.clone === "function") {
+            let retryErrorType: string | undefined;
             try {
               const cloned = nativeRes.clone();
               const errObj = (await cloned.json()) as { __type?: string };
               const errorType = errObj.__type;
               if (errorType && retryableErrors.has(errorType)) {
-                // Retry on this error type
-                throw new Error(errorType);
+                retryErrorType = errorType; // mark for retry after we leave the try/catch
               }
             } catch (parseError) {
               debugFn?.(
@@ -91,17 +91,27 @@ export function createFetchWithRetry(
                 parseError
               );
             }
+            // Evaluate retry after JSON parse to avoid the thrown error being
+            // swallowed by the try/catch above.
+            if (retryErrorType) {
+              if (attempt === maxRetries) {
+                // On the last attempt, surface the response (like we do for 5xx)
+                return res;
+              }
+              // Throw to trigger retry logic outside of the nested try/catch
+              throw new Error(retryErrorType);
+            }
           }
           return res;
         }
-        // Retry on server errors (5xx) or undefined status
+        // Retry on server errors (5xx), status 0 (network error), or undefined status
         const status = res.status;
-        if (status === undefined || status >= 500) {
+        if (status === undefined || status === 0 || status >= 500) {
           if (attempt === maxRetries) {
             // Final attempt: return response so caller can parse error body
             return res;
           }
-          // Retry on transient server error or undefined status
+          // Retry on transient server or network error
           throw new Error(`ServerError:${status}`);
         }
         return res;
