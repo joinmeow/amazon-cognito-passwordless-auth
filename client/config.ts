@@ -380,6 +380,8 @@ class Defaults {
 
 export interface MinimalResponse {
   ok: boolean;
+  /** HTTP status code, if available */
+  status?: number;
   json: () => Promise<unknown>;
 }
 

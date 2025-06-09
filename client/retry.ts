@@ -15,7 +15,8 @@
 import type { MinimalFetch, MinimalResponse } from "./config.js";
 
 /**
- * Return a fetch function that will retry on network errors or HTTP 5xx,
+ * Return a fetch function that will retry on network errors, HTTP 5xx,
+ * and specific retryable 400 errors (TooManyRequestsException, etc.),
  * up to `maxRetries` times with exponential backoff and jitter.
  */
 export function createFetchWithRetry(
@@ -24,6 +25,12 @@ export function createFetchWithRetry(
   maxRetries = 3,
   baseDelayMs = 100
 ): MinimalFetch {
+  const retryableErrors = new Set([
+    "TooManyRequestsException",
+    "LimitExceededException",
+    "CodeDeliveryFailureException",
+  ]);
+
   return async (
     input: string | URL,
     init?: {
@@ -33,72 +40,52 @@ export function createFetchWithRetry(
       body?: string;
     }
   ): Promise<MinimalResponse> => {
-    type ResponseWithStatus = MinimalResponse & { status?: number };
-    // Helper to wait with abort support
-    const wait = (ms: number): Promise<void> => {
-      if (init?.signal?.aborted) {
-        return Promise.reject(new DOMException("Aborted", "AbortError"));
-      }
-      return new Promise((resolve, reject) => {
-        const id = setTimeout(resolve, ms);
-        init?.signal?.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(id);
-            reject(new DOMException("Aborted", "AbortError"));
-          },
-          { once: true }
-        );
-      });
-    };
+    const wait = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      // Abort before starting the attempt
-      if (init?.signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      let res: MinimalResponse;
       try {
-        res = await fetchFn(input, init);
+        const res = await fetchFn(input, init);
+        if (res.ok) {
+          return res;
+        }
+        if (res.status === 400) {
+          // Parse error response for retryable exception type
+          try {
+            const errObj = (await res.json()) as { __type?: string };
+            const errorType = errObj?.__type;
+            if (errorType && retryableErrors.has(errorType)) {
+              // Retry on this error type
+              throw new Error(errorType);
+            }
+          } catch (parseError) {
+            // If we can't parse the response, don't retry
+            debugFn?.("Failed to parse error response:", parseError);
+          }
+          return res;
+        }
+        if ((res.status ?? 0) >= 500) {
+          throw new Error(`ServerError:${res.status}`);
+        }
+        return res;
       } catch (err: unknown) {
-        // Rethrow immediately on abort
         if (
           init?.signal?.aborted ||
           (err instanceof Error && err.name === "AbortError")
         ) {
           throw err;
         }
-        // Network error: retry or give up
-        debugFn?.(
-          `fetchWithRetry network error on attempt ${attempt}/${maxRetries} for ${String(input)}`,
-          err
-        );
         if (attempt === maxRetries) {
           throw err;
         }
+        debugFn?.(
+          `fetchWithRetry attempt ${attempt}/${maxRetries} failed:`,
+          err
+        );
         const backoff = baseDelayMs * 2 ** (attempt - 1);
-        const jitter = Math.random() * baseDelayMs;
-        await wait(backoff + jitter);
-        continue;
+        await wait(backoff);
       }
-
-      const { status } = res as ResponseWithStatus;
-      // Return on success or client error
-      if (res.ok || (status !== undefined && status >= 400 && status < 500)) {
-        return res;
-      }
-      // Server error: decide to retry or return
-      debugFn?.(
-        `fetchWithRetry HTTP ${status} on attempt ${attempt}/${maxRetries} for ${String(input)}`
-      );
-      if (attempt === maxRetries) {
-        // Last attempt: return response so downstream can parse JSON body
-        return res;
-      }
-      const backoff = baseDelayMs * 2 ** (attempt - 1);
-      const jitter = Math.random() * baseDelayMs;
-      await wait(backoff + jitter);
     }
-    // (should never reach here)
+    // Fallback
     return fetchFn(input, init);
   };
 }
