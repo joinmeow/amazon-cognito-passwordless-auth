@@ -218,7 +218,7 @@ async function scheduleRefreshUnlocked({
         // Re-read latest token info to avoid stale data
         const latestTokens = await retrieveTokens();
 
-        // Always refresh at the scheduled point – independent of tab visibility
+        // Use standard refresh under lock/guard rather than forcing
         void refreshTokens({
           abort,
           tokensCb: async (refreshedTokens) => {
@@ -229,7 +229,6 @@ async function scheduleRefreshUnlocked({
           },
           isRefreshingCb,
           tokens: latestTokens,
-          force: true,
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
