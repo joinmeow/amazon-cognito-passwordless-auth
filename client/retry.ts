@@ -26,7 +26,7 @@ import type { MinimalFetch, MinimalResponse } from "./config.js";
 export function createFetchWithRetry(
   fetchFn: MinimalFetch,
   debugFn?: (...args: unknown[]) => unknown,
-  maxRetries = 3,
+  maxRetries = 2,
   baseDelayMs = 100
 ): MinimalFetch {
   const retryableErrors = new Set([
@@ -94,8 +94,15 @@ export function createFetchWithRetry(
           }
           return res;
         }
-        if ((res.status ?? 0) >= 500) {
-          throw new Error(`ServerError:${res.status}`);
+        // Retry on server errors (5xx) or undefined status
+        const status = res.status;
+        if (status === undefined || status >= 500) {
+          if (attempt === maxRetries) {
+            // Final attempt: return response so caller can parse error body
+            return res;
+          }
+          // Retry on transient server error or undefined status
+          throw new Error(`ServerError:${status}`);
         }
         return res;
       } catch (err: unknown) {
