@@ -52,14 +52,20 @@ function isDocumentVisible(): boolean {
 // Handle visibility change for browser environments
 function handleVisibilityChange() {
   // Debug: visibilitychange event fired
-  logDebug(`visibilitychange event: document.hidden=${globalThis.document.hidden}`);
+  logDebug(
+    `visibilitychange event: document.hidden=${globalThis.document.hidden}`
+  );
   if (isDocumentVisible()) {
     // If page becomes visible and it's been a while since last refresh,
     // check if we need to schedule a refresh
     const timeThreshold = 60000; // 1 minute
     const lastRefresh = refreshState.lastRefreshTime || 0;
-    logDebug(`handleVisibilityChange: lastRefreshTime=${new Date(lastRefresh).toISOString()}`);
-    logDebug("handleVisibilityChange: document is visible, evaluating refresh eligibility");
+    logDebug(
+      `handleVisibilityChange: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
+    );
+    logDebug(
+      "handleVisibilityChange: document is visible, evaluating refresh eligibility"
+    );
 
     if (Date.now() - lastRefresh > timeThreshold) {
       logDebug("handleVisibilityChange: threshold passed, scheduling refresh");
@@ -132,7 +138,9 @@ async function scheduleRefreshUnlocked({
 
     // If token is already expired or expires very soon, refresh immediately
     if (timeUntilExpiry <= 60000) {
-      logDebug(`scheduleRefreshUnlocked: immediate refresh path, timeUntilExpiry=${timeUntilExpiry}ms`);
+      logDebug(
+        `scheduleRefreshUnlocked: immediate refresh path, timeUntilExpiry=${timeUntilExpiry}ms`
+      );
       // 60 seconds or less
       logDebug(
         `Token expires in ${Math.round(timeUntilExpiry / 1000)}s, refreshing now`
@@ -178,7 +186,9 @@ async function scheduleRefreshUnlocked({
             )
           );
           refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
-          logDebug(`scheduleRefreshUnlocked dynamic calc: timeUntilExpiry=${timeUntilExpiry}ms, actualLifetime=${actualLifetime}ms, bufferTime=${bufferTime}ms, refreshDelay=${refreshDelay}ms`);
+          logDebug(
+            `scheduleRefreshUnlocked dynamic calc: timeUntilExpiry=${timeUntilExpiry}ms, actualLifetime=${actualLifetime}ms, bufferTime=${bufferTime}ms, refreshDelay=${refreshDelay}ms`
+          );
           logDebug(
             `Using dynamic refresh timing: token lifetime=${Math.round(actualLifetime / 60000)}min, ` +
               `buffer=${Math.round(bufferTime / 60000)}min, delay=${Math.round(refreshDelay / 60000)}min`
@@ -219,7 +229,7 @@ async function scheduleRefreshUnlocked({
         const latestTokens = await retrieveTokens();
 
         // Use standard refresh under lock/guard rather than forcing
-        void refreshTokens({
+        await refreshTokens({
           abort,
           tokensCb: async (refreshedTokens) => {
             await tokensCb?.(refreshedTokens);
@@ -686,7 +696,9 @@ if (isBrowserEnvironment()) {
     // Use same throttling as visibility change to prevent rapid fire
     const timeThreshold = 60000; // 1 minute
     const lastRefresh = refreshState.lastRefreshTime || 0;
-    logDebug(`focus handler: lastRefreshTime=${new Date(lastRefresh).toISOString()}`);
+    logDebug(
+      `focus handler: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
+    );
     if (Date.now() - lastRefresh > timeThreshold) {
       logDebug("focus handler: threshold passed, scheduling refresh");
       void scheduleRefresh();
