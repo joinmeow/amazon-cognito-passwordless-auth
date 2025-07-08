@@ -1771,9 +1771,11 @@ function _usePasswordless() {
     signInWithRedirect: ({
       provider = "Google",
       customState,
+      oauthParams,
     }: {
       provider?: string;
       customState?: string;
+      oauthParams?: Record<string, string>;
     } = {}) => {
       const { debug } = configure();
       debug?.("Starting sign-in via Hosted UI redirect");
@@ -1783,7 +1785,7 @@ function _usePasswordless() {
         type: "SET_SIGNING_STATUS",
         payload: "STARTING_SIGN_IN_WITH_REDIRECT",
       });
-      hostedSignInWithRedirect({ provider, customState }).catch(
+      hostedSignInWithRedirect({ provider, customState, oauthParams }).catch(
         (err: unknown) => {
           debug?.("Failed to initiate redirect sign-in:", err);
           dispatch({
