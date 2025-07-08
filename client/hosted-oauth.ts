@@ -25,7 +25,12 @@ const OAUTH_IN_PROGRESS_KEY = "cognito_oauth_in_progress";
 export async function signInWithRedirect({
   provider = "COGNITO",
   customState,
-}: { provider?: string; customState?: string } = {}) {
+  oauthParams,
+}: {
+  provider?: string;
+  customState?: string;
+  oauthParams?: Record<string, string>;
+} = {}) {
   const cfg = configure();
   const { debug } = cfg;
 
@@ -76,6 +81,7 @@ export async function signInWithRedirect({
     scope: (scopes ?? ["openid", "email", "profile"]).join(" "),
     state,
     identity_provider: provider,
+    ...oauthParams,
   };
   if (responseType === "code") {
     query.code_challenge = challenge;
