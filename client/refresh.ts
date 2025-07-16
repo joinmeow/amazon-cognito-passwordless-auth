@@ -531,10 +531,10 @@ export async function refreshTokens({
             debug?.(
               `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
             );
-            // Try refresh, retry once on reuse error or transient network errors
+            // Try refresh, retry on reuse error or transient network errors
             let lastError: Error | undefined;
             let currentRefreshToken = refreshToken; // Mutable copy for retries
-            const maxRetries = 2;
+            const maxRetries = 3;
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
               try {
@@ -718,31 +718,6 @@ if (isBrowserEnvironment()) {
     handleVisibilityChange
   );
 
-  // Listen for window focus to catch resumed tabs or app focus
-  // eslint-disable-next-line no-restricted-globals
-  globalThis.window.addEventListener("focus", () => {
-    // Debug: focus event fired
-    logDebug("window focus event fired");
-
-    // Skip if refresh is already in progress or scheduled
-    if (refreshState.isRefreshing || refreshState.refreshTimer) {
-      logDebug(
-        "focus handler: refresh already in progress or scheduled, skipping"
-      );
-      return;
-    }
-
-    // Use same throttling as visibility change to prevent rapid fire
-    const timeThreshold = 60000; // 1 minute
-    const lastRefresh = refreshState.lastRefreshTime || 0;
-    logDebug(
-      `focus handler: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
-    );
-    if (Date.now() - lastRefresh > timeThreshold) {
-      logDebug("focus handler: threshold passed, scheduling refresh");
-      void scheduleRefresh();
-    }
-  });
 
   // Polling watchdog: re-check every 5 minutes to catch any missed refresh
   // This is a fallback for cases where focus/visibility events are not fired
