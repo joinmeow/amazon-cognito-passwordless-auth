@@ -20,7 +20,7 @@ import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withStorageLock } from "./lock.js";
+import { withStorageLock, LockTimeoutError } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -29,6 +29,8 @@ type RefreshState = {
   /** Wall-clock timestamp (ms) when the current refreshTimer is scheduled to fire */
   nextRefreshTime?: number;
   lastRefreshTime?: number;
+  /** Timer for delayed visibility change handling */
+  visibilityTimer?: ReturnType<typeof setTimeout>;
 };
 
 const refreshState: RefreshState = {
@@ -76,8 +78,30 @@ function handleVisibilityChange() {
     );
 
     if (Date.now() - lastRefresh > timeThreshold) {
-      logDebug("handleVisibilityChange: threshold passed, scheduling refresh");
-      void scheduleRefresh();
+      // Clear any existing visibility timer
+      if (refreshState.visibilityTimer) {
+        clearTimeout(refreshState.visibilityTimer);
+        refreshState.visibilityTimer = undefined;
+      }
+
+      // Add random delay 2-5 seconds to prevent thundering herd
+      const randomDelay = 2000 + Math.random() * 3000;
+      logDebug(
+        `handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`
+      );
+
+      refreshState.visibilityTimer = setTimeout(() => {
+        refreshState.visibilityTimer = undefined;
+        // Re-check conditions after delay
+        if (!refreshState.isRefreshing && !refreshState.refreshTimer) {
+          logDebug("handleVisibilityChange: executing delayed refresh");
+          void scheduleRefresh();
+        } else {
+          logDebug(
+            "handleVisibilityChange: refresh started during delay, skipping"
+          );
+        }
+      }, randomDelay);
     }
   }
 }
@@ -309,17 +333,30 @@ export async function scheduleRefresh(
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
   // Acquire lock and execute schedule logic
   debug?.("scheduleRefresh: waiting for lock", lockKey);
-  const result = await withStorageLock(
-    lockKey,
-    async () => {
-      debug?.("scheduleRefresh: lock acquired", lockKey);
-      return scheduleRefreshUnlocked(args);
-    },
-    undefined,
-    args.abort
-  );
-  debug?.("scheduleRefresh: lock released", lockKey);
-  return result;
+
+  try {
+    const result = await withStorageLock(
+      lockKey,
+      async () => {
+        debug?.("scheduleRefresh: lock acquired", lockKey);
+        return scheduleRefreshUnlocked(args);
+      },
+      undefined,
+      args.abort
+    );
+    debug?.("scheduleRefresh: lock released", lockKey);
+    return result;
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      debug?.(
+        "scheduleRefresh: could not acquire lock, another tab is handling refresh"
+      );
+      // This is fine - another tab is already refreshing
+      return;
+    }
+    // Re-throw other errors
+    throw err;
+  }
 }
 
 /**
@@ -531,10 +568,10 @@ export async function refreshTokens({
             debug?.(
               `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
             );
-            // Try refresh, retry once on reuse error or transient network errors
+            // Try refresh, retry on reuse error or transient network errors
             let lastError: Error | undefined;
             let currentRefreshToken = refreshToken; // Mutable copy for retries
-            const maxRetries = 2;
+            const maxRetries = 3;
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
               try {
@@ -670,17 +707,52 @@ export async function refreshTokens({
     return doRefresh();
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
-  const result = await withStorageLock(
-    lockKey,
-    async () => {
-      debug?.("refreshTokens: lock acquired", lockKey);
-      return doRefresh();
-    },
-    undefined,
-    abort
-  );
-  debug?.("refreshTokens: lock released", lockKey);
-  return result;
+  try {
+    const result = await withStorageLock(
+      lockKey,
+      async () => {
+        debug?.("refreshTokens: lock acquired", lockKey);
+        return doRefresh();
+      },
+      undefined,
+      abort
+    );
+    debug?.("refreshTokens: lock released", lockKey);
+    return result;
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      debug?.(
+        "refreshTokens: could not acquire lock, another process is refreshing"
+      );
+      // Silently return the current tokens - another tab is handling the refresh
+      const currentTokens = await retrieveTokens();
+      if (
+        currentTokens?.accessToken &&
+        currentTokens?.idToken &&
+        currentTokens?.expireAt &&
+        currentTokens?.refreshToken
+      ) {
+        return {
+          accessToken: currentTokens.accessToken,
+          idToken: currentTokens.idToken,
+          expireAt: currentTokens.expireAt,
+          username: currentTokens.username,
+          refreshToken: currentTokens.refreshToken,
+          ...(currentTokens.deviceKey && {
+            deviceKey: currentTokens.deviceKey,
+          }),
+          ...(currentTokens.authMethod && {
+            authMethod: currentTokens.authMethod,
+          }),
+        };
+      }
+      // If no valid tokens, throw error
+      throw new Error(
+        "Another refresh in progress and no valid tokens available"
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -717,32 +789,6 @@ if (isBrowserEnvironment()) {
     "visibilitychange",
     handleVisibilityChange
   );
-
-  // Listen for window focus to catch resumed tabs or app focus
-  // eslint-disable-next-line no-restricted-globals
-  globalThis.window.addEventListener("focus", () => {
-    // Debug: focus event fired
-    logDebug("window focus event fired");
-
-    // Skip if refresh is already in progress or scheduled
-    if (refreshState.isRefreshing || refreshState.refreshTimer) {
-      logDebug(
-        "focus handler: refresh already in progress or scheduled, skipping"
-      );
-      return;
-    }
-
-    // Use same throttling as visibility change to prevent rapid fire
-    const timeThreshold = 60000; // 1 minute
-    const lastRefresh = refreshState.lastRefreshTime || 0;
-    logDebug(
-      `focus handler: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
-    );
-    if (Date.now() - lastRefresh > timeThreshold) {
-      logDebug("focus handler: threshold passed, scheduling refresh");
-      void scheduleRefresh();
-    }
-  });
 
   // Polling watchdog: re-check every 5 minutes to catch any missed refresh
   // This is a fallback for cases where focus/visibility events are not fired

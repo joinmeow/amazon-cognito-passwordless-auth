@@ -14,6 +14,16 @@
  */
 import { configure } from "./config.js";
 
+/**
+ * Custom error class for lock acquisition timeouts
+ */
+export class LockTimeoutError extends Error {
+  constructor(key: string, timeout: number) {
+    super(`Timeout acquiring lock: ${key} after ${timeout}ms`);
+    this.name = "LockTimeoutError";
+  }
+}
+
 const DEFAULT_RETRY_DELAY_MS = 50;
 const DEFAULT_TIMEOUT_MS = 5000;
 // Stale lock timeout should be significantly longer than acquisition timeout
@@ -129,10 +139,7 @@ export async function withStorageLock<T>(
   // Wait for any previous in-process lock holders, but respect timeout
   const startTime = Date.now();
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(
-      () => reject(new Error(`Timeout acquiring lock: ${key}`)),
-      timeoutMs
-    );
+    setTimeout(() => reject(new LockTimeoutError(key, timeoutMs)), timeoutMs);
   });
 
   // Add abort signal to the race if provided
@@ -171,7 +178,7 @@ export async function withStorageLock<T>(
     if (inProcessLockMap.get(key) === nextLockPromise) {
       inProcessLockMap.delete(key);
     }
-    throw new Error(`Timeout acquiring lock: ${key}`);
+    throw new LockTimeoutError(key, remainingTimeout);
   }
 
   const start = Date.now();
@@ -250,7 +257,7 @@ export async function withStorageLock<T>(
         debug?.("withStorageLock: timeout acquiring lock", key, {
           elapsed: Date.now() - start,
         });
-        throw new Error(`Timeout acquiring lock: ${key}`);
+        throw new LockTimeoutError(key, remainingTimeout);
       }
 
       // Adaptive polling: increase delay after several consecutive checks

@@ -26,8 +26,8 @@ import type { MinimalFetch, MinimalResponse } from "./config.js";
 export function createFetchWithRetry(
   fetchFn: MinimalFetch,
   debugFn?: (...args: unknown[]) => unknown,
-  maxRetries = 2,
-  baseDelayMs = 100
+  maxRetries = 3,
+  baseDelayMs = 1000
 ): MinimalFetch {
   const retryableErrors = new Set([
     "TooManyRequestsException",
@@ -129,7 +129,9 @@ export function createFetchWithRetry(
           `fetchWithRetry attempt ${attempt}/${maxRetries} failed:`,
           err
         );
-        const backoff = baseDelayMs * 2 ** (attempt - 1);
+        // Exponential backoff for all errors: 1s, 2s, 4s
+        const backoff = baseDelayMs * Math.pow(2, attempt - 1);
+        debugFn?.(`Retrying in ${backoff}ms...`);
         await wait(backoff);
       }
     }
