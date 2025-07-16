@@ -139,10 +139,7 @@ export async function withStorageLock<T>(
   // Wait for any previous in-process lock holders, but respect timeout
   const startTime = Date.now();
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(
-      () => reject(new LockTimeoutError(key, timeoutMs)),
-      timeoutMs
-    );
+    setTimeout(() => reject(new LockTimeoutError(key, timeoutMs)), timeoutMs);
   });
 
   // Add abort signal to the race if provided

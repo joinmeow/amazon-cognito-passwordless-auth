@@ -83,11 +83,13 @@ function handleVisibilityChange() {
         clearTimeout(refreshState.visibilityTimer);
         refreshState.visibilityTimer = undefined;
       }
-      
+
       // Add random delay 2-5 seconds to prevent thundering herd
       const randomDelay = 2000 + Math.random() * 3000;
-      logDebug(`handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`);
-      
+      logDebug(
+        `handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`
+      );
+
       refreshState.visibilityTimer = setTimeout(() => {
         refreshState.visibilityTimer = undefined;
         // Re-check conditions after delay
@@ -95,7 +97,9 @@ function handleVisibilityChange() {
           logDebug("handleVisibilityChange: executing delayed refresh");
           void scheduleRefresh();
         } else {
-          logDebug("handleVisibilityChange: refresh started during delay, skipping");
+          logDebug(
+            "handleVisibilityChange: refresh started during delay, skipping"
+          );
         }
       }, randomDelay);
     }
@@ -329,7 +333,7 @@ export async function scheduleRefresh(
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
   // Acquire lock and execute schedule logic
   debug?.("scheduleRefresh: waiting for lock", lockKey);
-  
+
   try {
     const result = await withStorageLock(
       lockKey,
@@ -344,7 +348,9 @@ export async function scheduleRefresh(
     return result;
   } catch (err) {
     if (err instanceof LockTimeoutError) {
-      debug?.("scheduleRefresh: could not acquire lock, another tab is handling refresh");
+      debug?.(
+        "scheduleRefresh: could not acquire lock, another tab is handling refresh"
+      );
       // This is fine - another tab is already refreshing
       return;
     }
@@ -715,22 +721,35 @@ export async function refreshTokens({
     return result;
   } catch (err) {
     if (err instanceof LockTimeoutError) {
-      debug?.("refreshTokens: could not acquire lock, another process is refreshing");
+      debug?.(
+        "refreshTokens: could not acquire lock, another process is refreshing"
+      );
       // Silently return the current tokens - another tab is handling the refresh
       const currentTokens = await retrieveTokens();
-      if (currentTokens?.accessToken && currentTokens?.idToken && currentTokens?.expireAt) {
+      if (
+        currentTokens?.accessToken &&
+        currentTokens?.idToken &&
+        currentTokens?.expireAt &&
+        currentTokens?.refreshToken
+      ) {
         return {
           accessToken: currentTokens.accessToken,
           idToken: currentTokens.idToken,
           expireAt: currentTokens.expireAt,
-          username: currentTokens.username!,
-          refreshToken: currentTokens.refreshToken!,
-          ...(currentTokens.deviceKey && { deviceKey: currentTokens.deviceKey }),
-          ...(currentTokens.authMethod && { authMethod: currentTokens.authMethod }),
+          username: currentTokens.username,
+          refreshToken: currentTokens.refreshToken,
+          ...(currentTokens.deviceKey && {
+            deviceKey: currentTokens.deviceKey,
+          }),
+          ...(currentTokens.authMethod && {
+            authMethod: currentTokens.authMethod,
+          }),
         };
       }
       // If no valid tokens, throw error
-      throw new Error("Another refresh in progress and no valid tokens available");
+      throw new Error(
+        "Another refresh in progress and no valid tokens available"
+      );
     }
     throw err;
   }
@@ -770,7 +789,6 @@ if (isBrowserEnvironment()) {
     "visibilitychange",
     handleVisibilityChange
   );
-
 
   // Polling watchdog: re-check every 5 minutes to catch any missed refresh
   // This is a fallback for cases where focus/visibility events are not fired
