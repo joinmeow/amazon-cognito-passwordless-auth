@@ -758,11 +758,13 @@ function _usePasswordless() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const abortController = new AbortController();
-    const { debug } = configure();
+    const { debug, clientId } = configure();
 
-    // Retrieve tokens from storage
-    retrieveTokens()
-      .then((tokens) => {
+    // Function to load tokens from storage
+    const loadTokens = async () => {
+      try {
+        const tokens = await retrieveTokens();
+        
         // Check if the operation was aborted
         if (abortController.signal.aborted) {
           debug?.("Token retrieval aborted - component unmounted");
@@ -780,8 +782,7 @@ function _usePasswordless() {
           );
           setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         // Check if the operation was aborted before handling error
         if (abortController.signal.aborted) {
           debug?.(
@@ -793,17 +794,42 @@ function _usePasswordless() {
         debug?.("Failed to retrieve tokens from storage:", err);
         // Make sure signInStatus gets recalculated on error
         dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-      })
-      .finally(() => {
+      } finally {
         // Check if the operation was aborted before final state update
         if (!abortController.signal.aborted) {
           dispatch({ type: "SET_INITIAL_LOADING", payload: false });
         }
-      });
+      }
+    };
+
+    // Initial load
+    void loadTokens();
+
+    // Listen for storage events to detect token updates from other tabs
+    const handleStorageChange = (e: StorageEvent) => {
+      // Check if this is a Cognito token-related key
+      if (e.key && clientId && e.key.includes(`CognitoIdentityServiceProvider.${clientId}`)) {
+        // Check if it's a token key (accessToken, idToken, or refreshToken)
+        if (e.key.includes(".accessToken") || 
+            e.key.includes(".idToken") || 
+            e.key.includes(".refreshToken")) {
+          debug?.(`Detected token change in storage for key: ${e.key}`);
+          // Reload tokens from storage
+          void loadTokens();
+        }
+      }
+    };
+
+    if (typeof globalThis !== "undefined" && globalThis.addEventListener) {
+      globalThis.addEventListener("storage", handleStorageChange);
+    }
 
     // Cleanup function
     return () => {
       abortController.abort();
+      if (typeof globalThis !== "undefined" && globalThis.removeEventListener) {
+        globalThis.removeEventListener("storage", handleStorageChange);
+      }
     };
   }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
 

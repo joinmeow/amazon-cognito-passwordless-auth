@@ -58,7 +58,7 @@ async function shouldAttemptRefresh(): Promise<boolean> {
     if (!tokens?.username) return false;
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
-    const REFRESH_WINDOW_MS = 10000; // Don't refresh if another tab did within 10s
+    const REFRESH_WINDOW_MS = 5000; // Don't refresh if another tab did within 5s
     const RANDOM_JITTER_MAX_MS = 100; // Random delay to reduce collisions
 
     // Add random jitter to reduce collision probability
@@ -388,10 +388,7 @@ async function scheduleRefreshUnlocked({
 
         await refreshTokens({
           abort,
-          tokensCb: async (refreshedTokens) => {
-            await tokensCb?.(refreshedTokens);
-            await markRefreshCompleted();
-          },
+          tokensCb,
           isRefreshingCb,
           tokens: latestTokens,
         });
@@ -589,6 +586,12 @@ export async function refreshTokens({
       throw new Error("Token refresh already in progress");
     }
 
+    // Check if another tab is about to refresh or just did
+    if (!force && !(await shouldAttemptRefresh())) {
+      logDebug("Another tab is handling refresh, skipping");
+      throw new Error("Another tab is handling refresh");
+    }
+
     try {
       refreshState.isRefreshing = true;
       isRefreshingCb?.(true);
@@ -756,6 +759,9 @@ export async function refreshTokens({
 
       const processedTokens = await processTokens(tokensFromRefresh, abort);
       refreshState.lastRefreshTime = Date.now();
+      
+      // Mark refresh as completed before calling tokensCb
+      await markRefreshCompleted();
 
       if (tokensCb) {
         await tokensCb(processedTokens as TokensFromRefresh);
@@ -787,9 +793,11 @@ export async function refreshTokens({
     debug?.("refreshTokens: lock released", lockKey);
     return result;
   } catch (err) {
-    if (err instanceof LockTimeoutError) {
+    if (err instanceof LockTimeoutError || (err instanceof Error && err.message === "Another tab is handling refresh")) {
       debug?.(
-        "refreshTokens: could not acquire lock, another process is refreshing"
+        err instanceof LockTimeoutError 
+          ? "refreshTokens: could not acquire lock, another process is refreshing"
+          : "refreshTokens: another tab is handling refresh (coordination check)"
       );
 
       // Wait briefly for the other tab's refresh to complete
@@ -883,7 +891,6 @@ export async function forceRefreshTokens(
     force: true,
   });
 
-  await markRefreshCompleted();
   void scheduleRefresh({ ...args });
 
   return refreshed;
