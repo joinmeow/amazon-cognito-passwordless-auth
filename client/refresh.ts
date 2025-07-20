@@ -45,7 +45,7 @@ const TAB_ID =
 
 /**
  * Refresh coordination using a probabilistic approach with timestamp tracking
- * 
+ *
  * Since localStorage doesn't provide atomic operations, we use a combination of:
  * 1. Timestamp-based coordination to prevent refresh storms
  * 2. Random jitter to reduce collision probability
@@ -63,16 +63,16 @@ async function shouldAttemptRefresh(): Promise<boolean> {
 
     // Add random jitter to reduce collision probability
     const jitter = Math.floor(Math.random() * RANDOM_JITTER_MAX_MS);
-    await new Promise(resolve => setTimeout(resolve, jitter));
+    await new Promise((resolve) => setTimeout(resolve, jitter));
 
     const now = Date.now();
-    
+
     // Check if another tab recently attempted refresh
     const lastAttemptValue = await storage.getItem(attemptKey);
     if (lastAttemptValue) {
       // Parse the timestamp, handling various formats for robustness
       let lastAttemptTime: number | null = null;
-      
+
       // Try parsing as "timestamp:tabId" format
       const match = lastAttemptValue.match(/^(\d+):/);
       if (match) {
@@ -81,11 +81,11 @@ async function shouldAttemptRefresh(): Promise<boolean> {
         // Fallback: plain timestamp
         lastAttemptTime = parseInt(lastAttemptValue, 10);
       }
-      
+
       // Check if the last attempt is recent and valid
       if (lastAttemptTime && !isNaN(lastAttemptTime)) {
         const timeSinceLastAttempt = now - lastAttemptTime;
-        
+
         if (timeSinceLastAttempt < REFRESH_WINDOW_MS) {
           logDebug(
             `Another tab attempted refresh ${timeSinceLastAttempt}ms ago, skipping`
@@ -101,7 +101,7 @@ async function shouldAttemptRefresh(): Promise<boolean> {
     // at the same time, that's okay as long as they all see a recent timestamp
     const ourValue = `${now}:${TAB_ID}`;
     await storage.setItem(attemptKey, ourValue);
-    
+
     logDebug(`Tab ${TAB_ID} proceeding with refresh attempt`);
     return true;
   } catch (err) {
@@ -144,10 +144,10 @@ async function markRefreshCompleted(): Promise<void> {
 
       const completedKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshCompleted`;
       await storage.setItem(completedKey, Date.now().toString());
-      
+
       // Also clear the attempt lock since refresh is complete
       await clearRefreshAttemptLock();
-      
+
       logDebug(`Tab ${TAB_ID} marked refresh as completed`);
       return; // Success
     } catch (err) {
@@ -791,23 +791,30 @@ export async function refreshTokens({
       debug?.(
         "refreshTokens: could not acquire lock, another process is refreshing"
       );
-      
+
       // Wait briefly for the other tab's refresh to complete
       const waitTime = 300; // ms
-      debug?.(`refreshTokens: waiting ${waitTime}ms for other tab's refresh to complete`);
-      
+      debug?.(
+        `refreshTokens: waiting ${waitTime}ms for other tab's refresh to complete`
+      );
+
       // Store the current token state before waiting
       const tokensBeforeWait = await retrieveTokens();
       const accessTokenBeforeWait = tokensBeforeWait?.accessToken;
-      
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-      
+
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+
       // Check if tokens were actually refreshed by comparing the access token
       const currentTokens = await retrieveTokens();
-      
+
       // If the access token changed, it means a refresh occurred
-      if (currentTokens?.accessToken && currentTokens.accessToken !== accessTokenBeforeWait) {
-        debug?.("refreshTokens: tokens were refreshed by another tab (access token changed)");
+      if (
+        currentTokens?.accessToken &&
+        currentTokens.accessToken !== accessTokenBeforeWait
+      ) {
+        debug?.(
+          "refreshTokens: tokens were refreshed by another tab (access token changed)"
+        );
         if (
           currentTokens.expireAt &&
           currentTokens.refreshToken &&
@@ -828,9 +835,11 @@ export async function refreshTokens({
           };
         }
       } else {
-        debug?.("refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)");
+        debug?.(
+          "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
+        );
       }
-      
+
       throw new Error(
         "Another refresh in progress and no valid tokens available"
       );
