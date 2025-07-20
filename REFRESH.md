@@ -13,38 +13,38 @@ graph TB
         WD1[Watchdog Timer]
         RS1[Refresh Scheduler]
     end
-    
+
     subgraph "Browser Tab 2"
         VE2[Visibility Event]
         WD2[Watchdog Timer]
         RS2[Refresh Scheduler]
     end
-    
+
     subgraph "Shared Storage"
         LA[lastRefreshAttempt]
         LC[lastRefreshCompleted]
         RL[refreshLock]
     end
-    
+
     subgraph "AWS Cognito"
         TE[Token Endpoint]
         RL2[Rate Limiter<br/>10 req/s]
     end
-    
+
     VE1 --> RS1
     WD1 --> RS1
     VE2 --> RS2
     WD2 --> RS2
-    
+
     RS1 -.->|Check/Set| LA
     RS2 -.->|Check/Set| LA
     RS1 -.->|Acquire| RL
     RS2 -.->|Acquire| RL
-    
+
     RS1 -->|Refresh| TE
     RS2 -->|Refresh| TE
     TE --> RL2
-    
+
     RS1 -.->|Mark| LC
     RS2 -.->|Mark| LC
 ```
@@ -76,21 +76,21 @@ sequenceDiagram
     participant Tab2
     participant Storage
     participant Lock
-    
+
     Note over Tab1,Tab2: Both tabs wake up simultaneously
-    
+
     Tab1->>Storage: Check lastRefreshAttempt
     Tab2->>Storage: Check lastRefreshAttempt
-    
+
     Storage-->>Tab1: No recent attempt
     Storage-->>Tab2: No recent attempt
-    
+
     Tab1->>Storage: Set lastRefreshAttempt = now
     Note over Tab2: 0-1s random delay
     Tab2->>Storage: Check lastRefreshAttempt
     Storage-->>Tab2: Tab1 attempted 500ms ago
     Note over Tab2: Skip (< 30s threshold)
-    
+
     Tab1->>Lock: Acquire refreshLock
     Lock-->>Tab1: Lock acquired
     Tab1->>Tab1: Perform token refresh
@@ -106,12 +106,12 @@ sequenceDiagram
 async function shouldAttemptRefresh(): Promise<boolean> {
   // 1. Get last attempt timestamp
   const lastAttemptStr = await storage.getItem(attemptKey);
-  
+
   // 2. Check if someone attempted within 30 seconds
   if (timeSinceLastAttempt < 30000) {
     return false; // Another tab is handling it
   }
-  
+
   // 3. Mark our attempt (race window exists here)
   await storage.setItem(attemptKey, Date.now().toString());
   return true;
@@ -133,6 +133,7 @@ graph LR
 ```
 
 **Lock Implementation Details:**
+
 - **Unique Lock ID**: Prevents race conditions
 - **Timestamp**: Enables stale lock detection (30s timeout)
 - **Storage Events**: Fast lock release detection
@@ -148,10 +149,10 @@ const actualLifetime = (payload.exp - payload.iat) * 1000;
 
 // Calculate buffer (30% of lifetime, bounded)
 const bufferTime = Math.max(
-  60000,                    // Min: 1 minute
+  60000, // Min: 1 minute
   Math.min(
-    0.3 * actualLifetime,   // 30% of lifetime
-    15 * 60 * 1000         // Max: 15 minutes
+    0.3 * actualLifetime, // 30% of lifetime
+    15 * 60 * 1000 // Max: 15 minutes
   )
 );
 
@@ -166,17 +167,17 @@ gantt
     title Token Lifetime and Refresh Timing
     dateFormat X
     axisFormat %M:%S
-    
+
     section 1hr Token
     Token Valid          :active, t1, 0, 3600
     Buffer (18min)       :crit, b1, 2520, 3600
     Refresh Window       :milestone, 2520, 0
-    
-    section 15min Token  
+
+    section 15min Token
     Token Valid          :active, t2, 0, 900
     Buffer (4.5min)      :crit, b2, 630, 900
     Refresh Window       :milestone, 630, 0
-    
+
     section 5min Token
     Token Valid          :active, t3, 0, 300
     Buffer (1min)        :crit, b3, 240, 300
@@ -192,23 +193,23 @@ graph TD
     A[Start Refresh] --> B{Auth Method?}
     B -->|REDIRECT| C[OAuth Token Endpoint]
     B -->|SRP/FIDO2/etc| D{Use GetTokensFromRefreshToken?}
-    
+
     C --> E[POST /oauth2/token]
-    
+
     D -->|Yes| F[GetTokensFromRefreshToken API]
     D -->|No| G[InitiateAuth REFRESH_TOKEN]
-    
+
     F --> H{Success?}
     G --> H
     E --> H
-    
+
     H -->|Yes| I[Process Tokens]
     H -->|No| J{Retryable?}
-    
+
     J -->|RefreshTokenReuse| K[Get Latest Token]
     J -->|NetworkError| L[Exponential Backoff]
     J -->|Other| M[Throw Error]
-    
+
     K --> F
     L --> F
 ```
@@ -246,31 +247,32 @@ sequenceDiagram
     participant Tab3
     participant Tab4
     participant Cognito
-    
+
     Note over Tab1,Tab4: 4 tabs wake up simultaneously
-    
+
     Tab1->>Tab1: Random delay 100ms
     Tab2->>Tab2: Random delay 450ms
     Tab3->>Tab3: Random delay 800ms
     Tab4->>Tab4: Random delay 250ms
-    
+
     Note over Tab1: Check & claim attempt
     Tab1->>Cognito: Refresh token
-    
+
     Note over Tab4: Check attempt (250ms)
     Tab4->>Tab4: Skip (Tab1 attempted 150ms ago)
-    
+
     Note over Tab2: Check attempt (450ms)
     Tab2->>Tab2: Skip (Tab1 attempted 350ms ago)
-    
+
     Note over Tab3: Check attempt (800ms)
     Tab3->>Tab3: Skip (Tab1 attempted 700ms ago)
-    
+
     Cognito-->>Tab1: New tokens
     Tab1->>Tab1: Mark completed
 ```
 
 **Protection Mechanisms:**
+
 1. **Random Delay**: 0-1 second prevents simultaneous attempts
 2. **30-Second Window**: Only one refresh per 30s across all tabs
 3. **Storage Lock**: Serializes actual refresh operations
@@ -280,12 +282,12 @@ sequenceDiagram
 
 ### Latency Analysis
 
-| Scenario | Min Latency | Max Latency | Notes |
-|----------|-------------|-------------|-------|
-| Tab Wake | 0ms | 1000ms | Random delay |
-| Lock Acquisition | 0ms | 5000ms | Timeout limit |
-| Refresh API Call | 200ms | 3000ms | Network dependent |
-| Total E2E | 200ms | 9000ms | Worst case with retries |
+| Scenario         | Min Latency | Max Latency | Notes                   |
+| ---------------- | ----------- | ----------- | ----------------------- |
+| Tab Wake         | 0ms         | 1000ms      | Random delay            |
+| Lock Acquisition | 0ms         | 5000ms      | Timeout limit           |
+| Refresh API Call | 200ms       | 3000ms      | Network dependent       |
+| Total E2E        | 200ms       | 9000ms      | Worst case with retries |
 
 ### Storage Operations
 
