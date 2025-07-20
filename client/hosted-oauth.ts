@@ -455,9 +455,12 @@ async function clear() {
     await withStorageLock(oauthLockKey, async () => clearInternal());
   } catch (error) {
     if (error instanceof LockTimeoutError) {
-      debug?.("⏱️ [OAuth] Lock timeout during clear");
-      // In this case, we might want to force clear anyway
-      await clearInternal();
+      debug?.(
+        "⏱️ [OAuth] Lock timeout during clear - another OAuth operation is in progress"
+      );
+      throw new Error(
+        "Cannot clear OAuth state: another OAuth operation is in progress. Please try again."
+      );
     } else {
       throw error;
     }

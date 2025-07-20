@@ -834,14 +834,12 @@ export async function refreshTokens({
             }),
           };
 
-          // Call the callback to update UI state
           if (tokensCb) {
             await tokensCb(refreshedTokens);
           }
 
           return refreshedTokens;
         } else {
-          // Access token changed but some required fields are missing
           debug?.(
             "refreshTokens: tokens were refreshed but missing required fields",
             {
@@ -858,8 +856,6 @@ export async function refreshTokens({
         debug?.(
           "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
         );
-
-        // Throw error only when tokens weren't refreshed
         throw new Error(
           "Another refresh in progress and no valid tokens available"
         );
