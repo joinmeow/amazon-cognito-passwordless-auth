@@ -820,7 +820,7 @@ export async function refreshTokens({
           currentTokens.refreshToken &&
           currentTokens.username
         ) {
-          return {
+          const refreshedTokens: TokensFromRefresh = {
             accessToken: currentTokens.accessToken,
             ...(currentTokens.idToken && { idToken: currentTokens.idToken }),
             expireAt: currentTokens.expireAt,
@@ -833,16 +833,37 @@ export async function refreshTokens({
               authMethod: currentTokens.authMethod,
             }),
           };
+
+          // Call the callback to update UI state
+          if (tokensCb) {
+            await tokensCb(refreshedTokens);
+          }
+
+          return refreshedTokens;
+        } else {
+          // Access token changed but some required fields are missing
+          debug?.(
+            "refreshTokens: tokens were refreshed but missing required fields",
+            {
+              hasExpireAt: !!currentTokens.expireAt,
+              hasRefreshToken: !!currentTokens.refreshToken,
+              hasUsername: !!currentTokens.username,
+            }
+          );
+          throw new Error(
+            "Tokens were refreshed by another tab but are incomplete"
+          );
         }
       } else {
         debug?.(
           "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
         );
-      }
 
-      throw new Error(
-        "Another refresh in progress and no valid tokens available"
-      );
+        // Throw error only when tokens weren't refreshed
+        throw new Error(
+          "Another refresh in progress and no valid tokens available"
+        );
+      }
     }
     throw err;
   }
