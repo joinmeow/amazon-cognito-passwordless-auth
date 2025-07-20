@@ -764,7 +764,7 @@ function _usePasswordless() {
     const loadTokens = async () => {
       try {
         const tokens = await retrieveTokens();
-        
+
         // Check if the operation was aborted
         if (abortController.signal.aborted) {
           debug?.("Token retrieval aborted - component unmounted");
@@ -808,11 +808,17 @@ function _usePasswordless() {
     // Listen for storage events to detect token updates from other tabs
     const handleStorageChange = (e: StorageEvent) => {
       // Check if this is a Cognito token-related key
-      if (e.key && clientId && e.key.includes(`CognitoIdentityServiceProvider.${clientId}`)) {
+      if (
+        e.key &&
+        clientId &&
+        e.key.includes(`CognitoIdentityServiceProvider.${clientId}`)
+      ) {
         // Check if it's a token key (accessToken, idToken, or refreshToken)
-        if (e.key.includes(".accessToken") || 
-            e.key.includes(".idToken") || 
-            e.key.includes(".refreshToken")) {
+        if (
+          e.key.includes(".accessToken") ||
+          e.key.includes(".idToken") ||
+          e.key.includes(".refreshToken")
+        ) {
           debug?.(`Detected token change in storage for key: ${e.key}`);
           // Reload tokens from storage
           void loadTokens();

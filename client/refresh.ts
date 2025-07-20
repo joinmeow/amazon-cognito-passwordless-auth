@@ -759,7 +759,7 @@ export async function refreshTokens({
 
       const processedTokens = await processTokens(tokensFromRefresh, abort);
       refreshState.lastRefreshTime = Date.now();
-      
+
       // Mark refresh as completed before calling tokensCb
       await markRefreshCompleted();
 
@@ -793,9 +793,13 @@ export async function refreshTokens({
     debug?.("refreshTokens: lock released", lockKey);
     return result;
   } catch (err) {
-    if (err instanceof LockTimeoutError || (err instanceof Error && err.message === "Another tab is handling refresh")) {
+    if (
+      err instanceof LockTimeoutError ||
+      (err instanceof Error &&
+        err.message === "Another tab is handling refresh")
+    ) {
       debug?.(
-        err instanceof LockTimeoutError 
+        err instanceof LockTimeoutError
           ? "refreshTokens: could not acquire lock, another process is refreshing"
           : "refreshTokens: another tab is handling refresh (coordination check)"
       );
