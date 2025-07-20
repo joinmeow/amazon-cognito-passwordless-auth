@@ -757,17 +757,30 @@ export async function refreshTokens({
         throw error;
       }
 
-      const processedTokens = await processTokens(tokensFromRefresh, abort);
-      refreshState.lastRefreshTime = Date.now();
+      let processedTokens: TokensFromRefresh;
+      try {
+        processedTokens = (await processTokens(
+          tokensFromRefresh,
+          abort
+        )) as TokensFromRefresh;
+        refreshState.lastRefreshTime = Date.now();
 
-      // Mark refresh as completed before calling tokensCb
-      await markRefreshCompleted();
+        // Call tokensCb first - if it fails, we don't want to mark as completed
+        if (tokensCb) {
+          await tokensCb(processedTokens);
+        }
 
-      if (tokensCb) {
-        await tokensCb(processedTokens as TokensFromRefresh);
+        // Only mark as completed after everything succeeds
+        await markRefreshCompleted();
+      } catch (error) {
+        // If anything fails after we got new tokens, we need to clear the attempt lock
+        // so other tabs can retry
+        logDebug("Error during token processing or callback:", error);
+        await clearRefreshAttemptLock();
+        throw error;
       }
 
-      return processedTokens as TokensFromRefresh;
+      return processedTokens;
     } finally {
       refreshState.isRefreshing = false;
       isRefreshingCb?.(false);
