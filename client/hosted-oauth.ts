@@ -17,6 +17,7 @@ import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
 import { storeTokens } from "./storage.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
+import { withStorageLock, LockTimeoutError } from "./lock.js";
 
 const STATE_KEY = "cognito_oauth_state";
 const PKCE_KEY = "cognito_oauth_pkce";
@@ -70,9 +71,28 @@ export async function signInWithRedirect({
 
   const { verifier, challenge, method } = await generatePkcePair();
 
-  await cfg.storage.setItem(STATE_KEY, state);
-  await cfg.storage.setItem(PKCE_KEY, verifier);
-  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "true");
+  // Wrap OAuth state storage in a lock to prevent race conditions
+  const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
+
+  debug?.("🔒 [OAuth] Acquiring lock for OAuth state storage");
+
+  try {
+    await withStorageLock(oauthLockKey, async () => {
+      await cfg.storage.setItem(STATE_KEY, state);
+      await cfg.storage.setItem(PKCE_KEY, verifier);
+      await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "true");
+    });
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      debug?.("⏱️ [OAuth] Lock timeout - another OAuth operation in progress");
+      throw new Error(
+        "Another OAuth operation is in progress. Please try again."
+      );
+    }
+    throw error;
+  }
+
+  debug?.("✅ [OAuth] OAuth state stored successfully");
 
   const query: Record<string, string> = {
     client_id: cfg.clientId,
@@ -180,15 +200,28 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
   const returnedState = url.searchParams.get("state");
   debug?.(`Returned state parameter: ${returnedState?.substring(0, 10)}...`);
 
-  const storedState = await cfg.storage.getItem(STATE_KEY);
-  debug?.(`Stored state from browser: ${storedState?.substring(0, 10)}...`);
+  // Wrap OAuth state validation in a lock
+  const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
 
-  if (!returnedState || returnedState !== storedState) {
-    debug?.(
-      "OAuth state mismatch - possible CSRF attack or invalidated session"
-    );
-    await clear();
-    throw new Error("OAuth state mismatch");
+  try {
+    await withStorageLock(oauthLockKey, async () => {
+      const storedState = await cfg.storage.getItem(STATE_KEY);
+      debug?.(`Stored state from browser: ${storedState?.substring(0, 10)}...`);
+
+      if (!returnedState || returnedState !== storedState) {
+        debug?.(
+          "OAuth state mismatch - possible CSRF attack or invalidated session"
+        );
+        await clearInternal();
+        throw new Error("OAuth state mismatch");
+      }
+    });
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      debug?.("⏱️ [OAuth] Lock timeout during state validation");
+      throw new Error("OAuth operation in progress. Please try again.");
+    }
+    throw error;
   }
 
   debug?.("OAuth state validation successful");
@@ -285,8 +318,22 @@ async function exchangeCodeForTokens(code: string) {
     debug?.(`Using absolute URL for token exchange: ${fullRedirectUrl}`);
   }
 
-  const verifier = (await cfg.storage.getItem(PKCE_KEY)) ?? "";
-  debug?.(`PKCE verifier retrieved: ${verifier ? "present" : "missing"}`);
+  // Wrap PKCE retrieval in a lock to ensure consistency
+  const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
+  let verifier = "";
+
+  try {
+    await withStorageLock(oauthLockKey, async () => {
+      verifier = (await cfg.storage.getItem(PKCE_KEY)) ?? "";
+      debug?.(`PKCE verifier retrieved: ${verifier ? "present" : "missing"}`);
+    });
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      debug?.("⏱️ [OAuth] Lock timeout during PKCE retrieval");
+      throw new Error("OAuth operation in progress. Please try again.");
+    }
+    throw error;
+  }
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -386,7 +433,7 @@ async function exchangeCodeForTokens(code: string) {
   debug?.("Tokens successfully stored from code exchange");
 }
 
-async function clear() {
+async function clearInternal() {
   const cfg = configure();
   const { debug } = cfg;
 
@@ -395,6 +442,26 @@ async function clear() {
   await cfg.storage.removeItem(PKCE_KEY);
   await cfg.storage.removeItem(OAUTH_IN_PROGRESS_KEY);
   debug?.("OAuth storage keys cleared");
+}
+
+async function clear() {
+  const cfg = configure();
+  const { debug } = cfg;
+  const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
+
+  debug?.("🔒 [OAuth] Acquiring lock for clearing OAuth state");
+
+  try {
+    await withStorageLock(oauthLockKey, async () => clearInternal());
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      debug?.("⏱️ [OAuth] Lock timeout during clear");
+      // In this case, we might want to force clear anyway
+      await clearInternal();
+    } else {
+      throw error;
+    }
+  }
 }
 
 // Utility re-exports for other modules

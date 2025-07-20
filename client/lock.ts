@@ -19,20 +19,14 @@ import { configure } from "./config.js";
  */
 export class LockTimeoutError extends Error {
   constructor(key: string, timeout: number) {
-    super(`Timeout acquiring lock: ${key} after ${timeout}ms`);
+    super(`Timeout acquiring lock '${key}' after ${timeout}ms`);
     this.name = "LockTimeoutError";
   }
 }
 
 const DEFAULT_RETRY_DELAY_MS = 50;
-const DEFAULT_TIMEOUT_MS = 5000;
-// Stale lock timeout should be significantly longer than acquisition timeout
-// to avoid confusion. A lock is considered stale if held longer than this.
-const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds - 6x the acquisition timeout
-
-// In-process FIFO lock queue
-const inProcessLockMap = new Map<string, Promise<void>>();
-const MAX_LOCK_ENTRIES = 100;
+const DEFAULT_TIMEOUT_MS = 15000; // 15 seconds to accommodate worst-case refresh (9s) + buffer
+const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,14 +41,13 @@ interface LockData {
  * Generate a unique lock ID
  */
 function generateLockId(): string {
-  // Use crypto.randomUUID if available, fallback to timestamp + random
   if (
     typeof globalThis.crypto !== "undefined" &&
     globalThis.crypto.randomUUID
   ) {
     return globalThis.crypto.randomUUID();
   }
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 }
 
 /**
@@ -75,7 +68,7 @@ function parseLockData(value: string | null | undefined): LockData | null {
       return data as LockData;
     }
   } catch {
-    // Handle legacy "true" locks for backward compatibility
+    // Handle legacy locks
     if (value === "true") {
       return { id: "legacy", timestamp: 0 };
     }
@@ -84,8 +77,7 @@ function parseLockData(value: string | null | undefined): LockData | null {
 }
 
 /**
- * Check if a lock is stale based on timestamp
- * A lock is stale if it's older than STALE_LOCK_TIMEOUT_MS
+ * Check if a lock is stale
  */
 function isLockStale(lockData: LockData): boolean {
   const age = Date.now() - lockData.timestamp;
@@ -93,23 +85,7 @@ function isLockStale(lockData: LockData): boolean {
 }
 
 /**
- * Clean up the in-process lock map if it gets too large
- * This prevents memory leaks in long-running browser sessions
- */
-function cleanupLockMapIfNeeded(): void {
-  if (inProcessLockMap.size > MAX_LOCK_ENTRIES) {
-    const { debug } = configure();
-    debug?.(
-      `withStorageLock: cleaning up lock map, size was ${inProcessLockMap.size}`
-    );
-    inProcessLockMap.clear();
-  }
-}
-
-/**
- * Acquire a simple storage-based lock on `key`, run `fn`, then release the lock.
- * Retries until timeoutMs if lock is already held.
- * Uses an in-process lock to ensure proper ordering within the same tab.
+ * Simplified storage-based lock without in-process queue
  */
 export async function withStorageLock<T>(
   key: string,
@@ -125,69 +101,12 @@ export async function withStorageLock<T>(
     throw new DOMException("Operation aborted", "AbortError");
   }
 
-  // Clean up lock map if it's getting too large
-  cleanupLockMapIfNeeded();
-
-  // Always use in-process FIFO lock to ensure proper ordering
-  let releaseInProcess: () => void;
-  const previous = inProcessLockMap.get(key) || Promise.resolve();
-  const nextLockPromise = new Promise<void>((resolve) => {
-    releaseInProcess = resolve;
-  });
-  inProcessLockMap.set(key, nextLockPromise);
-
-  // Wait for any previous in-process lock holders, but respect timeout
-  const startTime = Date.now();
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new LockTimeoutError(key, timeoutMs)), timeoutMs);
-  });
-
-  // Add abort signal to the race if provided
-  const promises: Promise<unknown>[] = [previous, timeoutPromise];
-  if (abort) {
-    promises.push(
-      new Promise<never>((_, reject) => {
-        abort.addEventListener(
-          "abort",
-          () => {
-            reject(new DOMException("Operation aborted", "AbortError"));
-          },
-          { once: true }
-        );
-      })
-    );
-  }
-
-  try {
-    await Promise.race(promises);
-  } catch (err) {
-    // Clean up on timeout
-    releaseInProcess!();
-    if (inProcessLockMap.get(key) === nextLockPromise) {
-      inProcessLockMap.delete(key);
-    }
-    throw err;
-  }
-
-  // Adjust remaining timeout after waiting in queue
-  const elapsedTime = Date.now() - startTime;
-  const remainingTimeout = Math.max(0, timeoutMs - elapsedTime);
-  if (remainingTimeout === 0) {
-    // Clean up if we've already timed out
-    releaseInProcess!();
-    if (inProcessLockMap.get(key) === nextLockPromise) {
-      inProcessLockMap.delete(key);
-    }
-    throw new LockTimeoutError(key, remainingTimeout);
-  }
-
   const start = Date.now();
   let lockReleased = false;
   const isBrowser =
     typeof globalThis !== "undefined" &&
     typeof globalThis.addEventListener === "function";
   let onStorage: (e: StorageEvent) => void = () => {};
-  let storageEventTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // Generate unique lock ID for this attempt
   const lockId = generateLockId();
@@ -196,6 +115,7 @@ export async function withStorageLock<T>(
     timestamp: Date.now(),
   };
 
+  // Setup storage event listener for faster lock release detection
   if (isBrowser) {
     onStorage = (e: StorageEvent) => {
       if (
@@ -204,33 +124,15 @@ export async function withStorageLock<T>(
       ) {
         debug?.("withStorageLock: storage event detected lock release", key);
         lockReleased = true;
-        // Clear the fallback timeout since we got the event
-        if (storageEventTimeout) {
-          clearTimeout(storageEventTimeout);
-          storageEventTimeout = undefined;
-        }
       }
     };
     globalThis.addEventListener("storage", onStorage);
-
-    // Fallback: periodically check even if storage events are unreliable
-    // This ensures we don't get stuck if storage events are missed
-    const checkInterval = Math.min(DEFAULT_RETRY_DELAY_MS * 2, 200); // Max 200ms
-    storageEventTimeout = setTimeout(function checkStorageFallback() {
-      if (!lockReleased) {
-        // Force a check by setting lockReleased to trigger the main loop check
-        // This is safer than duplicating the lock checking logic here
-        debug?.("withStorageLock: storage event fallback check", key);
-        storageEventTimeout = setTimeout(checkStorageFallback, checkInterval);
-      }
-    }, checkInterval);
   }
 
   try {
-    // Spin until storage lock is free, timeout, or notified by storage event
-    // Use adaptive polling with exponential backoff to reduce performance impact
+    // Poll until lock is free or timeout
     let pollDelay = DEFAULT_RETRY_DELAY_MS;
-    const maxPollDelay = 500; // Cap at 500ms
+    const maxPollDelay = 500;
     let consecutiveChecks = 0;
 
     while (!lockReleased) {
@@ -253,11 +155,11 @@ export async function withStorageLock<T>(
       }
 
       // Check timeout
-      if (Date.now() - start > remainingTimeout) {
+      if (Date.now() - start > timeoutMs) {
         debug?.("withStorageLock: timeout acquiring lock", key, {
           elapsed: Date.now() - start,
         });
-        throw new LockTimeoutError(key, remainingTimeout);
+        throw new LockTimeoutError(key, timeoutMs);
       }
 
       // Adaptive polling: increase delay after several consecutive checks
@@ -271,14 +173,10 @@ export async function withStorageLock<T>(
   } finally {
     if (isBrowser) {
       globalThis.removeEventListener("storage", onStorage);
-      // Clear any remaining storage event timeout
-      if (storageEventTimeout) {
-        clearTimeout(storageEventTimeout);
-      }
     }
   }
 
-  // Acquire storage lock with atomic check
+  // Acquire lock with atomic check
   let acquired = false;
   const maxAcquisitionAttempts = 3;
 
@@ -303,7 +201,6 @@ export async function withStorageLock<T>(
           ourId: lockId,
           actualId: verifyLock?.id,
           attempt,
-          elapsedMs: Date.now() - start,
         });
 
         // Small backoff before retry
@@ -317,7 +214,7 @@ export async function withStorageLock<T>(
         key,
         err
       );
-      // Handle storage errors (quota exceeded, disabled storage, etc.)
+      // Handle storage errors
       if (attempt === maxAcquisitionAttempts) {
         throw new Error(
           `Failed to acquire lock due to storage error: ${String(err)}`
@@ -352,13 +249,6 @@ export async function withStorageLock<T>(
     } catch (err) {
       // Log but don't throw - the operation succeeded
       debug?.("withStorageLock: error releasing lock", key, err);
-    }
-
-    // Release in-process FIFO lock
-    releaseInProcess!();
-    // Clean up map entry if this was the last in queue
-    if (inProcessLockMap.get(key) === nextLockPromise) {
-      inProcessLockMap.delete(key);
     }
   }
 }
