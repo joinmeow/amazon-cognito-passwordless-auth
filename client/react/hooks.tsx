@@ -807,11 +807,6 @@ function _usePasswordless() {
     };
   }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
 
-  // 🛠  Keep tokensParsed in sync even if some paths bypass the helper wrapper
-  useEffect(() => {
-    parseAndSetTokens(tokens);
-  }, [tokens, parseAndSetTokens]);
-
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
   useEffect(() => {
     if (typeof PublicKeyCredential !== "undefined") {
@@ -1005,14 +1000,34 @@ function _usePasswordless() {
     return cleanup;
   }, [revalidateFido2Credentials]);
 
-  // Fetch TOTP MFA status when the user is signed in – exactly once per
-  // freshly issued access-token.
+  // Track last fetch time to prevent spam
+  const lastMfaFetchTimeRef = useRef<number>(0);
+  const MFA_FETCH_COOLDOWN = 5000; // 5 second cooldown between fetches
+
+  // Fetch TOTP MFA status when the user is signed in – with rate limiting
   useEffect(() => {
+    // Early return if not signed in or no token
     if (!isSignedIn || !tokens?.accessToken) return;
+
+    const now = Date.now();
+    const timeSinceLastFetch = now - lastMfaFetchTimeRef.current;
 
     // Skip if we've already fetched MFA status for this token value
     if (tokens.accessToken === lastFetchedMfaTokenRef.current) return;
+
+    // Skip if we fetched recently (within cooldown period)
+    if (timeSinceLastFetch < MFA_FETCH_COOLDOWN) {
+      const { debug } = configure();
+      debug?.(
+        `Skipping getUser call - cooldown active (${Math.round(
+          (MFA_FETCH_COOLDOWN - timeSinceLastFetch) / 1000
+        )}s remaining)`
+      );
+      return;
+    }
+
     lastFetchedMfaTokenRef.current = tokens.accessToken;
+    lastMfaFetchTimeRef.current = now;
 
     const abortController = new AbortController();
 
