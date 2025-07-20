@@ -29,7 +29,9 @@ import {
 } from "./model.js";
 import { scheduleRefresh } from "./refresh.js";
 import { handleDeviceConfirmation } from "./device.js";
-import { withStorageLock } from "./lock.js";
+import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { parseJwtPayload } from "./util.js";
+import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
 /**
  * Process tokens after authentication or refresh.
@@ -44,7 +46,7 @@ import { withStorageLock } from "./lock.js";
  * @param abort Optional abort signal
  * @returns The processed tokens (with device key and other metadata)
  */
-export async function processTokens(
+async function processTokensInternal(
   tokens: TokensFromSignIn | TokensFromRefresh,
   abort?: AbortSignal
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
@@ -181,6 +183,59 @@ export async function processTokens(
 
   debug?.("✅ [Process Tokens] Token processing completed successfully");
   return tokens;
+}
+
+/**
+ * Process tokens with storage lock protection to prevent race conditions
+ * in multi-tab/multi-process scenarios.
+ */
+export async function processTokens(
+  tokens: TokensFromSignIn | TokensFromRefresh,
+  abort?: AbortSignal
+): Promise<TokensFromSignIn | TokensFromRefresh> {
+  const { clientId, debug } = configure();
+
+  // Extract username for lock key
+  let username = tokens.username;
+  if (!username) {
+    // Parse from access token if not provided
+    try {
+      const accessPayload = parseJwtPayload<CognitoAccessTokenPayload>(
+        tokens.accessToken
+      );
+      username = accessPayload.username;
+    } catch (err) {
+      debug?.("Failed to parse username from access token:", err);
+      // Continue to throw the more specific error below
+    }
+  }
+
+  if (!username) {
+    throw new Error("Could not determine username for processTokens lock");
+  }
+
+  const lockKey = `Passwordless.${clientId}.${username}.authLock`;
+
+  debug?.("🔒 [Process Tokens] Acquiring auth lock for user:", username);
+
+  try {
+    return await withStorageLock(
+      lockKey,
+      async () => processTokensInternal(tokens, abort),
+      undefined, // use default timeout
+      abort
+    );
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      debug?.(
+        "⏱️ [Process Tokens] Lock timeout - another auth operation in progress"
+      );
+      throw new Error(
+        "Another authentication operation is in progress. Please try again."
+      );
+    }
+    throw error;
+  }
 }
 
 /**

@@ -20,7 +20,7 @@ import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withStorageLock } from "./lock.js";
+import { withStorageLock, LockTimeoutError } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -29,11 +29,143 @@ type RefreshState = {
   /** Wall-clock timestamp (ms) when the current refreshTimer is scheduled to fire */
   nextRefreshTime?: number;
   lastRefreshTime?: number;
+  /** Timer for delayed visibility change handling */
+  visibilityTimer?: ReturnType<typeof setTimeout>;
 };
 
 const refreshState: RefreshState = {
   isRefreshing: false,
 };
+
+// Generate unique tab ID for this tab
+const TAB_ID =
+  typeof globalThis.crypto !== "undefined" && globalThis.crypto.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+
+/**
+ * Refresh coordination using a probabilistic approach with timestamp tracking
+ *
+ * Since localStorage doesn't provide atomic operations, we use a combination of:
+ * 1. Timestamp-based coordination to prevent refresh storms
+ * 2. Random jitter to reduce collision probability
+ * 3. Simple last-write-wins semantics
+ */
+async function shouldAttemptRefresh(): Promise<boolean> {
+  try {
+    const { storage, clientId } = configure();
+    const tokens = await retrieveTokens();
+    if (!tokens?.username) return false;
+
+    const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
+    const REFRESH_WINDOW_MS = 10000; // Don't refresh if another tab did within 10s
+    const RANDOM_JITTER_MAX_MS = 100; // Random delay to reduce collisions
+
+    // Add random jitter to reduce collision probability
+    const jitter = Math.floor(Math.random() * RANDOM_JITTER_MAX_MS);
+    await new Promise((resolve) => setTimeout(resolve, jitter));
+
+    const now = Date.now();
+
+    // Check if another tab recently attempted refresh
+    const lastAttemptValue = await storage.getItem(attemptKey);
+    if (lastAttemptValue) {
+      // Parse the timestamp, handling various formats for robustness
+      let lastAttemptTime: number | null = null;
+
+      // Try parsing as "timestamp:tabId" format
+      const match = lastAttemptValue.match(/^(\d+):/);
+      if (match) {
+        lastAttemptTime = parseInt(match[1], 10);
+      } else if (/^\d+$/.test(lastAttemptValue)) {
+        // Fallback: plain timestamp
+        lastAttemptTime = parseInt(lastAttemptValue, 10);
+      }
+
+      // Check if the last attempt is recent and valid
+      if (lastAttemptTime && !isNaN(lastAttemptTime)) {
+        const timeSinceLastAttempt = now - lastAttemptTime;
+
+        if (timeSinceLastAttempt < REFRESH_WINDOW_MS) {
+          logDebug(
+            `Another tab attempted refresh ${timeSinceLastAttempt}ms ago, skipping`
+          );
+          return false;
+        }
+      }
+      // If we can't parse the value, treat it as stale and proceed
+    }
+
+    // Record our attempt timestamp
+    // We don't need to verify this write succeeded - if multiple tabs write
+    // at the same time, that's okay as long as they all see a recent timestamp
+    const ourValue = `${now}:${TAB_ID}`;
+    await storage.setItem(attemptKey, ourValue);
+
+    logDebug(`Tab ${TAB_ID} proceeding with refresh attempt`);
+    return true;
+  } catch (err) {
+    // If storage fails, don't attempt refresh to avoid uncoordinated refreshes
+    logDebug("Error checking refresh coordination, skipping refresh:", err);
+    return false;
+  }
+}
+
+/**
+ * Clear the refresh attempt lock after successful refresh
+ */
+async function clearRefreshAttemptLock(): Promise<void> {
+  try {
+    const { storage, clientId } = configure();
+    const tokens = await retrieveTokens();
+    if (!tokens?.username) return;
+
+    const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
+    await storage.removeItem(attemptKey);
+    logDebug(`Tab ${TAB_ID} cleared refresh attempt lock`);
+  } catch (err) {
+    // Non-critical error, just log it
+    logDebug("Error clearing refresh attempt lock:", err);
+  }
+}
+
+/**
+ * Mark refresh as completed with retry logic
+ */
+async function markRefreshCompleted(): Promise<void> {
+  const maxRetries = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { storage, clientId } = configure();
+      const tokens = await retrieveTokens();
+      if (!tokens?.username) return;
+
+      const completedKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshCompleted`;
+      await storage.setItem(completedKey, Date.now().toString());
+
+      // Also clear the attempt lock since refresh is complete
+      await clearRefreshAttemptLock();
+
+      logDebug(`Tab ${TAB_ID} marked refresh as completed`);
+      return; // Success
+    } catch (err) {
+      lastError = err;
+      logDebug(
+        `Error marking refresh completed (attempt ${attempt}/${maxRetries}):`,
+        err
+      );
+      if (attempt < maxRetries) {
+        // Wait before retry with exponential backoff
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
+  }
+
+  // Log final failure but don't throw - this is supplementary
+  logDebug("Failed to mark refresh completed after retries:", lastError);
+}
 
 // Basic browser environment detection
 function isBrowserEnvironment(): boolean {
@@ -51,7 +183,6 @@ function isDocumentVisible(): boolean {
 
 // Handle visibility change for browser environments
 function handleVisibilityChange() {
-  // Debug: visibilitychange event fired
   logDebug(
     `visibilitychange event: document.hidden=${globalThis.document.hidden}`
   );
@@ -71,13 +202,37 @@ function handleVisibilityChange() {
     logDebug(
       `handleVisibilityChange: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
     );
-    logDebug(
-      "handleVisibilityChange: document is visible, evaluating refresh eligibility"
-    );
 
     if (Date.now() - lastRefresh > timeThreshold) {
-      logDebug("handleVisibilityChange: threshold passed, scheduling refresh");
-      void scheduleRefresh();
+      // Clear any existing visibility timer
+      if (refreshState.visibilityTimer) {
+        clearTimeout(refreshState.visibilityTimer);
+        refreshState.visibilityTimer = undefined;
+      }
+
+      // Small random delay to prevent thundering herd
+      const randomDelay = Math.random() * 1000; // 0-1 second
+      logDebug(
+        `handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`
+      );
+
+      refreshState.visibilityTimer = setTimeout(() => {
+        refreshState.visibilityTimer = undefined;
+
+        // Handle async operations
+        void (async () => {
+          // Check if we should attempt
+          if (!(await shouldAttemptRefresh())) {
+            return;
+          }
+
+          // Re-check conditions after delay
+          if (!refreshState.isRefreshing && !refreshState.refreshTimer) {
+            logDebug("handleVisibilityChange: executing delayed refresh");
+            void scheduleRefresh();
+          }
+        })();
+      }, randomDelay);
     }
   }
 }
@@ -123,8 +278,7 @@ async function scheduleRefreshUnlocked({
   }
 
   try {
-    // Clear any existing timer. The new schedule will always be the single
-    // source of truth.
+    // Clear any existing timer
     const clearExistingTimer = () => {
       if (refreshState.refreshTimer) {
         refreshState.refreshTimer();
@@ -140,7 +294,6 @@ async function scheduleRefreshUnlocked({
 
     if (!tokens?.expireAt) {
       logDebug("No valid tokens found, skipping refresh scheduling");
-      // Notify caller that we have no valid tokens
       if (tokensCb) {
         try {
           await tokensCb(null);
@@ -158,10 +311,6 @@ async function scheduleRefreshUnlocked({
     // If token is already expired or expires very soon, refresh immediately
     if (timeUntilExpiry <= 60000) {
       logDebug(
-        `scheduleRefreshUnlocked: immediate refresh path, timeUntilExpiry=${timeUntilExpiry}ms`
-      );
-      // 60 seconds or less
-      logDebug(
         `Token expires in ${Math.round(timeUntilExpiry / 1000)}s, refreshing now`
       );
 
@@ -174,14 +323,14 @@ async function scheduleRefreshUnlocked({
           force: true,
         });
 
+        // Mark as completed
+        await markRefreshCompleted();
+
         // After a successful immediate refresh, schedule the next refresh
-        // based on the new token's expiry time
         if (refreshedTokens?.expireAt) {
           const newTimeUntilExpiry =
             refreshedTokens.expireAt.valueOf() - Date.now();
           if (newTimeUntilExpiry > 60000) {
-            // Recursively call ourselves to schedule the next refresh
-            // This will go through the normal scheduling path
             logDebug("Immediate refresh complete, scheduling next refresh");
             return scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
           }
@@ -192,30 +341,21 @@ async function scheduleRefreshUnlocked({
       return;
     }
 
-    // Standard case: schedule refresh with dynamic buffer based on actual token lifetime
+    // Standard case: schedule refresh with dynamic buffer
     let refreshDelay: number;
 
     try {
-      // Try to get actual token lifetime from the access token JWT claims
       if (tokens.accessToken) {
         const payload = parseJwtPayload<CognitoAccessTokenPayload>(
           tokens.accessToken
         );
         if (payload.iat && payload.exp) {
-          // Calculate actual token lifetime from JWT claims (in seconds, convert to ms)
           const actualLifetime = (payload.exp - payload.iat) * 1000;
-          // Use 30% of actual lifetime as buffer, but ensure reasonable bounds
           const bufferTime = Math.max(
-            60000, // Minimum 1 minute buffer
-            Math.min(
-              0.3 * actualLifetime, // 30% of actual lifetime
-              15 * 60 * 1000 // Maximum 15 minutes buffer
-            )
+            60000,
+            Math.min(0.3 * actualLifetime, 15 * 60 * 1000)
           );
           refreshDelay = Math.max(0, timeUntilExpiry - bufferTime);
-          logDebug(
-            `scheduleRefreshUnlocked dynamic calc: timeUntilExpiry=${timeUntilExpiry}ms, actualLifetime=${actualLifetime}ms, bufferTime=${bufferTime}ms, refreshDelay=${refreshDelay}ms`
-          );
           logDebug(
             `Using dynamic refresh timing: token lifetime=${Math.round(actualLifetime / 60000)}min, ` +
               `buffer=${Math.round(bufferTime / 60000)}min, delay=${Math.round(refreshDelay / 60000)}min`
@@ -227,7 +367,6 @@ async function scheduleRefreshUnlocked({
         throw new Error("No access token available");
       }
     } catch (err) {
-      // Fallback: use half of remaining time until expiry (previous robust approach)
       refreshDelay = Math.max(0, timeUntilExpiry / 2);
       logDebug(
         `Using fallback refresh timing (half remaining lifetime): delay=${Math.round(refreshDelay / 60000)}min`,
@@ -235,48 +374,35 @@ async function scheduleRefreshUnlocked({
       );
     }
 
-    // After we have determined `refreshDelay`
     const desiredFireTime = Date.now() + refreshDelay;
-
-    // Record scheduling info on the global state *before* creating the timer so
-    // concurrent calls have up-to-date information.
     refreshState.nextRefreshTime = desiredFireTime;
 
     const minutesUntilRefresh = Math.round(refreshDelay / (60 * 1000));
     logDebug(`Scheduling token refresh in ${minutesUntilRefresh} minutes`);
 
-    // Set the timer
     refreshState.refreshTimer = setTimeoutWallClock(async () => {
-      // Timer has fired: clear the pending timer so watchdog can run
       refreshState.refreshTimer = undefined;
-      // Clear meta as soon as the timer fires (regardless of refresh success)
       refreshState.nextRefreshTime = undefined;
       try {
-        // Re-read latest token info to avoid stale data
         const latestTokens = await retrieveTokens();
 
-        // Use standard refresh under lock/guard rather than forcing
         await refreshTokens({
           abort,
           tokensCb: async (refreshedTokens) => {
             await tokensCb?.(refreshedTokens);
-            // After a successful refresh, let the next natural event (like
-            // visibility change or watchdog) schedule the subsequent refresh.
-            // This prevents tight loops.
+            await markRefreshCompleted();
           },
           isRefreshingCb,
           tokens: latestTokens,
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
-        // Try again with backoff
         setTimeoutWallClock(() => {
           void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, 30000); // 30 second backoff
       }
     }, refreshDelay);
 
-    // Handle abort event
     abort?.addEventListener(
       "abort",
       () => {
@@ -293,7 +419,7 @@ async function scheduleRefreshUnlocked({
   }
 }
 
-// Atomic wrapper with per-user lock
+// Simplified wrapper with per-user lock
 export async function scheduleRefresh(
   args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
 ): Promise<void> {
@@ -301,25 +427,36 @@ export async function scheduleRefresh(
   const tokens0 = await retrieveTokens();
   const userIdentifier = tokens0?.username;
   if (!userIdentifier) {
-    // No user found, run unlocked
     debug?.("scheduleRefresh: no user, running unlocked");
     return scheduleRefreshUnlocked(args);
   }
 
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
-  // Acquire lock and execute schedule logic
   debug?.("scheduleRefresh: waiting for lock", lockKey);
-  const result = await withStorageLock(
-    lockKey,
-    async () => {
-      debug?.("scheduleRefresh: lock acquired", lockKey);
-      return scheduleRefreshUnlocked(args);
-    },
-    undefined,
-    args.abort
-  );
-  debug?.("scheduleRefresh: lock released", lockKey);
-  return result;
+
+  try {
+    const result = await withStorageLock(
+      lockKey,
+      async () => {
+        debug?.("scheduleRefresh: lock acquired", lockKey);
+        return scheduleRefreshUnlocked(args);
+      },
+      undefined,
+      args.abort
+    );
+    debug?.("scheduleRefresh: lock released", lockKey);
+    return result;
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      debug?.(
+        "scheduleRefresh: could not acquire lock, another tab is handling refresh"
+      );
+      // This is fine - another tab is already refreshing
+      return;
+    }
+    // Re-throw other errors
+    throw err;
+  }
 }
 
 /**
@@ -336,7 +473,6 @@ type TokenPayload = {
 
 /**
  * Refresh tokens using OAuth token endpoint
- * This handles refresh token rotation in OAuth flows
  */
 async function refreshTokensViaOAuth({
   refreshToken,
@@ -356,20 +492,14 @@ async function refreshTokensViaOAuth({
 
   debug?.("Using OAuth token endpoint for refresh token flow");
 
-  // Get the OAuth token endpoint
   const tokenEndpoint = getTokenEndpoint();
   debug?.(`Using OAuth token endpoint: ${tokenEndpoint}`);
 
-  // Build the request body for token refresh
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: clientId,
     refresh_token: refreshToken,
   });
-
-  // Note: Cognito's OAuth2 token endpoint does not accept device_key.
-  // Passing unknown parameters can break some proxy/WAF configurations, so we
-  // intentionally do NOT send the device key even if we have one.
 
   debug?.("Sending OAuth token refresh request");
 
@@ -428,7 +558,6 @@ async function refreshTokensViaOAuth({
 
 /**
  * Refresh tokens using the refresh token
- * Uses a simplified approach with basic retry
  */
 export async function refreshTokens({
   abort,
@@ -443,9 +572,7 @@ export async function refreshTokens({
   tokens?: TokenPayload;
   force?: boolean;
 } = {}): Promise<TokensFromRefresh> {
-  // Per-user cross-tab lock
   const { clientId } = configure();
-  // Determine user identifier (username or sub)
   let userIdentifier: string | undefined = tokens?.username;
   if (!userIdentifier) {
     const storedTokens = await retrieveTokens();
@@ -455,9 +582,8 @@ export async function refreshTokens({
     throw new Error("Cannot determine user identity for refresh lock");
   }
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
-  // Internal logic wrapped as a function
+
   const doRefresh = async (): Promise<TokensFromRefresh> => {
-    // Prevent concurrent in-tab refreshes
     if (refreshState.isRefreshing && !force) {
       logDebug("Token refresh already in progress");
       throw new Error("Token refresh already in progress");
@@ -467,24 +593,20 @@ export async function refreshTokens({
       refreshState.isRefreshing = true;
       isRefreshingCb?.(true);
 
-      // Get tokens if not provided
       if (!tokens) {
         tokens = await retrieveTokens();
       }
 
-      // Extract token properties safely
       const refreshToken = tokens?.refreshToken;
       const username = tokens?.username;
       const deviceKey = tokens?.deviceKey;
       const expireAt = tokens?.expireAt;
       const authMethod = tokens?.authMethod;
 
-      // Basic validation
       if (!refreshToken || !username) {
         throw new Error("Cannot refresh without refresh token and username");
       }
 
-      // Log refresh attempt
       if (expireAt) {
         const timeUntilExpiry = expireAt.valueOf() - Date.now();
         if (timeUntilExpiry > 0) {
@@ -500,18 +622,15 @@ export async function refreshTokens({
         }
       }
 
-      // Perform the token refresh
       let tokensFromRefresh: TokensFromRefresh;
 
       try {
-        // Determine refresh approach: OAuth for REDIRECT, else refresh token API or InitiateAuth
         const { debug, useGetTokensFromRefreshToken } = configure();
         let authResult;
         if (authMethod === "REDIRECT") {
           debug?.(
             "Using OAuth token endpoint for refresh since auth method is REDIRECT"
           );
-          // OAuth refresh
           const oauthResult = await refreshTokensViaOAuth({
             refreshToken,
             deviceKey,
@@ -531,10 +650,9 @@ export async function refreshTokens({
             debug?.(
               `Using Cognito GetTokensFromRefreshToken API (authMethod: ${authMethod || "unknown"})`
             );
-            // Try refresh, retry once on reuse error or transient network errors
             let lastError: Error | undefined;
-            let currentRefreshToken = refreshToken; // Mutable copy for retries
-            const maxRetries = 2;
+            let currentRefreshToken = refreshToken;
+            const maxRetries = 3;
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
               try {
@@ -543,7 +661,7 @@ export async function refreshTokens({
                   deviceKey,
                   abort,
                 });
-                break; // Success, exit retry loop
+                break;
               } catch (err) {
                 lastError = err as Error;
 
@@ -557,10 +675,10 @@ export async function refreshTokens({
                   const latestStored = await retrieveTokens();
                   const latestToken = latestStored?.refreshToken;
                   if (latestToken && latestToken !== currentRefreshToken) {
-                    currentRefreshToken = latestToken; // Update for next attempt
-                    continue; // Retry with new token
+                    currentRefreshToken = latestToken;
+                    continue;
                   } else {
-                    throw err; // No new token available
+                    throw err;
                   }
                 } else if (
                   attempt < maxRetries &&
@@ -574,13 +692,12 @@ export async function refreshTokens({
                     `Transient network error on attempt ${attempt}/${maxRetries}, retrying:`,
                     err.message
                   );
-                  // Small delay before retry
                   await new Promise((resolve) =>
                     setTimeout(resolve, 1000 * attempt)
                   );
                   continue;
                 } else {
-                  throw err; // Non-retryable error or max attempts reached
+                  throw err;
                 }
               }
             }
@@ -601,7 +718,6 @@ export async function refreshTokens({
           }
         }
 
-        // Derive a server-authoritative expiry timestamp from the AccessToken's `exp` claim.
         let expireAt: Date;
         try {
           const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(
@@ -609,7 +725,6 @@ export async function refreshTokens({
           );
           expireAt = new Date(exp * 1000);
         } catch {
-          // Fallback to local clock in case of unexpected token format
           expireAt = new Date(
             Date.now() + authResult.AuthenticationResult.ExpiresIn * 1000
           );
@@ -617,19 +732,14 @@ export async function refreshTokens({
 
         tokensFromRefresh = {
           accessToken: authResult.AuthenticationResult.AccessToken,
-          // idToken is optional in OAuth flows
           ...(authResult.AuthenticationResult.IdToken && {
             idToken: authResult.AuthenticationResult.IdToken,
           }),
           expireAt,
           username,
-          // As per AWS docs GetTokensFromRefreshToken always returns a new refresh
-          // token when rotation is enabled. We still fall back to the previous
-          // value as a safeguard when rotation is disabled.
           refreshToken:
             authResult.AuthenticationResult.RefreshToken ?? refreshToken,
           ...(deviceKey && { deviceKey }),
-          // Preserve the authentication method for future refreshes
           ...(authMethod && { authMethod }),
         };
 
@@ -638,21 +748,15 @@ export async function refreshTokens({
         );
       } catch (error) {
         logDebug("Token refresh failed:", error);
-        // Prevent infinite retry loops on refresh failure by updating lastRefreshTime
         refreshState.lastRefreshTime = Date.now();
+        // Clear the attempt lock on error so other tabs can retry
+        await clearRefreshAttemptLock();
         throw error;
       }
 
-      // Process tokens
-      logDebug(
-        `RefreshTokens: old refreshToken=${refreshToken}, new refreshToken=${tokensFromRefresh.refreshToken}`
-      );
       const processedTokens = await processTokens(tokensFromRefresh, abort);
-
-      // Update last refresh time
       refreshState.lastRefreshTime = Date.now();
 
-      // Invoke callback
       if (tokensCb) {
         await tokensCb(processedTokens as TokensFromRefresh);
       }
@@ -663,24 +767,102 @@ export async function refreshTokens({
       isRefreshingCb?.(false);
     }
   };
-  // Execute with lock, or bypass lock when forcing
+
   const { debug } = configure();
   if (force) {
     debug?.("refreshTokens: force=true, bypassing lock", lockKey);
     return doRefresh();
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
-  const result = await withStorageLock(
-    lockKey,
-    async () => {
-      debug?.("refreshTokens: lock acquired", lockKey);
-      return doRefresh();
-    },
-    undefined,
-    abort
-  );
-  debug?.("refreshTokens: lock released", lockKey);
-  return result;
+  try {
+    const result = await withStorageLock(
+      lockKey,
+      async () => {
+        debug?.("refreshTokens: lock acquired", lockKey);
+        return doRefresh();
+      },
+      undefined,
+      abort
+    );
+    debug?.("refreshTokens: lock released", lockKey);
+    return result;
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      debug?.(
+        "refreshTokens: could not acquire lock, another process is refreshing"
+      );
+
+      // Wait briefly for the other tab's refresh to complete
+      const waitTime = 300; // ms
+      debug?.(
+        `refreshTokens: waiting ${waitTime}ms for other tab's refresh to complete`
+      );
+
+      // Store the current token state before waiting
+      const tokensBeforeWait = await retrieveTokens();
+      const accessTokenBeforeWait = tokensBeforeWait?.accessToken;
+
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+      // Check if tokens were actually refreshed by comparing the access token
+      const currentTokens = await retrieveTokens();
+
+      // If the access token changed, it means a refresh occurred
+      if (
+        currentTokens?.accessToken &&
+        currentTokens.accessToken !== accessTokenBeforeWait
+      ) {
+        debug?.(
+          "refreshTokens: tokens were refreshed by another tab (access token changed)"
+        );
+        if (
+          currentTokens.expireAt &&
+          currentTokens.refreshToken &&
+          currentTokens.username
+        ) {
+          const refreshedTokens: TokensFromRefresh = {
+            accessToken: currentTokens.accessToken,
+            ...(currentTokens.idToken && { idToken: currentTokens.idToken }),
+            expireAt: currentTokens.expireAt,
+            username: currentTokens.username,
+            refreshToken: currentTokens.refreshToken,
+            ...(currentTokens.deviceKey && {
+              deviceKey: currentTokens.deviceKey,
+            }),
+            ...(currentTokens.authMethod && {
+              authMethod: currentTokens.authMethod,
+            }),
+          };
+
+          if (tokensCb) {
+            await tokensCb(refreshedTokens);
+          }
+
+          return refreshedTokens;
+        } else {
+          debug?.(
+            "refreshTokens: tokens were refreshed but missing required fields",
+            {
+              hasExpireAt: !!currentTokens.expireAt,
+              hasRefreshToken: !!currentTokens.refreshToken,
+              hasUsername: !!currentTokens.username,
+            }
+          );
+          throw new Error(
+            "Tokens were refreshed by another tab but are incomplete"
+          );
+        }
+      } else {
+        debug?.(
+          "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
+        );
+        throw new Error(
+          "Another refresh in progress and no valid tokens available"
+        );
+      }
+    }
+    throw err;
+  }
 }
 
 /**
@@ -691,19 +873,17 @@ export async function forceRefreshTokens(
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
-  // Clear any scheduled refresh
   if (refreshState.refreshTimer) {
     refreshState.refreshTimer();
     refreshState.refreshTimer = undefined;
   }
 
-  // Force refresh
   const refreshed = await refreshTokens({
     ...(args ?? {}),
     force: true,
   });
 
-  // Resume automatic scheduling after the forced refresh
+  await markRefreshCompleted();
   void scheduleRefresh({ ...args });
 
   return refreshed;
@@ -711,54 +891,26 @@ export async function forceRefreshTokens(
 
 // Initialize visibility change listener for browser environments
 if (isBrowserEnvironment()) {
-  // Add the event listener with eslint exception for document global
   // eslint-disable-next-line no-restricted-globals
   globalThis.document.addEventListener(
     "visibilitychange",
     handleVisibilityChange
   );
 
-  // Listen for window focus to catch resumed tabs or app focus
-  // eslint-disable-next-line no-restricted-globals
-  globalThis.window.addEventListener("focus", () => {
-    // Debug: focus event fired
-    logDebug("window focus event fired");
-
-    // Skip if refresh is already in progress or scheduled
-    if (refreshState.isRefreshing || refreshState.refreshTimer) {
-      logDebug(
-        "focus handler: refresh already in progress or scheduled, skipping"
-      );
-      return;
-    }
-
-    // Use same throttling as visibility change to prevent rapid fire
-    const timeThreshold = 60000; // 1 minute
-    const lastRefresh = refreshState.lastRefreshTime || 0;
-    logDebug(
-      `focus handler: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
-    );
-    if (Date.now() - lastRefresh > timeThreshold) {
-      logDebug("focus handler: threshold passed, scheduling refresh");
-      void scheduleRefresh();
-    }
-  });
-
-  // Polling watchdog: re-check every 5 minutes to catch any missed refresh
-  // This is a fallback for cases where focus/visibility events are not fired
+  // Simplified watchdog
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
   const startWatchdog = () => {
     setTimeoutWallClock(() => {
-      // Debug every tick
       logDebug(`Watchdog tick at ${new Date().toISOString()}`);
-      // Only schedule a refresh if one isn't already pending and if the tab
-      // is visible, to avoid unnecessary background work.
       if (!refreshState.refreshTimer && isDocumentVisible()) {
         const lastRefresh = refreshState.lastRefreshTime || 0;
-        // Add an extra check to ensure we don't refresh too frequently
         if (Date.now() - lastRefresh > WATCHDOG_INTERVAL_MS) {
           logDebug("Watchdog is triggering a refresh check");
-          void scheduleRefresh();
+          void (async () => {
+            if (await shouldAttemptRefresh()) {
+              void scheduleRefresh();
+            }
+          })();
         }
       }
       startWatchdog();
