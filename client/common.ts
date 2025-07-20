@@ -199,10 +199,15 @@ export async function processTokens(
   let username = tokens.username;
   if (!username) {
     // Parse from access token if not provided
-    const accessPayload = parseJwtPayload<CognitoAccessTokenPayload>(
-      tokens.accessToken
-    );
-    username = accessPayload.username;
+    try {
+      const accessPayload = parseJwtPayload<CognitoAccessTokenPayload>(
+        tokens.accessToken
+      );
+      username = accessPayload.username;
+    } catch (err) {
+      debug?.("Failed to parse username from access token:", err);
+      // Continue to throw the more specific error below
+    }
   }
 
   if (!username) {

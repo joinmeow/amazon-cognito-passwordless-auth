@@ -761,13 +761,13 @@ export async function refreshTokens({
       const currentTokens = await retrieveTokens();
       if (
         currentTokens?.accessToken &&
-        currentTokens?.idToken &&
         currentTokens?.expireAt &&
-        currentTokens?.refreshToken
+        currentTokens?.refreshToken &&
+        currentTokens?.username
       ) {
         return {
           accessToken: currentTokens.accessToken,
-          idToken: currentTokens.idToken,
+          ...(currentTokens.idToken && { idToken: currentTokens.idToken }),
           expireAt: currentTokens.expireAt,
           username: currentTokens.username,
           refreshToken: currentTokens.refreshToken,
