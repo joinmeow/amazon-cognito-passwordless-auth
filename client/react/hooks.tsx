@@ -1424,6 +1424,7 @@ function _usePasswordless() {
         statusCb: setSigninInStatus,
         tokensRemovedLocallyCb: () => {
           _setTokens(undefined);
+          parseAndSetTokens(undefined);
           dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
         },
         currentStatus: signingInStatus,
