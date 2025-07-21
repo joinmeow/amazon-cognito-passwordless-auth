@@ -1068,24 +1068,24 @@ function _usePasswordless() {
     (next: TokensFromStorage | undefined) => {
       // Only update if tokens actually changed
       const current = tokens;
-      
+
       // If both undefined, no change needed
       if (!current && !next) return;
-      
+
       // If one is undefined, definitely update
       if (!current || !next) {
         _setTokens(next);
         parseAndSetTokens(next);
         return;
       }
-      
+
       // Check if tokens actually changed
       const hasChanges =
         current.accessToken !== next.accessToken ||
         current.idToken !== next.idToken ||
         current.refreshToken !== next.refreshToken ||
         current.expireAt?.getTime() !== next.expireAt?.getTime();
-      
+
       if (hasChanges) {
         _setTokens(next);
         parseAndSetTokens(next);

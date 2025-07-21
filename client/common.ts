@@ -59,12 +59,10 @@ const activeRefreshSchedules = new Map<
  * This MUST be called for all auth flows before any custom callbacks.
  *
  * @param tokens The tokens to process
- * @param abort Optional abort signal
  * @returns The processed tokens (with device key and other metadata)
  */
 async function processTokensInternal(
-  tokens: TokensFromSignIn | TokensFromRefresh,
-  abort?: AbortSignal
+  tokens: TokensFromSignIn | TokensFromRefresh
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
   const { debug } = configure();
 
@@ -160,7 +158,10 @@ async function processTokensInternal(
     const now = Date.now();
 
     // Skip if we already scheduled for this token recently (within 5 minutes)
-    if (existingSchedule && now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS) {
+    if (
+      existingSchedule &&
+      now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS
+    ) {
       debug?.(
         "🔄 [Process Tokens] Refresh already scheduled for this token, skipping duplicate"
       );
@@ -259,7 +260,7 @@ export async function processTokens(
   try {
     return await withStorageLock(
       lockKey,
-      async () => processTokensInternal(tokens, abort),
+      async () => processTokensInternal(tokens),
       undefined, // use default timeout
       abort
     );
