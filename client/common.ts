@@ -33,6 +33,13 @@ import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
+// Track active refresh schedules to prevent duplicate scheduling
+// Key: refreshToken, Value: { scheduledAt: timestamp, abortController: AbortController }
+const activeRefreshSchedules = new Map<string, { 
+  scheduledAt: number;
+  abortController?: AbortController;
+}>();
+
 /**
  * Process tokens after authentication or refresh.
  * This function handles ALL required operations:
@@ -138,43 +145,65 @@ async function processTokensInternal(
   // 3. Schedule refresh if we have a refresh token
   // But only if this is NOT a fresh login (indicated by newDeviceMetadata)
   // This prevents immediate refresh scheduling right after login
-  if (tokens.refreshToken && !("newDeviceMetadata" in tokens)) {
-    debug?.("🔄 [Process Tokens] Scheduling token refresh (not a fresh login)");
-    scheduleRefresh({
-      abort,
-      tokensCb: (newTokens) => {
-        if (!newTokens) return;
-        // We don't need to store tokens here because processTokens will be called
-        // for the refresh tokens too, and it will store them.
-        return Promise.resolve();
-      },
-    }).catch((err) => {
-      debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
-    });
-  } else if (tokens.refreshToken) {
-    // For fresh logins, we'll still schedule a refresh but with a significant delay
-    // This ensures tokens don't expire while the user is active, but doesn't cause
-    // immediate refreshes after login
-    debug?.(
-      "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
-    );
+  if (tokens.refreshToken) {
+    // Check if we already have an active schedule for this token
+    const existingSchedule = activeRefreshSchedules.get(tokens.refreshToken);
+    const now = Date.now();
+    
+    // Skip if we already scheduled for this token recently (within 5 minutes)
+    if (existingSchedule && (now - existingSchedule.scheduledAt < 300000)) {
+      debug?.(
+        "🔄 [Process Tokens] Refresh already scheduled for this token, skipping duplicate"
+      );
+      return tokensToStore;
+    }
 
-    // Delay scheduling by 2 minutes to avoid multiple refreshes during app initialization
-    setTimeout(() => {
-      debug?.("🔄 [Process Tokens] Executing delayed token refresh schedule");
+    // Clear any existing schedule for this token
+    if (existingSchedule?.abortController) {
+      existingSchedule.abortController.abort();
+    }
+
+    const scheduleAbort = new AbortController();
+    
+    // Track this schedule to prevent duplicates
+    activeRefreshSchedules.set(tokens.refreshToken, {
+      scheduledAt: now,
+      abortController: scheduleAbort,
+    });
+
+    const scheduleFn = () => {
+      debug?.("🔄 [Process Tokens] Scheduling token refresh");
       scheduleRefresh({
-        abort,
+        abort: scheduleAbort.signal,
         tokensCb: (newTokens) => {
           if (!newTokens) return;
+          // Clear the schedule tracking when refresh completes
+          if (tokens.refreshToken) {
+            activeRefreshSchedules.delete(tokens.refreshToken);
+          }
+          // We don't need to store tokens here because processTokens will be called
+          // for the refresh tokens too, and it will store them.
           return Promise.resolve();
         },
       }).catch((err) => {
-        debug?.(
-          "❌ [Process Tokens] Failed to schedule delayed token refresh:",
-          err
-        );
+        debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
+        // Clear the schedule tracking on error
+        if (tokens.refreshToken) {
+          activeRefreshSchedules.delete(tokens.refreshToken);
+        }
       });
-    }, 120000); // 2 minutes delay
+    };
+
+    if (!("newDeviceMetadata" in tokens)) {
+      // Not a fresh login, schedule immediately
+      scheduleFn();
+    } else {
+      // Fresh login, delay by 2 minutes
+      debug?.(
+        "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
+      );
+      setTimeout(scheduleFn, 120000); // 2 minutes delay
+    }
   } else {
     debug?.(
       "🔄 [Process Tokens] No refresh token available, skipping refresh scheduling"

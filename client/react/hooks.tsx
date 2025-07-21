@@ -624,72 +624,18 @@ function _usePasswordless() {
   );
 
   // ---------------------------------------------------------------------------
-  // ♻️  Schedule automatic token refresh and keep auth status stable
+  // ♻️  Keep auth status stable when tokens change
   // ---------------------------------------------------------------------------
+  // NOTE: Token refresh scheduling is handled by processTokens, not here.
+  // This prevents duplicate scheduling and infinite loops.
 
-  // At component mount, schedule token refresh
-  const refreshToken = tokens?.refreshToken;
-  const expireAtTime = tokens?.expireAt?.getTime();
-  // Preserve the method used to obtain the current tokens so that we can
-  // restore the correct *SIGNED_IN_WITH_* status after the background refresh.
-  const authMethodFromTokens = tokens?.authMethod;
-
+  // Update auth status when tokens change
   useEffect(() => {
-    if (!refreshToken) {
-      return;
+    if (tokens?.refreshToken && tokens?.authMethod) {
+      const status = signedInStatusForAuth(tokens.authMethod);
+      status && setSigninInStatus(status);
     }
-
-    const abort = new AbortController();
-
-    // Indicate that we are about to schedule or run a refresh operation
-    dispatch({ type: "SET_REFRESH_STATUS", isScheduling: true });
-
-    scheduleRefresh({
-      abort: abort.signal,
-      tokensCb: (newTokens) => {
-        if (newTokens) {
-          const merged = { ...tokens, ...newTokens } as TokensFromStorage;
-          _setTokens(merged);
-          parseAndSetTokens(merged);
-        } else {
-          _setTokens(undefined);
-          parseAndSetTokens(undefined);
-          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-        }
-      },
-      isRefreshingCb: (isRefreshing) => {
-        dispatch({ type: "SET_REFRESH_STATUS", isRefreshing: isRefreshing });
-
-        const status = signedInStatusForAuth(authMethodFromTokens);
-        status && setSigninInStatus(status);
-      },
-    })
-      .catch((err) => {
-        const { debug } = configure();
-        debug?.("Failed to schedule token refresh:", err);
-
-        const status = signedInStatusForAuth(authMethodFromTokens);
-        status && setSigninInStatus(status);
-
-        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-      })
-      .finally(() => {
-        dispatch({ type: "SET_REFRESH_STATUS", isScheduling: false });
-      });
-
-    return () => abort.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    // Only depend on specific token properties that should trigger refresh
-    refreshToken,
-    expireAtTime,
-    authMethodFromTokens,
-    // These don't depend on tokens changing, so safe to include
-    signedInStatusForAuth,
-    parseAndSetTokens,
-    setSigninInStatus,
-    _setTokens,
-  ]);
+  }, [tokens, signedInStatusForAuth, setSigninInStatus]);
 
   // Handle incomplete token bundle (edge-case: storage was tampered with)
   // Use ref to prevent circular dependencies
@@ -1120,7 +1066,27 @@ function _usePasswordless() {
    */
   const updateTokens = useCallback(
     (next: TokensFromStorage | undefined) => {
-      _setTokens(next);
+      _setTokens((current: TokensFromStorage | undefined) => {
+        // If both undefined, no change needed
+        if (!current && !next) return current;
+        
+        // If one is undefined, definitely update
+        if (!current || !next) return next;
+        
+        // Only update if tokens actually changed
+        const hasChanges = 
+          current.accessToken !== next.accessToken ||
+          current.idToken !== next.idToken ||
+          current.refreshToken !== next.refreshToken ||
+          current.expireAt?.getTime() !== next.expireAt?.getTime();
+        
+        if (!hasChanges) {
+          // Return the same reference to prevent re-renders
+          return current;
+        }
+        
+        return next;
+      });
       parseAndSetTokens(next);
     },
     [parseAndSetTokens, _setTokens]

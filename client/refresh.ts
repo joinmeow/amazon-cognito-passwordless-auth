@@ -294,13 +294,7 @@ async function scheduleRefreshUnlocked({
 
     if (!tokens?.expireAt) {
       logDebug("No valid tokens found, skipping refresh scheduling");
-      if (tokensCb) {
-        try {
-          await tokensCb(null);
-        } catch (err) {
-          logDebug("Error in tokensCb during no-tokens case:", err);
-        }
-      }
+      // Don't clear tokens here - let other mechanisms handle expired/missing tokens
       return;
     }
 
