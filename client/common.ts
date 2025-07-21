@@ -33,12 +33,21 @@ import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
+// Prevent duplicate refresh scheduling within this time window
+const REFRESH_DEDUPLICATION_WINDOW_MS = 300000; // 5 minutes
+
+// Delay initial refresh scheduling for fresh logins
+const FRESH_LOGIN_REFRESH_DELAY_MS = 120000; // 2 minutes
+
 // Track active refresh schedules to prevent duplicate scheduling
 // Key: refreshToken, Value: { scheduledAt: timestamp, abortController: AbortController }
-const activeRefreshSchedules = new Map<string, { 
-  scheduledAt: number;
-  abortController?: AbortController;
-}>();
+const activeRefreshSchedules = new Map<
+  string,
+  {
+    scheduledAt: number;
+    abortController?: AbortController;
+  }
+>();
 
 /**
  * Process tokens after authentication or refresh.
@@ -149,9 +158,9 @@ async function processTokensInternal(
     // Check if we already have an active schedule for this token
     const existingSchedule = activeRefreshSchedules.get(tokens.refreshToken);
     const now = Date.now();
-    
+
     // Skip if we already scheduled for this token recently (within 5 minutes)
-    if (existingSchedule && (now - existingSchedule.scheduledAt < 300000)) {
+    if (existingSchedule && now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS) {
       debug?.(
         "🔄 [Process Tokens] Refresh already scheduled for this token, skipping duplicate"
       );
@@ -164,7 +173,7 @@ async function processTokensInternal(
     }
 
     const scheduleAbort = new AbortController();
-    
+
     // Track this schedule to prevent duplicates
     activeRefreshSchedules.set(tokens.refreshToken, {
       scheduledAt: now,
@@ -202,7 +211,7 @@ async function processTokensInternal(
       debug?.(
         "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
       );
-      setTimeout(scheduleFn, 120000); // 2 minutes delay
+      setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
     }
   } else {
     debug?.(

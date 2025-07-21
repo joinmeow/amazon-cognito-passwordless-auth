@@ -1066,30 +1066,33 @@ function _usePasswordless() {
    */
   const updateTokens = useCallback(
     (next: TokensFromStorage | undefined) => {
-      _setTokens((current: TokensFromStorage | undefined) => {
-        // If both undefined, no change needed
-        if (!current && !next) return current;
-        
-        // If one is undefined, definitely update
-        if (!current || !next) return next;
-        
-        // Only update if tokens actually changed
-        const hasChanges = 
-          current.accessToken !== next.accessToken ||
-          current.idToken !== next.idToken ||
-          current.refreshToken !== next.refreshToken ||
-          current.expireAt?.getTime() !== next.expireAt?.getTime();
-        
-        if (!hasChanges) {
-          // Return the same reference to prevent re-renders
-          return current;
-        }
-        
-        return next;
-      });
-      parseAndSetTokens(next);
+      // Only update if tokens actually changed
+      const current = tokens;
+      
+      // If both undefined, no change needed
+      if (!current && !next) return;
+      
+      // If one is undefined, definitely update
+      if (!current || !next) {
+        _setTokens(next);
+        parseAndSetTokens(next);
+        return;
+      }
+      
+      // Check if tokens actually changed
+      const hasChanges =
+        current.accessToken !== next.accessToken ||
+        current.idToken !== next.idToken ||
+        current.refreshToken !== next.refreshToken ||
+        current.expireAt?.getTime() !== next.expireAt?.getTime();
+      
+      if (hasChanges) {
+        _setTokens(next);
+        parseAndSetTokens(next);
+      }
+      // If no changes, skip update to prevent re-renders
     },
-    [parseAndSetTokens, _setTokens]
+    [tokens, parseAndSetTokens, _setTokens]
   );
 
   // Handle expired token refresh when signInStatus is REFRESHING_SIGN_IN
