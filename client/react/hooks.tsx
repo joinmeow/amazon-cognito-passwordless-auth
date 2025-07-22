@@ -750,6 +750,13 @@ function _usePasswordless() {
       );
 
       if (urlParams.has("code") || hashParams.has("access_token")) {
+        // Prevent multiple simultaneous OAuth callback processing
+        if (oauthProcessingRef.current) {
+          debug?.("OAuth callback already being processed, skipping...");
+          return;
+        }
+        oauthProcessingRef.current = true;
+
         debug?.("OAuth callback detected, processing...");
         try {
           setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
@@ -1016,6 +1023,9 @@ function _usePasswordless() {
   // Track last fetch time to prevent spam
   const lastMfaFetchTimeRef = useRef<number>(0);
   const MFA_FETCH_COOLDOWN = 5000; // 5 second cooldown between fetches
+
+  // Track OAuth callback processing to prevent multiple executions
+  const oauthProcessingRef = useRef(false);
 
   // Fetch TOTP MFA status when the user is signed in – with rate limiting
   useEffect(() => {
