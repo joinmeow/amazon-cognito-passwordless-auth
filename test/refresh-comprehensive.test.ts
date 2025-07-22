@@ -26,7 +26,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 describe("Refresh System Comprehensive Tests", () => {
   let fetchMock: jest.Mock;
   let debugLogs: string[] = [];
-  let mockStorage: any;
+  let mockStorage: {
+    getItem: jest.Mock<string | null, [string]>;
+    setItem: jest.Mock<void, [string, string]>;
+    removeItem: jest.Mock<void, [string]>;
+    clear: jest.Mock<void, []>;
+  };
 
   beforeEach(() => {
     // Create a mock storage with proper implementation
@@ -53,8 +58,8 @@ describe("Refresh System Comprehensive Tests", () => {
       cognitoIdpEndpoint: "us-west-2",
       fetch: fetchMock,
       storage: mockStorage,
-      debug: (...args: any[]) => {
-        debugLogs.push(args.join(" "));
+      debug: (...args: unknown[]) => {
+        debugLogs.push(args.map(String).join(" "));
       },
     });
   });
@@ -73,10 +78,10 @@ describe("Refresh System Comprehensive Tests", () => {
       // This test verifies the multi-tab coordination check
       const attemptKey = `Passwordless.testClient.testuser.lastRefreshAttempt`;
       const recentAttempt = `${Date.now() - 1000}:other-tab-id`; // 1 second ago
-      
+
       // Mock storage to return recent attempt
       mockStorage.getItem.mockResolvedValue(recentAttempt);
-      
+
       // Call shouldAttemptRefresh directly (internal function)
       // Since it's not exported, we'll test the behavior through refreshTokens
       const tokens = {
@@ -94,7 +99,7 @@ describe("Refresh System Comprehensive Tests", () => {
 
       // Store tokens first
       await storeTokens(tokens);
-      
+
       // The refresh should detect the recent attempt and skip
       // Since we can't easily test the internal behavior, we'll verify the attempt check was performed
       try {
@@ -257,10 +262,12 @@ describe("Refresh System Comprehensive Tests", () => {
         clientId: "testClient",
         cognitoIdpEndpoint: "us-west-2",
         fetch: fetchMock,
-        storage: localStorage as any,
+        storage: localStorage as unknown as Parameters<
+          typeof configure
+        >[0]["storage"],
         useGetTokensFromRefreshToken: true,
-        debug: (...args: any[]) => {
-          debugLogs.push(args.join(" "));
+        debug: (...args: unknown[]) => {
+          debugLogs.push(args.map(String).join(" "));
         },
       });
 

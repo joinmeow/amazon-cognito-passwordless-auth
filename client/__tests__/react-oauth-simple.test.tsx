@@ -13,30 +13,38 @@
  * language governing permissions and limitations under the License.
  */
 
-import React from 'react';
-import { renderHook, act } from '@testing-library/react';
-import { usePasswordless, PasswordlessContextProvider } from '../react/hooks';
-import { signInWithRedirect } from '../hosted-oauth';
-import { configure } from '../config';
-import { retrieveTokens } from '../storage';
+import React from "react";
+import { renderHook, act } from "@testing-library/react";
+import {
+  usePasswordless,
+  PasswordlessContextProvider,
+} from "../react/hooks.js";
+import { signInWithRedirect } from "../hosted-oauth.js";
+import { configure } from "../config.js";
+import { retrieveTokens } from "../storage.js";
+import type { ConfigWithDefaults } from "../config.js";
 
 // Mock dependencies
-jest.mock('../hosted-oauth');
-jest.mock('../config');
-jest.mock('../storage');
+jest.mock("../hosted-oauth");
+jest.mock("../config");
+jest.mock("../storage");
 
-const mockSignInWithRedirect = signInWithRedirect as jest.MockedFunction<typeof signInWithRedirect>;
+const mockSignInWithRedirect = signInWithRedirect as jest.MockedFunction<
+  typeof signInWithRedirect
+>;
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
-const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<typeof retrieveTokens>;
+const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
+  typeof retrieveTokens
+>;
 
-describe('React OAuth Integration - Simple', () => {
-  let mockConfig: any;
+describe("React OAuth Integration - Simple", () => {
+  let mockConfig: Partial<ConfigWithDefaults>;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    
+
     mockConfig = {
-      clientId: 'test-client-id',
+      clientId: "test-client-id",
       debug: jest.fn(),
       storage: {
         getItem: jest.fn(),
@@ -44,8 +52,8 @@ describe('React OAuth Integration - Simple', () => {
         removeItem: jest.fn(),
       },
     };
-    
-    mockConfigure.mockReturnValue(mockConfig);
+
+    mockConfigure.mockReturnValue(mockConfig as ConfigWithDefaults);
     mockSignInWithRedirect.mockResolvedValue(undefined);
     mockRetrieveTokens.mockResolvedValue(undefined); // No tokens initially
   });
@@ -54,31 +62,35 @@ describe('React OAuth Integration - Simple', () => {
     <PasswordlessContextProvider>{children}</PasswordlessContextProvider>
   );
 
-  describe('signInWithRedirect', () => {
-    it('should call hosted-oauth signInWithRedirect and update status', async () => {
+  describe("signInWithRedirect", () => {
+    it("should call hosted-oauth signInWithRedirect and update status", async () => {
       const { result } = renderHook(() => usePasswordless(), { wrapper });
 
       // Wait for initial load to complete
       await act(async () => {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 100));
       });
 
       // Initial state should not be signing in
-      expect(result.current.signInStatus).not.toBe('STARTING_SIGN_IN_WITH_REDIRECT');
+      expect(result.current.signInStatus).not.toBe(
+        "STARTING_SIGN_IN_WITH_REDIRECT"
+      );
 
       // Call signInWithRedirect
       act(() => {
         result.current.signInWithRedirect({
-          provider: 'Google',
+          provider: "Google",
         });
       });
 
       // Should update status - the hook shows SIGNING_IN during the process
-      expect(['STARTING_SIGN_IN_WITH_REDIRECT', 'SIGNING_IN']).toContain(result.current.signInStatus);
-      
+      expect(["STARTING_SIGN_IN_WITH_REDIRECT", "SIGNING_IN"]).toContain(
+        result.current.signInStatus
+      );
+
       // Should call the hosted-oauth function
       expect(mockSignInWithRedirect).toHaveBeenCalledWith({
-        provider: 'Google',
+        provider: "Google",
       });
     });
   });

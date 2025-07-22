@@ -62,6 +62,7 @@ graph TB
 ## Refresh Entry Points
 
 ### 1. Automatic Scheduled Refresh
+
 **Location**: `client/refresh.ts` - `scheduleRefresh()`
 
 Automatically scheduled after any successful authentication or token refresh.
@@ -70,21 +71,23 @@ Automatically scheduled after any successful authentication or token refresh.
 // Dynamic timing calculation
 const actualLifetime = (payload.exp - payload.iat) * 1000;
 const bufferTime = Math.max(
-  60000,                      // Min: 1 minute
+  60000, // Min: 1 minute
   Math.min(
-    0.3 * actualLifetime,     // 30% of lifetime
-    15 * 60 * 1000           // Max: 15 minutes
+    0.3 * actualLifetime, // 30% of lifetime
+    15 * 60 * 1000 // Max: 15 minutes
   )
 );
 const refreshDelay = timeUntilExpiry - bufferTime;
 ```
 
 **Special Cases**:
+
 - Tokens expiring in <60s: Refresh immediately
 - Fresh logins: 2-minute delay before first refresh schedule
 - Uses `setTimeoutWallClock` to handle device sleep
 
 ### 2. Visibility Change Handler
+
 **Location**: `client/refresh.ts` - `handleVisibilityChange()`
 
 Triggered when browser tab becomes visible.
@@ -98,6 +101,7 @@ Triggered when browser tab becomes visible.
 ```
 
 ### 3. Watchdog Timer
+
 **Location**: `client/refresh.ts` - `startRefreshWatchdog()`
 
 Safety net that runs every 5 minutes.
@@ -110,6 +114,7 @@ Safety net that runs every 5 minutes.
 ```
 
 ### 4. Manual Force Refresh
+
 **Location**: `client/refresh.ts` - `forceRefreshTokens()`
 
 User-initiated refresh via React hooks.
@@ -122,15 +127,18 @@ User-initiated refresh via React hooks.
 ```
 
 ### 5. React Hook Auto-Refresh
+
 **Location**: `client/react/hooks.tsx`
 
 Multiple triggers within React components:
+
 - On component mount when tokens exist
 - When tokens become available
 - On authentication errors requiring refresh
 - When handling incomplete token sets
 
 ### 6. Process Tokens Integration
+
 **Location**: `client/common.ts` - `processTokens()`
 
 Called after every authentication/refresh to ensure scheduling.
@@ -149,6 +157,7 @@ if ("newDeviceMetadata" in tokens) {
 ## Multi-Tab Coordination
 
 ### Storage-Based Lock System
+
 **Location**: `client/lock.ts`
 
 Prevents concurrent refreshes across tabs.
@@ -167,22 +176,27 @@ interface StorageLock {
 ```
 
 ### Active Refresh Schedules Map
+
 **Location**: `client/common.ts`
 
 In-memory deduplication within a single tab.
 
 ```typescript
-const activeRefreshSchedules = new Map<string, {
-  scheduledAt: number;
-  abortController: AbortController;
-  refreshToken: string;
-}>();
+const activeRefreshSchedules = new Map<
+  string,
+  {
+    scheduledAt: number;
+    abortController: AbortController;
+    refreshToken: string;
+  }
+>();
 
 // Prevents duplicate schedules for 5 minutes
 const REFRESH_DEDUPLICATION_WINDOW_MS = 300000;
 ```
 
 ### Refresh Attempt Coordination
+
 **Location**: `client/refresh.ts`
 
 Cross-tab coordination via localStorage.
@@ -207,16 +221,16 @@ graph TD
     A[refreshTokens] --> B{Auth Method?}
     B -->|REDIRECT| C[OAuth Flow]
     B -->|Others| D{Use InitiateAuth?}
-    
+
     C --> E[POST /oauth2/token]
-    
+
     D -->|Hosted UI| F[GetTokensFromRefreshToken]
     D -->|Direct Auth| G[InitiateAuth REFRESH_TOKEN]
-    
+
     E --> H[Process Response]
     F --> H
     G --> H
-    
+
     H --> I{Success?}
     I -->|Yes| J[processTokens]
     I -->|No| K[Retry Logic]
@@ -281,16 +295,17 @@ for (let attempt = 1; attempt <= 3; attempt++) {
 
 ### Timing Analysis
 
-| Operation | Duration | Notes |
-|-----------|----------|-------|
-| Lock Acquisition | 0-15s | Usually <100ms |
+| Operation        | Duration   | Notes             |
+| ---------------- | ---------- | ----------------- |
+| Lock Acquisition | 0-15s      | Usually <100ms    |
 | Refresh API Call | 200-3000ms | Network dependent |
-| Token Processing | <50ms | Storage writes |
-| Total Refresh | 250-3500ms | Typical case |
+| Token Processing | <50ms      | Storage writes    |
+| Total Refresh    | 250-3500ms | Typical case      |
 
 ### Storage Operations
 
 Per successful refresh:
+
 - 2 reads: Check attempt/completion
 - 1 write: Mark attempt
 - 4-6 operations: Lock acquire/release
@@ -304,24 +319,25 @@ Per successful refresh:
 
 ```typescript
 // Deduplication and delays
-REFRESH_DEDUPLICATION_WINDOW_MS = 300000  // 5 minutes
-FRESH_LOGIN_REFRESH_DELAY_MS = 120000     // 2 minutes
+REFRESH_DEDUPLICATION_WINDOW_MS = 300000; // 5 minutes
+FRESH_LOGIN_REFRESH_DELAY_MS = 120000; // 2 minutes
 
 // Coordination windows
-REFRESH_ATTEMPT_INTERVAL_MS = 5000        // 5 seconds
-REFRESH_ATTEMPT_JITTER_MS = 100          // 0-100ms random
+REFRESH_ATTEMPT_INTERVAL_MS = 5000; // 5 seconds
+REFRESH_ATTEMPT_JITTER_MS = 100; // 0-100ms random
 
 // Watchdog
-WATCHDOG_INTERVAL_MS = 300000            // 5 minutes
+WATCHDOG_INTERVAL_MS = 300000; // 5 minutes
 
 // Lock timeouts
-DEFAULT_LOCK_TIMEOUT_MS = 15000          // 15 seconds
-STALE_LOCK_THRESHOLD_MS = 30000          // 30 seconds
+DEFAULT_LOCK_TIMEOUT_MS = 15000; // 15 seconds
+STALE_LOCK_THRESHOLD_MS = 30000; // 30 seconds
 ```
 
 ### Per-User Isolation
 
 All refresh operations are isolated per user:
+
 - Separate storage keys include username
 - Independent refresh schedules
 - Isolated lock management

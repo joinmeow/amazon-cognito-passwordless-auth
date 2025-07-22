@@ -17,22 +17,25 @@ const createMockJWT = (payload: Record<string, unknown>) => {
 describe("RefreshTokens Lock", () => {
   beforeEach(() => {
     // Ensure clean test environment
-    const { configure: cfg } = require("../client/config.js");
+    const configModule = jest.requireActual("../client/config.js") as {
+      configure: typeof configure;
+    };
+    const { configure: cfg } = configModule;
     cfg({ clientId: "testClient", cognitoIdpEndpoint: "us-west-2" });
   });
-  
+
   test("should handle concurrent refresh calls properly", async () => {
     // Configure test environment with fetch stub
     let callCount = 0;
     const callOrder: number[] = [];
-    let storedTokens: any = null;
-    
+    let storedTokens: Parameters<typeof storeTokens>[0] | null = null;
+
     // Track debug logs
     const debugLogs: string[] = [];
-    const debugFn = (...args: any[]) => {
-      debugLogs.push(args.join(' '));
+    const debugFn = (...args: unknown[]) => {
+      debugLogs.push(args.map(String).join(" "));
     };
-    
+
     // Create a mock storage that saves/retrieves tokens and handles locks
     const storageData = new Map<string, string>();
     const mockStorage = {
@@ -41,7 +44,7 @@ describe("RefreshTokens Lock", () => {
       },
       setItem: async (key: string, value: string) => {
         storageData.set(key, value);
-        
+
         // Capture tokens being stored for test verification
         if (key.includes("accessToken")) {
           if (!storedTokens) storedTokens = {};
@@ -68,7 +71,7 @@ describe("RefreshTokens Lock", () => {
         storageData.delete(key);
       },
     };
-    
+
     const dummyFetch = async (
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       _input: string | URL,
@@ -134,18 +137,33 @@ describe("RefreshTokens Lock", () => {
         iat: Math.floor(Date.now() / 1000),
       }),
     };
-    
+
     // Pre-populate storage with initial tokens
     storedTokens = { ...dummyTokens };
-    
+
     // Also populate the storage map with initial tokens
     const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
     const customKeyPrefix = `Passwordless.testClient`;
-    await mockStorage.setItem(`${amplifyKeyPrefix}.${dummyTokens.username}.accessToken`, dummyTokens.accessToken);
-    await mockStorage.setItem(`${amplifyKeyPrefix}.${dummyTokens.username}.refreshToken`, dummyTokens.refreshToken);
-    await mockStorage.setItem(`${amplifyKeyPrefix}.${dummyTokens.username}.idToken`, "dummy-id-token");
-    await mockStorage.setItem(`${customKeyPrefix}.${dummyTokens.username}.expireAt`, dummyTokens.expireAt.toISOString());
-    await mockStorage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, dummyTokens.username);
+    await mockStorage.setItem(
+      `${amplifyKeyPrefix}.${dummyTokens.username}.accessToken`,
+      dummyTokens.accessToken
+    );
+    await mockStorage.setItem(
+      `${amplifyKeyPrefix}.${dummyTokens.username}.refreshToken`,
+      dummyTokens.refreshToken
+    );
+    await mockStorage.setItem(
+      `${amplifyKeyPrefix}.${dummyTokens.username}.idToken`,
+      "dummy-id-token"
+    );
+    await mockStorage.setItem(
+      `${customKeyPrefix}.${dummyTokens.username}.expireAt`,
+      dummyTokens.expireAt.toISOString()
+    );
+    await mockStorage.setItem(
+      `${amplifyKeyPrefix}.LastAuthUser`,
+      dummyTokens.username
+    );
 
     // Invoke two concurrent refreshTokens calls
     const p1 = refreshTokens({ tokens: dummyTokens });
@@ -157,12 +175,12 @@ describe("RefreshTokens Lock", () => {
       // Both calls should succeed and return tokens
       expect(result1.accessToken).toBeTruthy();
       expect(result2.accessToken).toBeTruthy();
-      
+
       // The exact behavior depends on timing and the test environment
       // Either:
       // 1. Both calls make API requests (serialized by the lock)
       // 2. Second call uses tokens from the first refresh
-      
+
       if (callCount === 2) {
         // Both made API calls - they should be serialized
         expect(callOrder).toEqual([1, 2]);

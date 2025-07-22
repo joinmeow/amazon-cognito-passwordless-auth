@@ -11,22 +11,22 @@ describe("Storage Lock", () => {
 
   test("should enforce sequential lock ordering", async () => {
     const order: string[] = [];
-    
+
     // Start first lock operation
     const firstPromise = withStorageLock("key1", async () => {
       order.push("first-start");
       await sleep(100);
       order.push("first-end");
     });
-    
+
     // Give first lock time to acquire
     await sleep(10);
-    
+
     // Try to acquire same lock - should wait
     const secondPromise = withStorageLock("key1", async () => {
       order.push("second");
     });
-    
+
     await Promise.all([firstPromise, secondPromise]);
 
     expect(order).toEqual(["first-start", "first-end", "second"]);

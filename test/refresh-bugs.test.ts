@@ -1,9 +1,5 @@
 import { configure } from "../client/config.js";
-import {
-  scheduleRefresh,
-  refreshTokens,
-  forceRefreshTokens,
-} from "../client/refresh.js";
+import { scheduleRefresh } from "../client/refresh.js";
 import { storeTokens, retrieveTokens } from "../client/storage.js";
 import { processTokens } from "../client/common.js";
 
@@ -32,8 +28,8 @@ describe("Refresh System Bug Hunt", () => {
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
       fetch: fetchMock,
-      debug: (...args: any[]) => {
-        const msg = args.join(" ");
+      debug: (...args: unknown[]) => {
+        const msg = args.map(String).join(" ");
         debugLogs.push(msg);
         console.log("[DEBUG]", msg);
       },
@@ -55,18 +51,18 @@ describe("Refresh System Bug Hunt", () => {
     };
 
     await storeTokens(tokens);
-    
+
     // Call scheduleRefresh
     await scheduleRefresh();
-    
+
     // Check if it actually scheduled something
-    const scheduleLog = debugLogs.find(log => 
-      log.includes("Scheduling token refresh") || 
-      log.includes("minutes")
+    const scheduleLog = debugLogs.find(
+      (log) =>
+        log.includes("Scheduling token refresh") || log.includes("minutes")
     );
-    
+
     console.log("All logs:", debugLogs);
-    
+
     expect(scheduleLog).toBeTruthy();
     expect(debugLogs.length).toBeGreaterThan(0);
   });
@@ -90,24 +86,25 @@ describe("Refresh System Bug Hunt", () => {
       username: "testuser",
       expireAt: new Date(now + 3600000),
     };
-    
+
     // Clear logs
     debugLogs = [];
-    
+
     // Process tokens (simulating post-refresh)
     await processTokens(tokens);
-    
+
     // Should have scheduled refresh
-    const processLogs = debugLogs.filter(log => 
-      log.includes("Process Tokens") ||
-      log.includes("Scheduling token refresh") ||
-      log.includes("scheduleRefresh")
+    const processLogs = debugLogs.filter(
+      (log) =>
+        log.includes("Process Tokens") ||
+        log.includes("Scheduling token refresh") ||
+        log.includes("scheduleRefresh")
     );
-    
+
     console.log("Process logs:", processLogs);
-    
+
     expect(processLogs.length).toBeGreaterThan(0);
-    
+
     // Check if tokens were stored
     const stored = await retrieveTokens();
     expect(stored).toBeTruthy();
@@ -129,12 +126,15 @@ describe("Refresh System Bug Hunt", () => {
     };
 
     await storeTokens(tokens);
-    
+
     // Verify the token was stored with expired time
     const stored = await retrieveTokens();
     console.log("Stored token expireAt:", stored?.expireAt);
-    console.log("Time until expiry:", stored?.expireAt ? stored.expireAt.getTime() - now : "N/A");
-    
+    console.log(
+      "Time until expiry:",
+      stored?.expireAt ? stored.expireAt.getTime() - now : "N/A"
+    );
+
     // Mock successful refresh
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -151,27 +151,28 @@ describe("Refresh System Bug Hunt", () => {
         },
       }),
     });
-    
+
     // Clear logs
     debugLogs = [];
-    
+
     // Schedule refresh for expired tokens
     await scheduleRefresh();
-    
+
     // Should detect expiry
-    const expiryLog = debugLogs.find(log => 
-      log.includes("expires in") || 
-      log.includes("refreshing immediately") ||
-      log.includes("expired")
+    const expiryLog = debugLogs.find(
+      (log) =>
+        log.includes("expires in") ||
+        log.includes("refreshing immediately") ||
+        log.includes("expired")
     );
-    
+
     console.log("Expiry logs:", debugLogs);
-    
+
     expect(expiryLog).toBeTruthy();
-    
+
     // Wait a bit to see if refresh was attempted
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     // Should have called fetch for refresh
     expect(fetchMock).toHaveBeenCalled();
   });
@@ -189,31 +190,43 @@ describe("Refresh System Bug Hunt", () => {
       username: "testuser",
       expireAt: new Date(now + 3600000),
     };
-    
+
     // Clear logs
     debugLogs = [];
-    
+
     // Process tokens multiple times
     await processTokens(tokens);
     const firstCallLogs = [...debugLogs];
-    
+
     await processTokens(tokens);
     const secondCallLogs = debugLogs.slice(firstCallLogs.length);
-    
+
     await processTokens(tokens);
-    const thirdCallLogs = debugLogs.slice(firstCallLogs.length + secondCallLogs.length);
-    
-    console.log("First call logs:", firstCallLogs.filter(log => log.includes("schedul")));
-    console.log("Second call logs:", secondCallLogs.filter(log => log.includes("schedul")));
-    console.log("Third call logs:", thirdCallLogs.filter(log => log.includes("schedul")));
-    
-    // Should see deduplication in later calls
-    const dedupLogs = debugLogs.filter(log => 
-      log.includes("already scheduled") || 
-      log.includes("skipping duplicate") ||
-      log.includes("Refresh already scheduled")
+    const thirdCallLogs = debugLogs.slice(
+      firstCallLogs.length + secondCallLogs.length
     );
-    
+
+    console.log(
+      "First call logs:",
+      firstCallLogs.filter((log) => log.includes("schedul"))
+    );
+    console.log(
+      "Second call logs:",
+      secondCallLogs.filter((log) => log.includes("schedul"))
+    );
+    console.log(
+      "Third call logs:",
+      thirdCallLogs.filter((log) => log.includes("schedul"))
+    );
+
+    // Should see deduplication in later calls
+    const dedupLogs = debugLogs.filter(
+      (log) =>
+        log.includes("already scheduled") ||
+        log.includes("skipping duplicate") ||
+        log.includes("Refresh already scheduled")
+    );
+
     expect(dedupLogs.length).toBeGreaterThan(0);
   });
 });

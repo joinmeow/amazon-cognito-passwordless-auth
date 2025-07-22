@@ -14,28 +14,32 @@
  */
 
 // Mock localStorage for jsdom
-import 'jest-localstorage-mock';
+import "jest-localstorage-mock";
 
 // Mock setTimeoutWallClock from util.js
-jest.mock('../util.js', () => ({
-  ...jest.requireActual('../util.js'),
-  setTimeoutWallClock: (fn: Function, delay: number) => {
-    return setTimeout(fn, delay);
-  },
-  parseJwtPayload: (token: string) => {
-    // Simple mock implementation
-    if (token === 'mock-access-token') {
+jest.mock("../util.js", () => {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const actualUtil = jest.requireActual("../util.js");
+  return {
+    ...(actualUtil as object),
+    setTimeoutWallClock: (fn: () => void, delay: number) => {
+      return setTimeout(fn, delay);
+    },
+    parseJwtPayload: (token: string) => {
+      // Simple mock implementation
+      if (token !== "mock-access-token") {
+        throw new Error("Invalid token");
+      }
       return {
-        username: 'test-user',
+        username: "test-user",
         exp: Math.floor(Date.now() / 1000) + 3600,
       };
-    }
-    throw new Error('Invalid token');
-  },
-}));
+    },
+  };
+});
 
 // Mock window.crypto for WebAuthn tests
-Object.defineProperty(window, 'crypto', {
+Object.defineProperty(globalThis, "crypto", {
   value: {
     getRandomValues: (arr: Uint8Array) => {
       for (let i = 0; i < arr.length; i++) {

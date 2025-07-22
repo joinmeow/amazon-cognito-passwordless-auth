@@ -58,8 +58,8 @@ describe("SignOut Lock", () => {
     };
     await storage.setItem(userKey, JSON.stringify(lockData));
 
-    const { signedOut, abort } = signOut();
-    
+    const { signedOut } = signOut();
+
     // Release the lock after a short delay to let signOut proceed
     setTimeout(async () => {
       await storage.removeItem(userKey);

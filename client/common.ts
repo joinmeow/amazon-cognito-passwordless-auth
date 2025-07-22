@@ -356,7 +356,7 @@ export const signOut = (props?: {
             activeSchedule.abortController.abort();
             activeRefreshSchedules.delete(userIdentifier);
           }
-          
+
           // Clean up all refresh system resources (timers, listeners)
           cleanupRefreshSystem(userIdentifier);
         }

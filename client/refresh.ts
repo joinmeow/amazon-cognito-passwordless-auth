@@ -43,7 +43,7 @@ function getRefreshState(username?: string): RefreshState {
     // create a temporary state that won't interfere with user-specific states
     return { isRefreshing: false };
   }
-  
+
   let state = refreshStateMap.get(username);
   if (!state) {
     state = { isRefreshing: false };
@@ -221,7 +221,7 @@ async function handleVisibilityChange() {
     const tokens = await retrieveTokensForRefresh();
     const username = tokens?.username;
     const state = getRefreshState(username);
-    
+
     // Skip if refresh is already in progress or scheduled
     if (state.isRefreshing || state.refreshTimer) {
       logDebug(
@@ -306,10 +306,10 @@ async function scheduleRefreshUnlocked({
     // Don't clear tokens here - let other mechanisms handle expired/missing tokens
     return;
   }
-  
+
   const username = tokens.username;
   const state = getRefreshState(username);
-  
+
   // Skip if already scheduling
   if (state.isRefreshing) {
     logDebug("Token refresh already in progress, skipping");
@@ -629,7 +629,7 @@ export async function refreshTokens({
   const doRefresh = async (): Promise<TokensFromRefresh> => {
     // Get state for this user
     const state = getRefreshState(userIdentifier);
-    
+
     if (state.isRefreshing && !force) {
       logDebug("Token refresh already in progress");
       throw new Error("Token refresh already in progress");
@@ -955,7 +955,7 @@ export async function forceRefreshTokens(
   const tokens = await retrieveTokens();
   const username = tokens?.username;
   const state = getRefreshState(username);
-  
+
   if (state.refreshTimer) {
     state.refreshTimer();
     state.refreshTimer = undefined;
@@ -977,30 +977,27 @@ if (isBrowserEnvironment()) {
   const visibilityHandler = () => {
     void handleVisibilityChange();
   };
-  
+
   // eslint-disable-next-line no-restricted-globals
-  globalThis.document.addEventListener(
-    "visibilitychange",
-    visibilityHandler
-  );
-  
-  // Store cleanup function  
+  globalThis.document.addEventListener("visibilitychange", visibilityHandler);
+
+  // Store cleanup function
   visibilityChangeListener = () => {
     globalThis.document.removeEventListener(
       "visibilitychange",
       visibilityHandler
     );
   };
-  
+
   // AUTO-CLEANUP: Clean up on page unload/hide
   autoCleanupHandler = () => {
     logDebug("Auto-cleanup triggered on page unload/hide");
     cleanupRefreshSystem();
   };
-  
+
   globalThis.addEventListener("beforeunload", autoCleanupHandler);
   globalThis.addEventListener("pagehide", autoCleanupHandler);
-  
+
   // For SPA navigation - cleanup on unload
   if (typeof globalThis.addEventListener === "function") {
     globalThis.addEventListener("unload", autoCleanupHandler);
@@ -1011,28 +1008,28 @@ if (isBrowserEnvironment()) {
   const startWatchdog = () => {
     const cleanup = setTimeoutWallClock(() => {
       void (async () => {
-      logDebug(`Watchdog tick at ${new Date().toISOString()}`);
-      
-      // Check all users' refresh states
-      const tokens = await retrieveTokensForRefresh();
-      const username = tokens?.username;
-      const state = getRefreshState(username);
-      
-      if (!state.refreshTimer && isDocumentVisible()) {
-        const lastRefresh = state.lastRefreshTime || 0;
-        if (Date.now() - lastRefresh > WATCHDOG_INTERVAL_MS) {
-          logDebug("Watchdog is triggering a refresh check");
-          void (async () => {
-            if (await shouldAttemptRefresh()) {
-              void scheduleRefresh();
-            }
-          })();
+        logDebug(`Watchdog tick at ${new Date().toISOString()}`);
+
+        // Check all users' refresh states
+        const tokens = await retrieveTokensForRefresh();
+        const username = tokens?.username;
+        const state = getRefreshState(username);
+
+        if (!state.refreshTimer && isDocumentVisible()) {
+          const lastRefresh = state.lastRefreshTime || 0;
+          if (Date.now() - lastRefresh > WATCHDOG_INTERVAL_MS) {
+            logDebug("Watchdog is triggering a refresh check");
+            void (async () => {
+              if (await shouldAttemptRefresh()) {
+                void scheduleRefresh();
+              }
+            })();
+          }
         }
-      }
-      // Only continue if cleanup hasn't been called
-      if (watchdogCleanup) {
-        watchdogCleanup = startWatchdog();
-      }
+        // Only continue if cleanup hasn't been called
+        if (watchdogCleanup) {
+          watchdogCleanup = startWatchdog();
+        }
       })();
     }, WATCHDOG_INTERVAL_MS);
     return cleanup;
@@ -1059,7 +1056,7 @@ export function cleanupRefreshSystem(username?: string): void {
     watchdogCleanup();
     watchdogCleanup = undefined;
   }
-  
+
   // Clean up auto-cleanup listeners (prevent memory leaks)
   if (autoCleanupHandler && isBrowserEnvironment()) {
     globalThis.removeEventListener("beforeunload", autoCleanupHandler);

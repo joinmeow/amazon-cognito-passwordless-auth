@@ -276,7 +276,9 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
  * This is needed because the refresh system needs to see expired tokens
  * to trigger immediate refresh.
  */
-export async function retrieveTokensForRefresh(): Promise<TokensFromStorage | undefined> {
+export async function retrieveTokensForRefresh(): Promise<
+  TokensFromStorage | undefined
+> {
   const { clientId, storage } = configure();
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
   const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
@@ -306,13 +308,18 @@ export async function retrieveTokensForRefresh(): Promise<TokensFromStorage | un
         expireAtDate = new Date(exp * 1000);
       }
     } catch (err) {
-      debug?.("[retrieveTokensForRefresh] Failed to parse exp from accessToken:", err);
+      debug?.(
+        "[retrieveTokensForRefresh] Failed to parse exp from accessToken:",
+        err
+      );
     }
   }
 
   // For refresh purposes, we need tokens even if expired
   if (!expireAtDate) {
-    debug?.("[retrieveTokensForRefresh] No expiry date found, but continuing for refresh");
+    debug?.(
+      "[retrieveTokensForRefresh] No expiry date found, but continuing for refresh"
+    );
     // Set a past date to trigger immediate refresh
     expireAtDate = new Date(Date.now() - 1);
   }

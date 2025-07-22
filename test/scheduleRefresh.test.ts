@@ -40,7 +40,7 @@ describe("ScheduleRefresh Lock", () => {
     const { storage } = configure();
     const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
     const customKeyPrefix = `Passwordless.testClient`;
-    
+
     await storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, "testuser");
     await storage.setItem(
       `${amplifyKeyPrefix}.testuser.accessToken`,
@@ -68,7 +68,7 @@ describe("ScheduleRefresh Lock", () => {
     const startTime = Date.now();
     await expect(scheduleRefresh()).resolves.toBeUndefined();
     const duration = Date.now() - startTime;
-    
+
     // Should have waited approximately 15 seconds before giving up
     expect(duration).toBeGreaterThan(14000);
     expect(duration).toBeLessThan(16000);

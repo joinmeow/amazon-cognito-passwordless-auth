@@ -301,14 +301,14 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
       authMethod: "REDIRECT",
       // OAuth doesn't provide device metadata
       newDeviceMetadata: undefined,
-      userConfirmationNecessary: false
+      userConfirmationNecessary: false,
     };
 
     debug?.("Processing OAuth tokens through standard flow (implicit)");
-    
+
     // Process tokens through the standard flow
-    tokens = await processTokens(tokensForProcessing) as TokensFromSignIn;
-    
+    tokens = (await processTokens(tokensForProcessing)) as TokensFromSignIn;
+
     debug?.("OAuth tokens successfully processed (implicit flow)");
   }
 
@@ -318,7 +318,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   await clear();
   debug?.("OAuth flow completed successfully");
-  
+
   return tokens;
 }
 
@@ -458,7 +458,9 @@ async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {
   // Extract username from access token
   let username: string;
   try {
-    const payload = parseJwtPayload<CognitoAccessTokenPayload>(json.access_token);
+    const payload = parseJwtPayload<CognitoAccessTokenPayload>(
+      json.access_token
+    );
     username = payload.username;
   } catch (error) {
     debug?.("Failed to extract username from access token:", error);
@@ -481,17 +483,17 @@ async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {
     authMethod: "REDIRECT",
     // OAuth doesn't provide device metadata
     newDeviceMetadata: undefined,
-    userConfirmationNecessary: false
+    userConfirmationNecessary: false,
   };
 
   debug?.("Processing OAuth tokens through standard flow");
-  
+
   // Process tokens through the standard flow
   // This will handle storage, refresh scheduling, and any callbacks
   const processedTokens = await processTokens(tokensForProcessing);
-  
+
   debug?.("OAuth tokens successfully processed");
-  
+
   return processedTokens as TokensFromSignIn;
 }
 

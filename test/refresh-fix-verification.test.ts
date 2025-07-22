@@ -1,6 +1,10 @@
 import { configure } from "../client/config.js";
 import { scheduleRefresh } from "../client/refresh.js";
-import { storeTokens, retrieveTokens, retrieveTokensForRefresh } from "../client/storage.js";
+import {
+  storeTokens,
+  retrieveTokens,
+  retrieveTokensForRefresh,
+} from "../client/storage.js";
 
 // Helper to create JWT tokens
 const createJWT = (claims: Record<string, unknown>) => {
@@ -27,8 +31,8 @@ describe("Expired Token Fix Verification", () => {
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
       fetch: fetchMock,
-      debug: (...args: any[]) => {
-        const msg = args.join(" ");
+      debug: (...args: unknown[]) => {
+        const msg = args.map(String).join(" ");
         debugLogs.push(msg);
       },
     });
@@ -50,7 +54,7 @@ describe("Expired Token Fix Verification", () => {
 
     await storeTokens(expiredTokens);
     const retrieved = await retrieveTokens();
-    
+
     // This is expected - retrieveTokens drops expired tokens
     expect(retrieved).toBeUndefined();
   });
@@ -71,7 +75,7 @@ describe("Expired Token Fix Verification", () => {
 
     await storeTokens(expiredTokens);
     const retrieved = await retrieveTokensForRefresh();
-    
+
     // This is the fix - retrieveTokensForRefresh returns expired tokens
     expect(retrieved).toBeDefined();
     expect(retrieved?.refreshToken).toBe("test-refresh-token");
@@ -111,24 +115,24 @@ describe("Expired Token Fix Verification", () => {
     });
 
     await storeTokens(expiredTokens);
-    
+
     // Clear logs
     debugLogs = [];
-    
+
     // This should now work with expired tokens
     await scheduleRefresh();
-    
+
     // Should detect expiry and refresh immediately
-    const refreshLog = debugLogs.find(log => 
+    const refreshLog = debugLogs.find((log) =>
       log.includes("refreshing immediately")
     );
-    
+
     expect(refreshLog).toBeDefined();
     expect(refreshLog).toContain("expires in -");
-    
+
     // Wait for refresh
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     // Should have called refresh
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

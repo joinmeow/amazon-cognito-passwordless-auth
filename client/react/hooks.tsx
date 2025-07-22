@@ -70,9 +70,9 @@ import React, {
   useReducer,
   ErrorInfo,
 } from "react";
-import { 
+import {
   signInWithRedirect as hostedSignInWithRedirect,
-  handleCognitoOAuthCallback 
+  handleCognitoOAuthCallback,
 } from "../hosted-oauth.js";
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
@@ -741,18 +741,20 @@ function _usePasswordless() {
 
     // Initial load
     void loadTokens();
-    
+
     // Check for OAuth callback
     const checkOAuthCallback = async () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const hashParams = new URLSearchParams(window.location.hash.substring(1));
-      
-      if (urlParams.has('code') || hashParams.has('access_token')) {
+      const urlParams = new URLSearchParams(globalThis.location.search);
+      const hashParams = new URLSearchParams(
+        globalThis.location.hash.substring(1)
+      );
+
+      if (urlParams.has("code") || hashParams.has("access_token")) {
         debug?.("OAuth callback detected, processing...");
         try {
           setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
           const oauthTokens = await handleCognitoOAuthCallback();
-          
+
           if (oauthTokens !== null) {
             // Update React state with the processed tokens
             updateTokens(oauthTokens);
@@ -761,12 +763,14 @@ function _usePasswordless() {
           }
         } catch (error) {
           debug?.("OAuth callback processing failed:", error);
-          setLastError(error instanceof Error ? error : new Error(String(error)));
+          setLastError(
+            error instanceof Error ? error : new Error(String(error))
+          );
           setSigninInStatus("SIGNIN_WITH_REDIRECT_FAILED");
         }
       }
     };
-    
+
     // Check for OAuth callback after initial load
     void checkOAuthCallback();
 
@@ -802,7 +806,8 @@ function _usePasswordless() {
         globalThis.removeEventListener("storage", handleStorageChange);
       }
     };
-  }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parseAndSetTokens, _setTokens, setSigninInStatus, setLastError]);
 
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
   useEffect(() => {
@@ -830,14 +835,14 @@ function _usePasswordless() {
   }, []);
 
   const toFido2Credential = useCallback(
-    (credential: StoredCredential | any) => {
+    (credential: StoredCredential) => {
       // Ensure lastSignIn is a Date object
       const normalizedCredential = {
         ...credential,
-        lastSignIn: credential.lastSignIn 
-          ? (typeof credential.lastSignIn === 'string' 
-              ? new Date(credential.lastSignIn) 
-              : credential.lastSignIn)
+        lastSignIn: credential.lastSignIn
+          ? typeof credential.lastSignIn === "string"
+            ? new Date(credential.lastSignIn)
+            : credential.lastSignIn
           : undefined,
       };
       return {
@@ -988,7 +993,9 @@ function _usePasswordless() {
           debug?.("Fetched FIDO2 credentials:", res.authenticators);
           dispatch({
             type: "SET_FIDO2_CREDENTIALS",
-            payload: res.authenticators.map(toFido2Credential),
+            payload: res.authenticators.map((credential) =>
+              toFido2Credential(credential as StoredCredential)
+            ),
           });
         }
       })
