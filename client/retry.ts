@@ -115,19 +115,19 @@ export function createFetchWithRetry(
           throw new Error(`ServerError:${status}`);
         }
         return res;
-      } catch (err: unknown) {
+      } catch (error: unknown) {
         if (
           init?.signal?.aborted ||
-          (err instanceof Error && err.name === "AbortError")
+          (error instanceof Error && error.name === "AbortError")
         ) {
-          throw err;
+          throw error;
         }
         if (attempt === maxRetries) {
-          throw err;
+          throw error;
         }
         debugFn?.(
           `fetchWithRetry attempt ${attempt}/${maxRetries} failed:`,
-          err
+          error
         );
         // Exponential backoff for all errors: 1s, 2s, 4s
         const backoff = baseDelayMs * Math.pow(2, attempt - 1);

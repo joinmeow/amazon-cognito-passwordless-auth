@@ -271,57 +271,6 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   };
 }
 
-/**
- * Store information about scheduled token refresh operations
- * This ensures consistency across hook remounts and even browser refreshes
- */
-export async function storeRefreshScheduleInfo({
-  isScheduled,
-  expiryTime,
-}: {
-  isScheduled: boolean;
-  expiryTime?: number;
-}) {
-  const { clientId, storage, debug } = configure();
-  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
-  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
-
-  debug?.(
-    `Setting refresh scheduled status: ${isScheduled}, expiry: ${expiryTime}`
-  );
-  await storage.setItem(scheduledKey, isScheduled.toString());
-
-  if (expiryTime) {
-    await storage.setItem(expiryKey, expiryTime.toString());
-  } else if (isScheduled === false) {
-    // Clear expiry time when scheduling is disabled
-    await storage.removeItem(expiryKey);
-  }
-}
-
-/**
- * Check if a token refresh is already scheduled
- * @returns Object containing scheduling status and expiry time
- */
-export async function getRefreshScheduleInfo(): Promise<{
-  isScheduled: boolean;
-  expiryTime?: number;
-}> {
-  const { clientId, storage } = configure();
-  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
-  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
-
-  const [isScheduledStr, expiryTimeStr] = await Promise.all([
-    storage.getItem(scheduledKey),
-    storage.getItem(expiryKey),
-  ]);
-
-  return {
-    isScheduled: isScheduledStr === "true",
-    expiryTime: expiryTimeStr ? parseInt(expiryTimeStr, 10) : undefined,
-  };
-}
-
 export interface RememberedDeviceRecord {
   deviceKey: string;
   groupKey: string;

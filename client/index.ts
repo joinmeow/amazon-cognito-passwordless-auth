@@ -24,11 +24,6 @@ if (isBrowser()) {
   void CognitoSecurityProvider.getInstance();
 }
 
-export function initialize(overrides?: Parameters<typeof configure>[0]) {
-  configure(overrides);
-  // Magic link handling has been removed
-}
-
 export const Passwordless = {
   configure,
   configureFromAmplify,
