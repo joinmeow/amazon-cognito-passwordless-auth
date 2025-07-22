@@ -20,7 +20,14 @@ jobs:
         run: npx eslint .
       - name: prettier
         run: npx prettier -c .
-      - name: test
-        run: npm test
+      - name: test with coverage
+        run: npm test -- --coverage
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage/lcov.info
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
       - name: dist
         run: npm run dist
