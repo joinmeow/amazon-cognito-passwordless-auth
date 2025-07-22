@@ -27,7 +27,7 @@ import {
   IdleState,
   busyState,
 } from "./model.js";
-import { scheduleRefresh } from "./refresh.js";
+import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
@@ -356,6 +356,9 @@ export const signOut = (props?: {
             activeSchedule.abortController.abort();
             activeRefreshSchedules.delete(userIdentifier);
           }
+          
+          // Clean up all refresh system resources (timers, listeners)
+          cleanupRefreshSystem(userIdentifier);
         }
 
         const tokens = await retrieveTokens();

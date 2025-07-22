@@ -888,7 +888,6 @@ signOut(options?: {
 // Token management
 refreshTokens(abort?: AbortSignal) => Promise<void>
 forceRefreshTokens(abort?: AbortSignal) => Promise<void>
-reloadTokensFromStorage() => Promise<void>
 markUserActive() => void  // Mark user as active for activity tracking
 
 // Device management

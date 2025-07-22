@@ -61,6 +61,7 @@ function clearRefreshState(username?: string): void {
 // Track cleanup functions
 let watchdogCleanup: (() => void) | undefined;
 let visibilityChangeListener: (() => void) | undefined;
+let autoCleanupHandler: (() => void) | undefined;
 
 // Max consecutive refresh failures before giving up
 const MAX_CONSECUTIVE_REFRESH_FAILURES = 5;
@@ -990,6 +991,20 @@ if (isBrowserEnvironment()) {
       visibilityHandler
     );
   };
+  
+  // AUTO-CLEANUP: Clean up on page unload/hide
+  autoCleanupHandler = () => {
+    logDebug("Auto-cleanup triggered on page unload/hide");
+    cleanupRefreshSystem();
+  };
+  
+  globalThis.addEventListener("beforeunload", autoCleanupHandler);
+  globalThis.addEventListener("pagehide", autoCleanupHandler);
+  
+  // For SPA navigation - cleanup on unload
+  if (typeof globalThis.addEventListener === "function") {
+    globalThis.addEventListener("unload", autoCleanupHandler);
+  }
 
   // Simplified watchdog with cleanup support
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -1043,6 +1058,14 @@ export function cleanupRefreshSystem(username?: string): void {
   if (watchdogCleanup) {
     watchdogCleanup();
     watchdogCleanup = undefined;
+  }
+  
+  // Clean up auto-cleanup listeners (prevent memory leaks)
+  if (autoCleanupHandler && isBrowserEnvironment()) {
+    globalThis.removeEventListener("beforeunload", autoCleanupHandler);
+    globalThis.removeEventListener("pagehide", autoCleanupHandler);
+    globalThis.removeEventListener("unload", autoCleanupHandler);
+    autoCleanupHandler = undefined;
   }
 
   // Get the appropriate refresh state

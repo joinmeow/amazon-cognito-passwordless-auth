@@ -70,7 +70,10 @@ import React, {
   useReducer,
   ErrorInfo,
 } from "react";
-import { signInWithRedirect as hostedSignInWithRedirect } from "../hosted-oauth.js";
+import { 
+  signInWithRedirect as hostedSignInWithRedirect,
+  handleCognitoOAuthCallback 
+} from "../hosted-oauth.js";
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
@@ -458,18 +461,6 @@ function _usePasswordless() {
     dispatch({ type: "SET_REFRESH_STATUS", isRefreshing });
   }, []);
 
-  // Unused - commented out to fix ESLint warning
-  // const setDeviceKey = useCallback((key: string | null) => {
-  //   dispatch({ type: "SET_DEVICE_KEY", payload: key });
-  // }, []);
-
-  // const setFido2Credentials = useCallback(
-  //   (credentials: Fido2Credential[] | undefined) => {
-  //     dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: credentials });
-  //   },
-  //   []
-  // );
-
   /** Translate authMethod → the corresponding *SIGNED_IN_WITH_* status */
   const signedInStatusForAuth = useCallback(
     (
@@ -750,6 +741,34 @@ function _usePasswordless() {
 
     // Initial load
     void loadTokens();
+    
+    // Check for OAuth callback
+    const checkOAuthCallback = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.substring(1));
+      
+      if (urlParams.has('code') || hashParams.has('access_token')) {
+        debug?.("OAuth callback detected, processing...");
+        try {
+          setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
+          const oauthTokens = await handleCognitoOAuthCallback();
+          
+          if (oauthTokens !== null) {
+            // Update React state with the processed tokens
+            updateTokens(oauthTokens);
+            setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
+            debug?.("OAuth callback processed successfully");
+          }
+        } catch (error) {
+          debug?.("OAuth callback processing failed:", error);
+          setLastError(error instanceof Error ? error : new Error(String(error)));
+          setSigninInStatus("SIGNIN_WITH_REDIRECT_FAILED");
+        }
+      }
+    };
+    
+    // Check for OAuth callback after initial load
+    void checkOAuthCallback();
 
     // Listen for storage events to detect token updates from other tabs
     const handleStorageChange = (e: StorageEvent) => {
@@ -811,9 +830,18 @@ function _usePasswordless() {
   }, []);
 
   const toFido2Credential = useCallback(
-    (credential: StoredCredential) => {
-      return {
+    (credential: StoredCredential | any) => {
+      // Ensure lastSignIn is a Date object
+      const normalizedCredential = {
         ...credential,
+        lastSignIn: credential.lastSignIn 
+          ? (typeof credential.lastSignIn === 'string' 
+              ? new Date(credential.lastSignIn) 
+              : credential.lastSignIn)
+          : undefined,
+      };
+      return {
+        ...normalizedCredential,
         busy: false,
         update: async (update: { friendlyName: string }) => {
           updateFido2Credential({
@@ -1779,11 +1807,6 @@ function _usePasswordless() {
     timeSinceLastActivitySeconds: useActivityTracking
       ? Math.round(timeSinceLastActivityMs / 1000)
       : null,
-    /** Re-load the latest token bundle from storage and push it into context */
-    reloadTokensFromStorage: async () => {
-      const latest = await retrieveTokens();
-      updateTokens(latest);
-    },
     /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
     signInWithRedirect: ({
       provider = "Google",
