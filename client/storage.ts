@@ -272,53 +272,70 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
 }
 
 /**
- * Store information about scheduled token refresh operations
- * This ensures consistency across hook remounts and even browser refreshes
+ * Retrieve tokens for refresh purposes, including expired tokens.
+ * This is needed because the refresh system needs to see expired tokens
+ * to trigger immediate refresh.
  */
-export async function storeRefreshScheduleInfo({
-  isScheduled,
-  expiryTime,
-}: {
-  isScheduled: boolean;
-  expiryTime?: number;
-}) {
-  const { clientId, storage, debug } = configure();
-  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
-  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
-
-  debug?.(
-    `Setting refresh scheduled status: ${isScheduled}, expiry: ${expiryTime}`
-  );
-  await storage.setItem(scheduledKey, isScheduled.toString());
-
-  if (expiryTime) {
-    await storage.setItem(expiryKey, expiryTime.toString());
-  } else if (isScheduled === false) {
-    // Clear expiry time when scheduling is disabled
-    await storage.removeItem(expiryKey);
-  }
-}
-
-/**
- * Check if a token refresh is already scheduled
- * @returns Object containing scheduling status and expiry time
- */
-export async function getRefreshScheduleInfo(): Promise<{
-  isScheduled: boolean;
-  expiryTime?: number;
-}> {
+export async function retrieveTokensForRefresh(): Promise<
+  TokensFromStorage | undefined
+> {
   const { clientId, storage } = configure();
-  const scheduledKey = `Passwordless.${clientId}.refreshScheduled`;
-  const expiryKey = `Passwordless.${clientId}.refreshExpiryTime`;
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+  const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
+  if (!username) {
+    return;
+  }
 
-  const [isScheduledStr, expiryTimeStr] = await Promise.all([
-    storage.getItem(scheduledKey),
-    storage.getItem(expiryKey),
+  const [accessToken, idToken, refreshToken] = await Promise.all([
+    storage.getItem(`${amplifyKeyPrefix}.${username}.accessToken`),
+    storage.getItem(`${amplifyKeyPrefix}.${username}.idToken`),
+    storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
   ]);
 
+  // If no refresh token, can't refresh
+  if (!refreshToken) {
+    return;
+  }
+
+  // Try to get expiry from access token
+  let expireAtDate: Date | undefined;
+  const { debug } = configure();
+
+  if (accessToken) {
+    try {
+      const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+      if (typeof exp === "number" && exp > 0) {
+        expireAtDate = new Date(exp * 1000);
+      }
+    } catch (err) {
+      debug?.(
+        "[retrieveTokensForRefresh] Failed to parse exp from accessToken:",
+        err
+      );
+    }
+  }
+
+  // For refresh purposes, we need tokens even if expired
+  if (!expireAtDate) {
+    debug?.(
+      "[retrieveTokensForRefresh] No expiry date found, but continuing for refresh"
+    );
+    // Set a past date to trigger immediate refresh
+    expireAtDate = new Date(Date.now() - 1);
+  }
+
+  // Get device key and auth method
+  const deviceKey = await retrieveDeviceKey(username);
+  const authMethod = await retrieveAuthMethod(username);
+
   return {
-    isScheduled: isScheduledStr === "true",
-    expiryTime: expiryTimeStr ? parseInt(expiryTimeStr, 10) : undefined,
+    idToken: idToken ?? undefined,
+    accessToken: accessToken ?? undefined,
+    refreshToken: refreshToken ?? undefined,
+    expireAt: expireAtDate,
+    username,
+    deviceKey,
+    authMethod,
   };
 }
 

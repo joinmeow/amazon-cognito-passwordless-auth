@@ -14,10 +14,11 @@
  */
 import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
-import { storeTokens } from "./storage.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { processTokens } from "./common.js";
+import { TokensFromSignIn } from "./model.js";
 
 const STATE_KEY = "cognito_oauth_state";
 const PKCE_KEY = "cognito_oauth_pkce";
@@ -116,7 +117,7 @@ export async function signInWithRedirect({
   cfg.location.href = oauthUrl;
 }
 
-export async function handleCognitoOAuthCallback(): Promise<void> {
+export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | null> {
   const cfg = configure();
   const { debug } = cfg;
 
@@ -124,7 +125,7 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
 
   if (!cfg.hostedUi) {
     debug?.("No hostedUi config found, ignoring redirect");
-    return;
+    return null;
   }
 
   const { redirectSignIn, responseType = "code" } = cfg.hostedUi;
@@ -154,7 +155,7 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
 
   if (inFlight !== "true") {
     debug?.("No OAuth flow in progress, ignoring redirect");
-    return; // not our redirect
+    return null; // not our redirect
   }
 
   // Mark as processing to prevent duplicate handling in concurrent invocations
@@ -184,7 +185,7 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
 
   if (normalizedCurrentUrl !== normalizedRedirectUrl) {
     debug?.(`URL mismatch, not our expected redirect URL. Ignoring.`);
-    return;
+    return null;
   }
 
   debug?.("URL matches expected redirect URL, continuing OAuth flow");
@@ -197,7 +198,13 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
     throw new Error(errorDesc);
   }
 
-  const returnedState = url.searchParams.get("state");
+  // For code flow, state is in search params. For implicit flow, it's in hash
+  let returnedState = url.searchParams.get("state");
+  if (!returnedState && responseType === "token") {
+    // Check hash for implicit flow
+    const hashParams = new URLSearchParams(url.hash.substring(1));
+    returnedState = hashParams.get("state");
+  }
   debug?.(`Returned state parameter: ${returnedState?.substring(0, 10)}...`);
 
   // Wrap OAuth state validation in a lock
@@ -226,6 +233,8 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
 
   debug?.("OAuth state validation successful");
 
+  let tokens: TokensFromSignIn;
+
   if (responseType === "code") {
     const code = url.searchParams.get("code");
     debug?.(`Authorization code received: ${code?.substring(0, 5)}...`);
@@ -237,7 +246,7 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
     }
 
     debug?.("Proceeding to exchange code for tokens");
-    await exchangeCodeForTokens(code);
+    tokens = await exchangeCodeForTokens(code);
   } else {
     // implicit flow: tokens are in hash
     debug?.("Using implicit flow, extracting tokens from URL hash");
@@ -254,10 +263,10 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
       `Tokens extracted - Access token: ${access_token ? "present" : "missing"}, ID token: ${id_token ? "present" : "missing"}, Refresh token: ${refresh_token ? "present" : "missing"}`
     );
 
-    if (!access_token || !id_token) {
-      debug?.("Required tokens missing in implicit flow response");
+    if (!access_token) {
+      debug?.("Required access token missing in implicit flow response");
       await clear();
-      throw new Error("Tokens missing in implicit flow");
+      throw new Error("Access token missing in implicit flow");
     }
 
     // Derive expiry from the access-token's exp claim (server time) to avoid
@@ -272,14 +281,35 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
     }
     debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
 
-    await storeTokens({
+    // Extract username from access token
+    let username: string;
+    try {
+      const payload = parseJwtPayload<CognitoAccessTokenPayload>(access_token);
+      username = payload.username;
+    } catch (error) {
+      debug?.("Failed to extract username from access token:", error);
+      throw new Error("Invalid access token received from OAuth");
+    }
+
+    // Prepare tokens for processTokens
+    const tokensForProcessing: TokensFromSignIn = {
       accessToken: access_token,
-      idToken: id_token,
-      refreshToken: refresh_token ?? undefined,
+      idToken: id_token || "", // Empty string if missing - will be handled by processTokens
+      refreshToken: refresh_token || "",
       expireAt,
+      username,
       authMethod: "REDIRECT",
-    });
-    debug?.("Tokens successfully stored from implicit flow");
+      // OAuth doesn't provide device metadata
+      newDeviceMetadata: undefined,
+      userConfirmationNecessary: false,
+    };
+
+    debug?.("Processing OAuth tokens through standard flow (implicit)");
+
+    // Process tokens through the standard flow
+    tokens = (await processTokens(tokensForProcessing)) as TokensFromSignIn;
+
+    debug?.("OAuth tokens successfully processed (implicit flow)");
   }
 
   // cleanup URL
@@ -288,9 +318,11 @@ export async function handleCognitoOAuthCallback(): Promise<void> {
 
   await clear();
   debug?.("OAuth flow completed successfully");
+
+  return tokens;
 }
 
-async function exchangeCodeForTokens(code: string) {
+async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {
   const cfg = configure();
   const { debug } = cfg;
 
@@ -423,14 +455,46 @@ async function exchangeCodeForTokens(code: string) {
   }
   debug?.(`Token expiry set to: ${expireAt.toISOString()}`);
 
-  await storeTokens({
+  // Extract username from access token
+  let username: string;
+  try {
+    const payload = parseJwtPayload<CognitoAccessTokenPayload>(
+      json.access_token
+    );
+    username = payload.username;
+  } catch (error) {
+    debug?.("Failed to extract username from access token:", error);
+    throw new Error("Invalid access token received from OAuth");
+  }
+
+  // Validate we have required tokens
+  if (!json.id_token) {
+    debug?.("Warning: No ID token in OAuth response");
+    // For OAuth flows without ID token, we'll create a minimal one later
+  }
+
+  // Prepare tokens for processTokens
+  const tokensForProcessing: TokensFromSignIn = {
     accessToken: json.access_token,
-    idToken: json.id_token,
-    refreshToken: json.refresh_token,
+    idToken: json.id_token || "", // Empty string if missing - will be handled by processTokens
+    refreshToken: json.refresh_token || "",
     expireAt,
+    username,
     authMethod: "REDIRECT",
-  });
-  debug?.("Tokens successfully stored from code exchange");
+    // OAuth doesn't provide device metadata
+    newDeviceMetadata: undefined,
+    userConfirmationNecessary: false,
+  };
+
+  debug?.("Processing OAuth tokens through standard flow");
+
+  // Process tokens through the standard flow
+  // This will handle storage, refresh scheduling, and any callbacks
+  const processedTokens = await processTokens(tokensForProcessing);
+
+  debug?.("OAuth tokens successfully processed");
+
+  return processedTokens as TokensFromSignIn;
 }
 
 async function clearInternal() {

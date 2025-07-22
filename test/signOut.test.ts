@@ -36,7 +36,7 @@ describe("SignOut Lock", () => {
     expect(duration).toBeLessThan(100);
   });
 
-  test("should timeout when lock is held", async () => {
+  test("should complete when another process holds the lock", async () => {
     // First, store minimal user data so signOut knows there's a user
     const { storage } = configure();
     const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
@@ -45,8 +45,12 @@ describe("SignOut Lock", () => {
       `${amplifyKeyPrefix}.testuser.accessToken`,
       createValidJWT()
     );
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.refreshToken`,
+      "test-refresh-token"
+    );
 
-    // Now block the lock with a non-stale lock to cause timeout
+    // Now block the lock with a non-stale lock to simulate another process
     const userKey = `Passwordless.testClient.testuser.refreshLock`;
     const lockData = {
       id: "test-lock-id",
@@ -55,6 +59,13 @@ describe("SignOut Lock", () => {
     await storage.setItem(userKey, JSON.stringify(lockData));
 
     const { signedOut } = signOut();
-    await expect(signedOut).rejects.toThrow(/Timeout acquiring lock/);
-  });
+
+    // Release the lock after a short delay to let signOut proceed
+    setTimeout(async () => {
+      await storage.removeItem(userKey);
+    }, 100);
+
+    // signOut should eventually complete when lock is released
+    await expect(signedOut).resolves.toBeUndefined();
+  }, 20000); // Increase timeout for lock wait
 });

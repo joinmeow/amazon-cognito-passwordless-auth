@@ -70,7 +70,10 @@ import React, {
   useReducer,
   ErrorInfo,
 } from "react";
-import { signInWithRedirect as hostedSignInWithRedirect } from "../hosted-oauth.js";
+import {
+  signInWithRedirect as hostedSignInWithRedirect,
+  handleCognitoOAuthCallback,
+} from "../hosted-oauth.js";
 
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
@@ -458,18 +461,6 @@ function _usePasswordless() {
     dispatch({ type: "SET_REFRESH_STATUS", isRefreshing });
   }, []);
 
-  // Unused - commented out to fix ESLint warning
-  // const setDeviceKey = useCallback((key: string | null) => {
-  //   dispatch({ type: "SET_DEVICE_KEY", payload: key });
-  // }, []);
-
-  // const setFido2Credentials = useCallback(
-  //   (credentials: Fido2Credential[] | undefined) => {
-  //     dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: credentials });
-  //   },
-  //   []
-  // );
-
   /** Translate authMethod → the corresponding *SIGNED_IN_WITH_* status */
   const signedInStatusForAuth = useCallback(
     (
@@ -624,72 +615,18 @@ function _usePasswordless() {
   );
 
   // ---------------------------------------------------------------------------
-  // ♻️  Schedule automatic token refresh and keep auth status stable
+  // ♻️  Keep auth status stable when tokens change
   // ---------------------------------------------------------------------------
+  // NOTE: Token refresh scheduling is handled by processTokens, not here.
+  // This prevents duplicate scheduling and infinite loops.
 
-  // At component mount, schedule token refresh
-  const refreshToken = tokens?.refreshToken;
-  const expireAtTime = tokens?.expireAt?.getTime();
-  // Preserve the method used to obtain the current tokens so that we can
-  // restore the correct *SIGNED_IN_WITH_* status after the background refresh.
-  const authMethodFromTokens = tokens?.authMethod;
-
+  // Update auth status when tokens change
   useEffect(() => {
-    if (!refreshToken) {
-      return;
+    if (tokens?.refreshToken && tokens?.authMethod) {
+      const status = signedInStatusForAuth(tokens.authMethod);
+      status && setSigninInStatus(status);
     }
-
-    const abort = new AbortController();
-
-    // Indicate that we are about to schedule or run a refresh operation
-    dispatch({ type: "SET_REFRESH_STATUS", isScheduling: true });
-
-    scheduleRefresh({
-      abort: abort.signal,
-      tokensCb: (newTokens) => {
-        if (newTokens) {
-          const merged = { ...tokens, ...newTokens } as TokensFromStorage;
-          _setTokens(merged);
-          parseAndSetTokens(merged);
-        } else {
-          _setTokens(undefined);
-          parseAndSetTokens(undefined);
-          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-        }
-      },
-      isRefreshingCb: (isRefreshing) => {
-        dispatch({ type: "SET_REFRESH_STATUS", isRefreshing: isRefreshing });
-
-        const status = signedInStatusForAuth(authMethodFromTokens);
-        status && setSigninInStatus(status);
-      },
-    })
-      .catch((err) => {
-        const { debug } = configure();
-        debug?.("Failed to schedule token refresh:", err);
-
-        const status = signedInStatusForAuth(authMethodFromTokens);
-        status && setSigninInStatus(status);
-
-        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-      })
-      .finally(() => {
-        dispatch({ type: "SET_REFRESH_STATUS", isScheduling: false });
-      });
-
-    return () => abort.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    // Only depend on specific token properties that should trigger refresh
-    refreshToken,
-    expireAtTime,
-    authMethodFromTokens,
-    // These don't depend on tokens changing, so safe to include
-    signedInStatusForAuth,
-    parseAndSetTokens,
-    setSigninInStatus,
-    _setTokens,
-  ]);
+  }, [tokens, signedInStatusForAuth, setSigninInStatus]);
 
   // Handle incomplete token bundle (edge-case: storage was tampered with)
   // Use ref to prevent circular dependencies
@@ -805,6 +742,38 @@ function _usePasswordless() {
     // Initial load
     void loadTokens();
 
+    // Check for OAuth callback
+    const checkOAuthCallback = async () => {
+      const urlParams = new URLSearchParams(globalThis.location.search);
+      const hashParams = new URLSearchParams(
+        globalThis.location.hash.substring(1)
+      );
+
+      if (urlParams.has("code") || hashParams.has("access_token")) {
+        debug?.("OAuth callback detected, processing...");
+        try {
+          setSigninInStatus("STARTING_SIGN_IN_WITH_REDIRECT");
+          const oauthTokens = await handleCognitoOAuthCallback();
+
+          if (oauthTokens !== null) {
+            // Update React state with the processed tokens
+            updateTokens(oauthTokens);
+            setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
+            debug?.("OAuth callback processed successfully");
+          }
+        } catch (error) {
+          debug?.("OAuth callback processing failed:", error);
+          setLastError(
+            error instanceof Error ? error : new Error(String(error))
+          );
+          setSigninInStatus("SIGNIN_WITH_REDIRECT_FAILED");
+        }
+      }
+    };
+
+    // Check for OAuth callback after initial load
+    void checkOAuthCallback();
+
     // Listen for storage events to detect token updates from other tabs
     const handleStorageChange = (e: StorageEvent) => {
       // Check if this is a Cognito token-related key
@@ -837,7 +806,8 @@ function _usePasswordless() {
         globalThis.removeEventListener("storage", handleStorageChange);
       }
     };
-  }, [parseAndSetTokens, _setTokens, setSigninInStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parseAndSetTokens, _setTokens, setSigninInStatus, setLastError]);
 
   // Give easy access to isUserVerifyingPlatformAuthenticatorAvailable
   useEffect(() => {
@@ -866,8 +836,17 @@ function _usePasswordless() {
 
   const toFido2Credential = useCallback(
     (credential: StoredCredential) => {
-      return {
+      // Ensure lastSignIn is a Date object
+      const normalizedCredential = {
         ...credential,
+        lastSignIn: credential.lastSignIn
+          ? typeof credential.lastSignIn === "string"
+            ? new Date(credential.lastSignIn)
+            : credential.lastSignIn
+          : undefined,
+      };
+      return {
+        ...normalizedCredential,
         busy: false,
         update: async (update: { friendlyName: string }) => {
           updateFido2Credential({
@@ -1014,7 +993,9 @@ function _usePasswordless() {
           debug?.("Fetched FIDO2 credentials:", res.authenticators);
           dispatch({
             type: "SET_FIDO2_CREDENTIALS",
-            payload: res.authenticators.map(toFido2Credential),
+            payload: res.authenticators.map((credential) =>
+              toFido2Credential(credential as StoredCredential)
+            ),
           });
         }
       })
@@ -1120,10 +1101,33 @@ function _usePasswordless() {
    */
   const updateTokens = useCallback(
     (next: TokensFromStorage | undefined) => {
-      _setTokens(next);
-      parseAndSetTokens(next);
+      // Only update if tokens actually changed
+      const current = tokens;
+
+      // If both undefined, no change needed
+      if (!current && !next) return;
+
+      // If one is undefined, definitely update
+      if (!current || !next) {
+        _setTokens(next);
+        parseAndSetTokens(next);
+        return;
+      }
+
+      // Check if tokens actually changed
+      const hasChanges =
+        current.accessToken !== next.accessToken ||
+        current.idToken !== next.idToken ||
+        current.refreshToken !== next.refreshToken ||
+        current.expireAt?.getTime() !== next.expireAt?.getTime();
+
+      if (hasChanges) {
+        _setTokens(next);
+        parseAndSetTokens(next);
+      }
+      // If no changes, skip update to prevent re-renders
     },
-    [parseAndSetTokens, _setTokens]
+    [tokens, parseAndSetTokens, _setTokens]
   );
 
   // Handle expired token refresh when signInStatus is REFRESHING_SIGN_IN
@@ -1810,11 +1814,6 @@ function _usePasswordless() {
     timeSinceLastActivitySeconds: useActivityTracking
       ? Math.round(timeSinceLastActivityMs / 1000)
       : null,
-    /** Re-load the latest token bundle from storage and push it into context */
-    reloadTokensFromStorage: async () => {
-      const latest = await retrieveTokens();
-      updateTokens(latest);
-    },
     /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
     signInWithRedirect: ({
       provider = "Google",

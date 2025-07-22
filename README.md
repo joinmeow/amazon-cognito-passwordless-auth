@@ -1,5 +1,7 @@
 # Meow Cognito Passwordless Auth (Client)
 
+[![codecov](https://codecov.io/gh/joinmeow/amazon-cognito-passwordless-auth/branch/main/graph/badge.svg)](https://codecov.io/gh/joinmeow/amazon-cognito-passwordless-auth)
+
 A client-side library for implementing passwordless authentication with Amazon Cognito. This package provides the frontend implementation for various **secure** passwordless authentication methods:
 
 - **FIDO2**: aka **WebAuthn**, i.e. sign in with Face, Touch, YubiKey, etc. This includes support for **Passkeys** (i.e. usernameless authentication).
@@ -888,7 +890,6 @@ signOut(options?: {
 // Token management
 refreshTokens(abort?: AbortSignal) => Promise<void>
 forceRefreshTokens(abort?: AbortSignal) => Promise<void>
-reloadTokensFromStorage() => Promise<void>
 markUserActive() => void  // Mark user as active for activity tracking
 
 // Device management

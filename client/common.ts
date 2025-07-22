@@ -27,11 +27,28 @@ import {
   IdleState,
   busyState,
 } from "./model.js";
-import { scheduleRefresh } from "./refresh.js";
+import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
+
+// Prevent duplicate refresh scheduling within this time window
+const REFRESH_DEDUPLICATION_WINDOW_MS = 300000; // 5 minutes
+
+// Delay initial refresh scheduling for fresh logins
+const FRESH_LOGIN_REFRESH_DELAY_MS = 120000; // 2 minutes
+
+// Track active refresh schedules to prevent duplicate scheduling
+// Key: username, Value: { scheduledAt: timestamp, abortController: AbortController, refreshToken: string }
+const activeRefreshSchedules = new Map<
+  string,
+  {
+    scheduledAt: number;
+    abortController: AbortController;
+    refreshToken: string;
+  }
+>();
 
 /**
  * Process tokens after authentication or refresh.
@@ -43,7 +60,6 @@ import { CognitoAccessTokenPayload } from "./jwt-model.js";
  * This MUST be called for all auth flows before any custom callbacks.
  *
  * @param tokens The tokens to process
- * @param abort Optional abort signal
  * @returns The processed tokens (with device key and other metadata)
  */
 async function processTokensInternal(
@@ -54,27 +70,43 @@ async function processTokensInternal(
 
   debug?.("🔄 [Process Tokens] Starting token processing after authentication");
 
+  // Normalize tokens early for consistency
+  const normalizedTokens = {
+    ...tokens,
+    // Ensure idToken is string or undefined, never null or other falsy values
+    idToken: tokens.idToken || undefined,
+    // Preserve authMethod explicitly
+    authMethod: tokens.authMethod,
+  } as TokensFromSignIn | TokensFromRefresh;
+
   // Log token structure to help debug OAuth flows
   debug?.("🔄 [Process Tokens] Processing tokens structure:", {
-    hasAccessToken: !!tokens.accessToken,
-    hasIdToken: !!tokens.idToken,
-    hasRefreshToken: !!tokens.refreshToken,
-    hasUsername: !!tokens.username,
-    hasExpireAt: !!tokens.expireAt,
-    hasDeviceKey: !!tokens.deviceKey,
-    authMethod: tokens.authMethod || "unknown",
-    hasNewDeviceMetadata: !!(tokens as TokensFromSignIn).newDeviceMetadata,
+    hasAccessToken: !!normalizedTokens.accessToken,
+    hasIdToken: !!normalizedTokens.idToken,
+    hasRefreshToken: !!normalizedTokens.refreshToken,
+    hasUsername: !!normalizedTokens.username,
+    hasExpireAt: !!normalizedTokens.expireAt,
+    hasDeviceKey: !!normalizedTokens.deviceKey,
+    authMethod: normalizedTokens.authMethod || "unknown",
+    hasNewDeviceMetadata: !!(normalizedTokens as TokensFromSignIn)
+      .newDeviceMetadata,
   });
 
   // 1. Process device confirmation if needed
-  if ("newDeviceMetadata" in tokens && tokens.newDeviceMetadata?.deviceKey) {
+  if (
+    "newDeviceMetadata" in normalizedTokens &&
+    normalizedTokens.newDeviceMetadata?.deviceKey
+  ) {
     debug?.(
       "🔄 [Process Tokens] Detected new device metadata with device key:",
-      tokens.newDeviceMetadata.deviceKey
+      normalizedTokens.newDeviceMetadata.deviceKey
     );
 
     // Complete device confirmation if this is a sign-in (has accessToken)
-    if ("accessToken" in tokens && "newDeviceMetadata" in tokens) {
+    if (
+      "accessToken" in normalizedTokens &&
+      "newDeviceMetadata" in normalizedTokens
+    ) {
       // According to AWS docs, we should always confirm a device after successful auth
       // The purpose of device confirmation is to prepare for future MFA bypass,
       // not to require MFA for confirmation
@@ -84,14 +116,18 @@ async function processTokensInternal(
 
       try {
         // We can safely cast to TokensFromSignIn here since we've checked for newDeviceMetadata
-        tokens = await handleDeviceConfirmation(tokens);
+        // Update normalizedTokens with the result of device confirmation
+        Object.assign(
+          normalizedTokens,
+          await handleDeviceConfirmation(normalizedTokens)
+        );
         debug?.(
           "✅ [Process Tokens] Device confirmation completed in processTokens"
         );
-      } catch (err) {
+      } catch (error) {
         debug?.(
           "❌ [Process Tokens] Error during device confirmation in processTokens:",
-          err
+          error
         );
       }
     } else {
@@ -99,13 +135,16 @@ async function processTokensInternal(
         "🔄 [Process Tokens] Setting deviceKey without full device confirmation (no accessToken)"
       );
       // Persist deviceKey for convenience; remembering decision happens later
-      await storeDeviceKey(tokens.username, tokens.newDeviceMetadata.deviceKey);
+      await storeDeviceKey(
+        normalizedTokens.username,
+        normalizedTokens.newDeviceMetadata.deviceKey
+      );
     }
-  } else if (tokens.deviceKey) {
-    const record = await getRememberedDevice(tokens.username);
+  } else if (normalizedTokens.deviceKey) {
+    const record = await getRememberedDevice(normalizedTokens.username);
     const remembered = record?.remembered ?? false;
     debug?.(
-      `🔄 [Process Tokens] Using existing device key ${tokens.deviceKey}, remembered: ${remembered}`
+      `🔄 [Process Tokens] Using existing device key ${normalizedTokens.deviceKey}, remembered: ${remembered}`
     );
   } else {
     debug?.("🔄 [Process Tokens] No device key available in tokens");
@@ -116,65 +155,100 @@ async function processTokensInternal(
   // 2. Store tokens for persistence
   debug?.("🔄 [Process Tokens] Storing tokens for persistence");
 
-  // Make sure we're not passing undefined idToken to storeTokens
-  // TokensToStore requires idToken to be string or undefined, not null
-  const tokensToStore = {
-    ...tokens,
-    // Explicitly ensure idToken is undefined if not present (not null)
-    idToken: tokens.idToken || undefined,
-    // Make sure authMethod persists through storage
-    authMethod: tokens.authMethod,
-  };
-
-  await storeTokens(tokensToStore);
+  // Store the already normalized tokens
+  await storeTokens(normalizedTokens);
   debug?.("🔄 [Process Tokens] After storeTokens, tokens:", {
-    hasAccessToken: !!tokensToStore.accessToken,
-    hasIdToken: !!tokensToStore.idToken,
-    hasRefreshToken: !!tokensToStore.refreshToken,
-    username: tokensToStore.username,
-    expiresAt: tokensToStore.expireAt?.toISOString(),
+    hasAccessToken: !!normalizedTokens.accessToken,
+    hasIdToken: !!normalizedTokens.idToken,
+    hasRefreshToken: !!normalizedTokens.refreshToken,
+    username: normalizedTokens.username,
+    expiresAt: normalizedTokens.expireAt?.toISOString(),
   });
 
   // 3. Schedule refresh if we have a refresh token
   // But only if this is NOT a fresh login (indicated by newDeviceMetadata)
   // This prevents immediate refresh scheduling right after login
-  if (tokens.refreshToken && !("newDeviceMetadata" in tokens)) {
-    debug?.("🔄 [Process Tokens] Scheduling token refresh (not a fresh login)");
-    scheduleRefresh({
-      abort,
-      tokensCb: (newTokens) => {
-        if (!newTokens) return;
-        // We don't need to store tokens here because processTokens will be called
-        // for the refresh tokens too, and it will store them.
-        return Promise.resolve();
-      },
-    }).catch((err) => {
-      debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
-    });
-  } else if (tokens.refreshToken) {
-    // For fresh logins, we'll still schedule a refresh but with a significant delay
-    // This ensures tokens don't expire while the user is active, but doesn't cause
-    // immediate refreshes after login
-    debug?.(
-      "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
+  if (normalizedTokens.refreshToken && normalizedTokens.username) {
+    // Check if we already have an active schedule for this user
+    const existingSchedule = activeRefreshSchedules.get(
+      normalizedTokens.username
     );
+    const now = Date.now();
 
-    // Delay scheduling by 2 minutes to avoid multiple refreshes during app initialization
-    setTimeout(() => {
-      debug?.("🔄 [Process Tokens] Executing delayed token refresh schedule");
+    // Skip if we already scheduled for this user recently (within 5 minutes)
+    if (
+      existingSchedule &&
+      now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS
+    ) {
+      debug?.(
+        "🔄 [Process Tokens] Refresh already scheduled for this user, skipping duplicate"
+      );
+      return normalizedTokens;
+    }
+
+    // Clear any existing schedule for this user
+    if (existingSchedule?.abortController) {
+      existingSchedule.abortController.abort();
+      activeRefreshSchedules.delete(normalizedTokens.username);
+    }
+
+    const scheduleAbort = new AbortController();
+
+    // Connect external abort signal to our schedule abort controller
+    if (abort) {
+      abort.addEventListener(
+        "abort",
+        () => {
+          scheduleAbort.abort();
+          // Clean up the schedule tracking when aborted
+          if (normalizedTokens.username) {
+            activeRefreshSchedules.delete(normalizedTokens.username);
+          }
+        },
+        { once: true }
+      );
+    }
+
+    // Track this schedule to prevent duplicates
+    activeRefreshSchedules.set(normalizedTokens.username, {
+      scheduledAt: now,
+      abortController: scheduleAbort,
+      refreshToken: normalizedTokens.refreshToken,
+    });
+
+    const scheduleFn = () => {
+      debug?.("🔄 [Process Tokens] Scheduling token refresh");
       scheduleRefresh({
-        abort,
+        abort: scheduleAbort.signal,
         tokensCb: (newTokens) => {
+          // Always clear the schedule tracking when refresh completes (success or no tokens)
+          if (normalizedTokens.username) {
+            activeRefreshSchedules.delete(normalizedTokens.username);
+          }
           if (!newTokens) return;
+          // We don't need to store tokens here because processTokens will be called
+          // for the refresh tokens too, and it will store them.
           return Promise.resolve();
         },
       }).catch((err) => {
-        debug?.(
-          "❌ [Process Tokens] Failed to schedule delayed token refresh:",
-          err
-        );
+        debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
+        // Clear the schedule tracking on error
+        if (normalizedTokens.username) {
+          activeRefreshSchedules.delete(normalizedTokens.username);
+        }
       });
-    }, 120000); // 2 minutes delay
+    };
+
+    if (!("newDeviceMetadata" in normalizedTokens)) {
+      // Not a fresh login, schedule immediately
+      scheduleFn();
+    } else {
+      // Fresh login, delay by 2 minutes
+      debug?.(
+        "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
+      );
+      setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
+    }
   } else {
     debug?.(
       "🔄 [Process Tokens] No refresh token available, skipping refresh scheduling"
@@ -182,7 +256,7 @@ async function processTokensInternal(
   }
 
   debug?.("✅ [Process Tokens] Token processing completed successfully");
-  return tokens;
+  return normalizedTokens;
 }
 
 /**
@@ -204,8 +278,8 @@ export async function processTokens(
         tokens.accessToken
       );
       username = accessPayload.username;
-    } catch (err) {
-      debug?.("Failed to parse username from access token:", err);
+    } catch (error) {
+      debug?.("Failed to parse username from access token:", error);
       // Continue to throw the more specific error below
     }
   }
@@ -273,6 +347,20 @@ export const signOut = (props?: {
     const doSignOut = async () => {
       try {
         debug?.("signOut: performing sign-out for user", userIdentifier);
+
+        // Clean up any active refresh schedules for this user
+        if (userIdentifier) {
+          const activeSchedule = activeRefreshSchedules.get(userIdentifier);
+          if (activeSchedule) {
+            debug?.("signOut: cancelling active refresh schedule for user");
+            activeSchedule.abortController.abort();
+            activeRefreshSchedules.delete(userIdentifier);
+          }
+
+          // Clean up all refresh system resources (timers, listeners)
+          cleanupRefreshSystem(userIdentifier);
+        }
+
         const tokens = await retrieveTokens();
         if (abort.signal.aborted) {
           debug?.("Aborting sign-out");
@@ -329,11 +417,11 @@ export const signOut = (props?: {
         }
 
         statusCb?.("SIGNED_OUT");
-      } catch (err) {
+      } catch (error) {
         if (abort.signal.aborted) return;
-        debug?.("Error during sign-out:", err);
+        debug?.("Error during sign-out:", error);
         currentStatus && statusCb?.(currentStatus);
-        throw err;
+        throw error;
       }
     };
     if (lockKey) {

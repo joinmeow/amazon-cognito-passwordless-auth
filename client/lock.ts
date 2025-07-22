@@ -208,16 +208,16 @@ export async function withStorageLock<T>(
           await sleep(DEFAULT_RETRY_DELAY_MS * attempt);
         }
       }
-    } catch (err) {
+    } catch (error) {
       debug?.(
         "withStorageLock: storage error during lock acquisition",
         key,
-        err
+        error
       );
       // Handle storage errors
       if (attempt === maxAcquisitionAttempts) {
         throw new Error(
-          `Failed to acquire lock due to storage error: ${String(err)}`
+          `Failed to acquire lock due to storage error: ${String(error)}`
         );
       }
     }
@@ -246,9 +246,9 @@ export async function withStorageLock<T>(
           key
         );
       }
-    } catch (err) {
+    } catch (error) {
       // Log but don't throw - the operation succeeded
-      debug?.("withStorageLock: error releasing lock", key, err);
+      debug?.("withStorageLock: error releasing lock", key, error);
     }
   }
 }
