@@ -19,3 +19,7 @@ node_modules
 ./custom-auth/**/*
 ./lib/**/*
 ./react/**/*
+
+# Test coverage
+coverage/
+*.lcov
