@@ -171,7 +171,7 @@ describe("OAuth Integration with processTokens", () => {
       mockLocation.hash =
         "#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
       mockLocation.search = "";
-      mockConfig.hostedUi.responseType = "token";
+      mockConfig.hostedUi!.responseType = "token";
 
       mockStorage.getItem.mockImplementation((key: string) => {
         if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
