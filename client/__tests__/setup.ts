@@ -27,6 +27,7 @@ jest.mock("../util.js", () => {
     },
     parseJwtPayload: (token: string) => {
       // Simple mock implementation
+      // eslint-disable-next-line security/detect-possible-timing-attacks
       if (token !== "mock-access-token") {
         throw new Error("Invalid token");
       }
@@ -43,6 +44,7 @@ Object.defineProperty(globalThis, "crypto", {
   value: {
     getRandomValues: (arr: Uint8Array) => {
       for (let i = 0; i < arr.length; i++) {
+        // eslint-disable-next-line security/detect-object-injection
         arr[i] = Math.floor(Math.random() * 256);
       }
       return arr;
