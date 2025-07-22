@@ -20,5 +20,7 @@ jobs:
         run: npx eslint .
       - name: prettier
         run: npx prettier -c .
+      - name: test
+        run: npm test
       - name: dist
         run: npm run dist

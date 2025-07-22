@@ -14,7 +14,7 @@
  */
 import { configure, getTokenEndpoint } from "./config.js";
 import { TokensFromRefresh } from "./model.js";
-import { retrieveTokens } from "./storage.js";
+import { retrieveTokens, retrieveTokensForRefresh } from "./storage.js";
 import { getTokensFromRefreshToken, initiateAuth } from "./cognito-api.js";
 import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
@@ -33,9 +33,38 @@ type RefreshState = {
   visibilityTimer?: ReturnType<typeof setTimeout>;
 };
 
-const refreshState: RefreshState = {
-  isRefreshing: false,
-};
+// Per-user refresh state to prevent conflicts
+const refreshStateMap = new Map<string, RefreshState>();
+
+// Get or create refresh state for a user
+function getRefreshState(username?: string): RefreshState {
+  if (!username) {
+    // For operations without a username (like initial page load),
+    // create a temporary state that won't interfere with user-specific states
+    return { isRefreshing: false };
+  }
+  
+  let state = refreshStateMap.get(username);
+  if (!state) {
+    state = { isRefreshing: false };
+    refreshStateMap.set(username, state);
+  }
+  return state;
+}
+
+// Clear refresh state for a user
+function clearRefreshState(username?: string): void {
+  const key = username || "default";
+  refreshStateMap.delete(key);
+}
+
+// Track cleanup functions
+let watchdogCleanup: (() => void) | undefined;
+let visibilityChangeListener: (() => void) | undefined;
+
+// Max consecutive refresh failures before giving up
+const MAX_CONSECUTIVE_REFRESH_FAILURES = 5;
+let consecutiveRefreshFailures = 0;
 
 // Generate unique tab ID for this tab
 const TAB_ID =
@@ -59,7 +88,7 @@ async function shouldAttemptRefresh(): Promise<boolean> {
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
     const REFRESH_WINDOW_MS = 5000; // Don't refresh if another tab did within 5s
-    const RANDOM_JITTER_MAX_MS = 100; // Random delay to reduce collisions
+    const RANDOM_JITTER_MAX_MS = 1000; // Increased to 1 second for better collision avoidance
 
     // Add random jitter to reduce collision probability
     const jitter = Math.floor(Math.random() * RANDOM_JITTER_MAX_MS);
@@ -182,13 +211,18 @@ function isDocumentVisible(): boolean {
 }
 
 // Handle visibility change for browser environments
-function handleVisibilityChange() {
+async function handleVisibilityChange() {
   logDebug(
     `visibilitychange event: document.hidden=${globalThis.document.hidden}`
   );
   if (isDocumentVisible()) {
+    // Get username to determine which state to check
+    const tokens = await retrieveTokensForRefresh();
+    const username = tokens?.username;
+    const state = getRefreshState(username);
+    
     // Skip if refresh is already in progress or scheduled
-    if (refreshState.isRefreshing || refreshState.refreshTimer) {
+    if (state.isRefreshing || state.refreshTimer) {
       logDebug(
         "handleVisibilityChange: refresh already in progress or scheduled, skipping"
       );
@@ -198,16 +232,16 @@ function handleVisibilityChange() {
     // If page becomes visible and it's been a while since last refresh,
     // check if we need to schedule a refresh
     const timeThreshold = 60000; // 1 minute
-    const lastRefresh = refreshState.lastRefreshTime || 0;
+    const lastRefresh = state.lastRefreshTime || 0;
     logDebug(
       `handleVisibilityChange: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
     );
 
     if (Date.now() - lastRefresh > timeThreshold) {
       // Clear any existing visibility timer
-      if (refreshState.visibilityTimer) {
-        clearTimeout(refreshState.visibilityTimer);
-        refreshState.visibilityTimer = undefined;
+      if (state.visibilityTimer) {
+        clearTimeout(state.visibilityTimer);
+        state.visibilityTimer = undefined;
       }
 
       // Small random delay to prevent thundering herd
@@ -216,8 +250,8 @@ function handleVisibilityChange() {
         `handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`
       );
 
-      refreshState.visibilityTimer = setTimeout(() => {
-        refreshState.visibilityTimer = undefined;
+      state.visibilityTimer = setTimeout(() => {
+        state.visibilityTimer = undefined;
 
         // Handle async operations
         void (async () => {
@@ -227,7 +261,8 @@ function handleVisibilityChange() {
           }
 
           // Re-check conditions after delay
-          if (!refreshState.isRefreshing && !refreshState.refreshTimer) {
+          const currentState = getRefreshState(username);
+          if (!currentState.isRefreshing && !currentState.refreshTimer) {
             logDebug("handleVisibilityChange: executing delayed refresh");
             void scheduleRefresh();
           }
@@ -260,15 +295,29 @@ async function scheduleRefreshUnlocked({
   tokensCb?: (res: TokensFromRefresh | null) => void | Promise<void>;
   isRefreshingCb?: (isRefreshing: boolean) => unknown;
 } = {}): Promise<void> {
+  // Get current tokens first to determine username
+  // Use retrieveTokensForRefresh to include expired tokens
+  const tokens = await retrieveTokensForRefresh();
+  if (abort?.aborted) return;
+
+  if (!tokens?.expireAt || !tokens?.refreshToken) {
+    logDebug("No valid tokens found, skipping refresh scheduling");
+    // Don't clear tokens here - let other mechanisms handle expired/missing tokens
+    return;
+  }
+  
+  const username = tokens.username;
+  const state = getRefreshState(username);
+  
   // Skip if already scheduling
-  if (refreshState.isRefreshing) {
+  if (state.isRefreshing) {
     logDebug("Token refresh already in progress, skipping");
     return;
   }
 
   // Skip if we already have a timer scheduled for the future
-  if (refreshState.refreshTimer && refreshState.nextRefreshTime) {
-    const timeUntilScheduledRefresh = refreshState.nextRefreshTime - Date.now();
+  if (state.refreshTimer && state.nextRefreshTime) {
+    const timeUntilScheduledRefresh = state.nextRefreshTime - Date.now();
     if (timeUntilScheduledRefresh > 0) {
       logDebug(
         `Refresh already scheduled in ${Math.round(timeUntilScheduledRefresh / 60000)} minutes, skipping`
@@ -280,23 +329,13 @@ async function scheduleRefreshUnlocked({
   try {
     // Clear any existing timer
     const clearExistingTimer = () => {
-      if (refreshState.refreshTimer) {
-        refreshState.refreshTimer();
-        refreshState.refreshTimer = undefined;
-        refreshState.nextRefreshTime = undefined;
+      if (state.refreshTimer) {
+        state.refreshTimer();
+        state.refreshTimer = undefined;
+        state.nextRefreshTime = undefined;
       }
     };
     clearExistingTimer();
-
-    // Get current tokens
-    const tokens = await retrieveTokens();
-    if (abort?.aborted) return;
-
-    if (!tokens?.expireAt) {
-      logDebug("No valid tokens found, skipping refresh scheduling");
-      // Don't clear tokens here - let other mechanisms handle expired/missing tokens
-      return;
-    }
 
     const tokenExpiryTime = tokens.expireAt.valueOf();
     const currentTime = Date.now();
@@ -362,16 +401,16 @@ async function scheduleRefreshUnlocked({
     }
 
     const desiredFireTime = Date.now() + refreshDelay;
-    refreshState.nextRefreshTime = desiredFireTime;
+    state.nextRefreshTime = desiredFireTime;
 
     const minutesUntilRefresh = Math.round(refreshDelay / (60 * 1000));
     logDebug(`Scheduling token refresh in ${minutesUntilRefresh} minutes`);
 
-    refreshState.refreshTimer = setTimeoutWallClock(async () => {
-      refreshState.refreshTimer = undefined;
-      refreshState.nextRefreshTime = undefined;
+    state.refreshTimer = setTimeoutWallClock(async () => {
+      state.refreshTimer = undefined;
+      state.nextRefreshTime = undefined;
       try {
-        const latestTokens = await retrieveTokens();
+        const latestTokens = await retrieveTokensForRefresh();
 
         await refreshTokens({
           abort,
@@ -381,18 +420,37 @@ async function scheduleRefreshUnlocked({
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
+        consecutiveRefreshFailures++;
+
+        if (consecutiveRefreshFailures >= MAX_CONSECUTIVE_REFRESH_FAILURES) {
+          logDebug(
+            `Max refresh failures (${MAX_CONSECUTIVE_REFRESH_FAILURES}) reached, giving up`
+          );
+          consecutiveRefreshFailures = 0; // Reset for next time
+          return;
+        }
+
+        // Exponential backoff: 30s, 60s, 120s, 240s
+        const backoffMs = Math.min(
+          30000 * Math.pow(2, consecutiveRefreshFailures - 1),
+          240000
+        );
+        logDebug(
+          `Scheduling retry ${consecutiveRefreshFailures}/${MAX_CONSECUTIVE_REFRESH_FAILURES} in ${backoffMs / 1000}s`
+        );
+
         setTimeoutWallClock(() => {
           void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
-        }, 30000); // 30 second backoff
+        }, backoffMs);
       }
     }, refreshDelay);
 
     abort?.addEventListener(
       "abort",
       () => {
-        if (refreshState.refreshTimer) {
-          refreshState.refreshTimer();
-          refreshState.refreshTimer = undefined;
+        if (state.refreshTimer) {
+          state.refreshTimer();
+          state.refreshTimer = undefined;
           logDebug("Refresh scheduling aborted");
         }
       },
@@ -568,7 +626,10 @@ export async function refreshTokens({
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
 
   const doRefresh = async (): Promise<TokensFromRefresh> => {
-    if (refreshState.isRefreshing && !force) {
+    // Get state for this user
+    const state = getRefreshState(userIdentifier);
+    
+    if (state.isRefreshing && !force) {
       logDebug("Token refresh already in progress");
       throw new Error("Token refresh already in progress");
     }
@@ -580,7 +641,7 @@ export async function refreshTokens({
     }
 
     try {
-      refreshState.isRefreshing = true;
+      state.isRefreshing = true;
       isRefreshingCb?.(true);
 
       if (!tokens) {
@@ -738,7 +799,7 @@ export async function refreshTokens({
         );
       } catch (error) {
         logDebug("Token refresh failed:", error);
-        refreshState.lastRefreshTime = Date.now();
+        state.lastRefreshTime = Date.now();
         // Clear the attempt lock on error so other tabs can retry
         await clearRefreshAttemptLock();
         throw error;
@@ -750,7 +811,7 @@ export async function refreshTokens({
           tokensFromRefresh,
           abort
         )) as TokensFromRefresh;
-        refreshState.lastRefreshTime = Date.now();
+        state.lastRefreshTime = Date.now();
 
         // Call tokensCb first - if it fails, we don't want to mark as completed
         if (tokensCb) {
@@ -759,6 +820,9 @@ export async function refreshTokens({
 
         // Only mark as completed after everything succeeds
         await markRefreshCompleted();
+
+        // Reset failure counter on success
+        consecutiveRefreshFailures = 0;
       } catch (error) {
         // If anything fails after we got new tokens, we need to clear the attempt lock
         // so other tabs can retry
@@ -769,7 +833,7 @@ export async function refreshTokens({
 
       return processedTokens;
     } finally {
-      refreshState.isRefreshing = false;
+      state.isRefreshing = false;
       isRefreshingCb?.(false);
     }
   };
@@ -804,8 +868,9 @@ export async function refreshTokens({
           : "refreshTokens: another tab is handling refresh (coordination check)"
       );
 
-      // Wait briefly for the other tab's refresh to complete
-      const waitTime = 300; // ms
+      // Wait for the other tab's refresh to complete
+      // Increased to handle slow network conditions
+      const waitTime = 2000; // 2 seconds
       debug?.(
         `refreshTokens: waiting ${waitTime}ms for other tab's refresh to complete`
       );
@@ -885,9 +950,14 @@ export async function forceRefreshTokens(
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
-  if (refreshState.refreshTimer) {
-    refreshState.refreshTimer();
-    refreshState.refreshTimer = undefined;
+  // Get username to clear the right timer
+  const tokens = await retrieveTokens();
+  const username = tokens?.username;
+  const state = getRefreshState(username);
+  
+  if (state.refreshTimer) {
+    state.refreshTimer();
+    state.refreshTimer = undefined;
   }
 
   const refreshed = await refreshTokens({
@@ -902,19 +972,39 @@ export async function forceRefreshTokens(
 
 // Initialize visibility change listener for browser environments
 if (isBrowserEnvironment()) {
+  // Create named handler for proper cleanup
+  const visibilityHandler = () => {
+    void handleVisibilityChange();
+  };
+  
   // eslint-disable-next-line no-restricted-globals
   globalThis.document.addEventListener(
     "visibilitychange",
-    handleVisibilityChange
+    visibilityHandler
   );
+  
+  // Store cleanup function  
+  visibilityChangeListener = () => {
+    globalThis.document.removeEventListener(
+      "visibilitychange",
+      visibilityHandler
+    );
+  };
 
-  // Simplified watchdog
+  // Simplified watchdog with cleanup support
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
   const startWatchdog = () => {
-    setTimeoutWallClock(() => {
+    const cleanup = setTimeoutWallClock(() => {
+      void (async () => {
       logDebug(`Watchdog tick at ${new Date().toISOString()}`);
-      if (!refreshState.refreshTimer && isDocumentVisible()) {
-        const lastRefresh = refreshState.lastRefreshTime || 0;
+      
+      // Check all users' refresh states
+      const tokens = await retrieveTokensForRefresh();
+      const username = tokens?.username;
+      const state = getRefreshState(username);
+      
+      if (!state.refreshTimer && isDocumentVisible()) {
+        const lastRefresh = state.lastRefreshTime || 0;
         if (Date.now() - lastRefresh > WATCHDOG_INTERVAL_MS) {
           logDebug("Watchdog is triggering a refresh check");
           void (async () => {
@@ -924,8 +1014,59 @@ if (isBrowserEnvironment()) {
           })();
         }
       }
-      startWatchdog();
+      // Only continue if cleanup hasn't been called
+      if (watchdogCleanup) {
+        watchdogCleanup = startWatchdog();
+      }
+      })();
     }, WATCHDOG_INTERVAL_MS);
+    return cleanup;
   };
-  startWatchdog();
+  watchdogCleanup = startWatchdog();
+}
+
+/**
+ * Clean up all refresh-related timers and event listeners.
+ * Call this when unmounting the application or switching users.
+ * @param username - Optional username to clean up specific user state
+ */
+export function cleanupRefreshSystem(username?: string): void {
+  logDebug("Cleaning up refresh system");
+
+  // Clean up visibility change listener
+  if (visibilityChangeListener) {
+    visibilityChangeListener();
+    visibilityChangeListener = undefined;
+  }
+
+  // Clean up watchdog timer
+  if (watchdogCleanup) {
+    watchdogCleanup();
+    watchdogCleanup = undefined;
+  }
+
+  // Get the appropriate refresh state
+  const state = getRefreshState(username);
+
+  // Clean up any active refresh timer
+  if (state.refreshTimer) {
+    state.refreshTimer();
+    state.refreshTimer = undefined;
+    state.nextRefreshTime = undefined;
+  }
+
+  // Clean up visibility timer
+  if (state.visibilityTimer) {
+    clearTimeout(state.visibilityTimer);
+    state.visibilityTimer = undefined;
+  }
+
+  // Reset refresh state
+  state.isRefreshing = false;
+  state.lastRefreshTime = undefined;
+
+  // Clear user-specific state from the map
+  if (username) {
+    clearRefreshState(username);
+  }
 }

@@ -271,6 +271,67 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   };
 }
 
+/**
+ * Retrieve tokens for refresh purposes, including expired tokens.
+ * This is needed because the refresh system needs to see expired tokens
+ * to trigger immediate refresh.
+ */
+export async function retrieveTokensForRefresh(): Promise<TokensFromStorage | undefined> {
+  const { clientId, storage } = configure();
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+  const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
+  if (!username) {
+    return;
+  }
+
+  const [accessToken, idToken, refreshToken] = await Promise.all([
+    storage.getItem(`${amplifyKeyPrefix}.${username}.accessToken`),
+    storage.getItem(`${amplifyKeyPrefix}.${username}.idToken`),
+    storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
+  ]);
+
+  // If no refresh token, can't refresh
+  if (!refreshToken) {
+    return;
+  }
+
+  // Try to get expiry from access token
+  let expireAtDate: Date | undefined;
+  const { debug } = configure();
+
+  if (accessToken) {
+    try {
+      const { exp } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+      if (typeof exp === "number" && exp > 0) {
+        expireAtDate = new Date(exp * 1000);
+      }
+    } catch (err) {
+      debug?.("[retrieveTokensForRefresh] Failed to parse exp from accessToken:", err);
+    }
+  }
+
+  // For refresh purposes, we need tokens even if expired
+  if (!expireAtDate) {
+    debug?.("[retrieveTokensForRefresh] No expiry date found, but continuing for refresh");
+    // Set a past date to trigger immediate refresh
+    expireAtDate = new Date(Date.now() - 1);
+  }
+
+  // Get device key and auth method
+  const deviceKey = await retrieveDeviceKey(username);
+  const authMethod = await retrieveAuthMethod(username);
+
+  return {
+    idToken: idToken ?? undefined,
+    accessToken: accessToken ?? undefined,
+    refreshToken: refreshToken ?? undefined,
+    expireAt: expireAtDate,
+    username,
+    deviceKey,
+    authMethod,
+  };
+}
+
 export interface RememberedDeviceRecord {
   deviceKey: string;
   groupKey: string;

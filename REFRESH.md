@@ -1,187 +1,201 @@
-# Token Refresh Flow - Technical Documentation
+# Token Refresh System - Technical Documentation
 
 ## Overview
 
-The token refresh system is designed to handle AWS Cognito token renewal across multiple browser tabs while preventing rate limit violations (10 req/s) and thundering herd problems.
+The token refresh system ensures AWS Cognito tokens stay fresh across multiple browser tabs, different authentication methods, and various edge cases. It prevents token expiration while avoiding rate limit violations and refresh storms.
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph "Browser Tab 1"
-        VE1[Visibility Event]
-        WD1[Watchdog Timer]
-        RS1[Refresh Scheduler]
+    subgraph "Refresh Entry Points"
+        A1[Scheduled Refresh]
+        A2[Visibility Change]
+        A3[Watchdog Timer]
+        A4[Force Refresh]
+        A5[React Hooks]
+        A6[Process Tokens]
     end
 
-    subgraph "Browser Tab 2"
-        VE2[Visibility Event]
-        WD2[Watchdog Timer]
-        RS2[Refresh Scheduler]
+    subgraph "Coordination Layer"
+        B1[activeRefreshSchedules Map]
+        B2[Storage Lock System]
+        B3[Attempt Tracking]
+        B4[Completion Tracking]
     end
 
-    subgraph "Shared Storage"
-        LA[lastRefreshAttempt]
-        LC[lastRefreshCompleted]
-        RL[refreshLock]
+    subgraph "Refresh Execution"
+        C1[refreshTokens]
+        C2[OAuth Flow]
+        C3[Cognito API Flow]
+        C4[Retry Logic]
     end
 
-    subgraph "AWS Cognito"
-        TE[Token Endpoint]
-        RL2[Rate Limiter<br/>10 req/s]
+    subgraph "Token Storage"
+        D1[Store Tokens]
+        D2[Process Tokens]
+        D3[Schedule Next Refresh]
     end
 
-    VE1 --> RS1
-    WD1 --> RS1
-    VE2 --> RS2
-    WD2 --> RS2
+    A1 --> B1
+    A2 --> B3
+    A3 --> B3
+    A4 --> C1
+    A5 --> A1
+    A6 --> A1
 
-    RS1 -.->|Check/Set| LA
-    RS2 -.->|Check/Set| LA
-    RS1 -.->|Acquire| RL
-    RS2 -.->|Acquire| RL
+    B1 --> B2
+    B3 --> B2
+    B2 --> C1
 
-    RS1 -->|Refresh| TE
-    RS2 -->|Refresh| TE
-    TE --> RL2
+    C1 --> C2
+    C1 --> C3
+    C2 --> C4
+    C3 --> C4
 
-    RS1 -.->|Mark| LC
-    RS2 -.->|Mark| LC
+    C4 --> D1
+    D1 --> D2
+    D2 --> D3
+    D3 --> A1
 ```
 
-## Core Components
+## Refresh Entry Points
 
-### 1. Event Triggers
+### 1. Automatic Scheduled Refresh
+**Location**: `client/refresh.ts` - `scheduleRefresh()`
 
-Three mechanisms can initiate token refresh:
+Automatically scheduled after any successful authentication or token refresh.
 
 ```typescript
-// a) Visibility Change Handler (0-1s random delay)
-document.addEventListener("visibilitychange", handleVisibilityChange);
-
-// b) Watchdog Timer (5-minute intervals)
-const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
-
-// c) Scheduled Refresh (dynamic timing based on token lifetime)
-setTimeoutWallClock(refreshCallback, refreshDelay);
-```
-
-### 2. Multi-Tab Coordination
-
-The system uses a two-phase coordination mechanism:
-
-```mermaid
-sequenceDiagram
-    participant Tab1
-    participant Tab2
-    participant Storage
-    participant Lock
-
-    Note over Tab1,Tab2: Both tabs wake up simultaneously
-
-    Tab1->>Storage: Check lastRefreshAttempt
-    Tab2->>Storage: Check lastRefreshAttempt
-
-    Storage-->>Tab1: No recent attempt
-    Storage-->>Tab2: No recent attempt
-
-    Tab1->>Storage: Set lastRefreshAttempt = now
-    Note over Tab2: 0-1s random delay
-    Tab2->>Storage: Check lastRefreshAttempt
-    Storage-->>Tab2: Tab1 attempted 500ms ago
-    Note over Tab2: Skip (< 30s threshold)
-
-    Tab1->>Lock: Acquire refreshLock
-    Lock-->>Tab1: Lock acquired
-    Tab1->>Tab1: Perform token refresh
-    Tab1->>Storage: Set lastRefreshCompleted
-    Tab1->>Lock: Release refreshLock
-```
-
-## Refresh Decision Flow
-
-### Phase 1: Should Attempt Refresh?
-
-```typescript
-async function shouldAttemptRefresh(): Promise<boolean> {
-  // 1. Get last attempt timestamp
-  const lastAttemptStr = await storage.getItem(attemptKey);
-
-  // 2. Check if someone attempted within 30 seconds
-  if (timeSinceLastAttempt < 30000) {
-    return false; // Another tab is handling it
-  }
-
-  // 3. Mark our attempt (race window exists here)
-  await storage.setItem(attemptKey, Date.now().toString());
-  return true;
-}
-```
-
-### Phase 2: Lock Acquisition
-
-```mermaid
-graph LR
-    A[Request Lock] --> B{Lock Free?}
-    B -->|Yes| C[Acquire Lock]
-    B -->|No| D[Poll with Backoff]
-    D --> E{Timeout?}
-    E -->|No| B
-    E -->|Yes| F[LockTimeoutError]
-    C --> G[Execute Refresh]
-    G --> H[Release Lock]
-```
-
-**Lock Implementation Details:**
-
-- **Unique Lock ID**: Prevents race conditions
-- **Timestamp**: Enables stale lock detection (30s timeout)
-- **Storage Events**: Fast lock release detection
-- **Adaptive Polling**: 50ms → 75ms → 112ms → ... → 500ms (max)
-
-## Token Refresh Timing
-
-### Dynamic Buffer Calculation
-
-```typescript
-// Extract actual token lifetime from JWT
+// Dynamic timing calculation
 const actualLifetime = (payload.exp - payload.iat) * 1000;
-
-// Calculate buffer (30% of lifetime, bounded)
 const bufferTime = Math.max(
-  60000, // Min: 1 minute
+  60000,                      // Min: 1 minute
   Math.min(
-    0.3 * actualLifetime, // 30% of lifetime
-    15 * 60 * 1000 // Max: 15 minutes
+    0.3 * actualLifetime,     // 30% of lifetime
+    15 * 60 * 1000           // Max: 15 minutes
   )
 );
-
-// Schedule refresh before expiry
 const refreshDelay = timeUntilExpiry - bufferTime;
 ```
 
-### Timing Scenarios
+**Special Cases**:
+- Tokens expiring in <60s: Refresh immediately
+- Fresh logins: 2-minute delay before first refresh schedule
+- Uses `setTimeoutWallClock` to handle device sleep
 
-```mermaid
-gantt
-    title Token Lifetime and Refresh Timing
-    dateFormat X
-    axisFormat %M:%S
+### 2. Visibility Change Handler
+**Location**: `client/refresh.ts` - `handleVisibilityChange()`
 
-    section 1hr Token
-    Token Valid          :active, t1, 0, 3600
-    Buffer (18min)       :crit, b1, 2520, 3600
-    Refresh Window       :milestone, 2520, 0
+Triggered when browser tab becomes visible.
 
-    section 15min Token
-    Token Valid          :active, t2, 0, 900
-    Buffer (4.5min)      :crit, b2, 630, 900
-    Refresh Window       :milestone, 630, 0
+```typescript
+// Conditions for refresh on visibility:
+- Document becomes visible
+- No refresh in progress or scheduled soon
+- >60 seconds since last refresh
+- Random 0-1s delay to prevent thundering herd
+```
 
-    section 5min Token
-    Token Valid          :active, t3, 0, 300
-    Buffer (1min)        :crit, b3, 240, 300
-    Refresh Window       :milestone, 240, 0
+### 3. Watchdog Timer
+**Location**: `client/refresh.ts` - `startRefreshWatchdog()`
+
+Safety net that runs every 5 minutes.
+
+```typescript
+// Watchdog triggers refresh if:
+- No refresh timer scheduled
+- Document is visible
+- >5 minutes since last refresh
+```
+
+### 4. Manual Force Refresh
+**Location**: `client/refresh.ts` - `forceRefreshTokens()`
+
+User-initiated refresh via React hooks.
+
+```typescript
+// Force refresh behavior:
+- Cancels any scheduled refresh
+- Forces immediate refresh (bypasses coordination)
+- Reschedules next automatic refresh
+```
+
+### 5. React Hook Auto-Refresh
+**Location**: `client/react/hooks.tsx`
+
+Multiple triggers within React components:
+- On component mount when tokens exist
+- When tokens become available
+- On authentication errors requiring refresh
+- When handling incomplete token sets
+
+### 6. Process Tokens Integration
+**Location**: `client/common.ts` - `processTokens()`
+
+Called after every authentication/refresh to ensure scheduling.
+
+```typescript
+// Fresh login vs token refresh:
+if ("newDeviceMetadata" in tokens) {
+  // Fresh login - delay by 2 minutes
+  setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
+} else {
+  // Token refresh - schedule immediately
+  scheduleFn();
+}
+```
+
+## Multi-Tab Coordination
+
+### Storage-Based Lock System
+**Location**: `client/lock.ts`
+
+Prevents concurrent refreshes across tabs.
+
+```typescript
+interface StorageLock {
+  id: string;        // Unique identifier
+  timestamp: number; // For stale lock detection
+}
+
+// Lock characteristics:
+- 15-second acquisition timeout
+- 30-second stale lock detection
+- Storage events for fast release detection
+- Adaptive polling: 50ms → 75ms → ... → 500ms
+```
+
+### Active Refresh Schedules Map
+**Location**: `client/common.ts`
+
+In-memory deduplication within a single tab.
+
+```typescript
+const activeRefreshSchedules = new Map<string, {
+  scheduledAt: number;
+  abortController: AbortController;
+  refreshToken: string;
+}>();
+
+// Prevents duplicate schedules for 5 minutes
+const REFRESH_DEDUPLICATION_WINDOW_MS = 300000;
+```
+
+### Refresh Attempt Coordination
+**Location**: `client/refresh.ts`
+
+Cross-tab coordination via localStorage.
+
+```typescript
+// Storage keys per user:
+`Passwordless.${clientId}.${username}.lastRefreshAttempt`
+`Passwordless.${clientId}.${username}.lastRefreshCompleted`
+
+// Coordination windows:
+- 5-second cooldown between attempts
+- 0-100ms random jitter
+- Check if another tab refreshed while waiting
 ```
 
 ## Refresh Execution Flow
@@ -190,139 +204,143 @@ gantt
 
 ```mermaid
 graph TD
-    A[Start Refresh] --> B{Auth Method?}
-    B -->|REDIRECT| C[OAuth Token Endpoint]
-    B -->|SRP/FIDO2/etc| D{Use GetTokensFromRefreshToken?}
-
+    A[refreshTokens] --> B{Auth Method?}
+    B -->|REDIRECT| C[OAuth Flow]
+    B -->|Others| D{Use InitiateAuth?}
+    
     C --> E[POST /oauth2/token]
-
-    D -->|Yes| F[GetTokensFromRefreshToken API]
-    D -->|No| G[InitiateAuth REFRESH_TOKEN]
-
-    F --> H{Success?}
+    
+    D -->|Hosted UI| F[GetTokensFromRefreshToken]
+    D -->|Direct Auth| G[InitiateAuth REFRESH_TOKEN]
+    
+    E --> H[Process Response]
+    F --> H
     G --> H
-    E --> H
-
-    H -->|Yes| I[Process Tokens]
-    H -->|No| J{Retryable?}
-
-    J -->|RefreshTokenReuse| K[Get Latest Token]
-    J -->|NetworkError| L[Exponential Backoff]
-    J -->|Other| M[Throw Error]
-
-    K --> F
-    L --> F
+    
+    H --> I{Success?}
+    I -->|Yes| J[processTokens]
+    I -->|No| K[Retry Logic]
 ```
 
 ### Retry Logic
 
 ```typescript
+// Maximum 3 retry attempts with different strategies:
 for (let attempt = 1; attempt <= 3; attempt++) {
   try {
-    // Attempt refresh
-    authResult = await getTokensFromRefreshToken({...});
+    authResult = await refreshTokenAPI();
     break;
-  } catch (err) {
-    if (err.name === "RefreshTokenReuseException") {
-      // Get latest token from storage
-      currentRefreshToken = latestStored?.refreshToken;
-    } else if (isNetworkError(err) && attempt < 3) {
-      // Wait with exponential backoff: 1s, 2s, 3s
+  } catch (error) {
+    if (error.name === "RefreshTokenReuseException") {
+      // Fetch latest refresh token from storage
+      currentRefreshToken = (await retrieveTokens())?.refreshToken;
+    } else if (isNetworkError(error) && attempt < 3) {
+      // Exponential backoff: 1s, 2s, 3s
       await sleep(1000 * attempt);
     } else {
-      throw err;
+      throw error;
     }
   }
 }
 ```
 
-## Rate Limit Protection
+### Token Processing Pipeline
 
-### Thundering Herd Prevention
+1. **Refresh API Call** → New tokens received
+2. **processTokens()** → Normalize and store tokens
+3. **Schedule Next Refresh** → Calculate timing and schedule
+4. **Callback Execution** → Notify listeners of new tokens
 
-```mermaid
-sequenceDiagram
-    participant Tab1
-    participant Tab2
-    participant Tab3
-    participant Tab4
-    participant Cognito
+## Error Handling and Edge Cases
 
-    Note over Tab1,Tab4: 4 tabs wake up simultaneously
-
-    Tab1->>Tab1: Random delay 100ms
-    Tab2->>Tab2: Random delay 450ms
-    Tab3->>Tab3: Random delay 800ms
-    Tab4->>Tab4: Random delay 250ms
-
-    Note over Tab1: Check & claim attempt
-    Tab1->>Cognito: Refresh token
-
-    Note over Tab4: Check attempt (250ms)
-    Tab4->>Tab4: Skip (Tab1 attempted 150ms ago)
-
-    Note over Tab2: Check attempt (450ms)
-    Tab2->>Tab2: Skip (Tab1 attempted 350ms ago)
-
-    Note over Tab3: Check attempt (800ms)
-    Tab3->>Tab3: Skip (Tab1 attempted 700ms ago)
-
-    Cognito-->>Tab1: New tokens
-    Tab1->>Tab1: Mark completed
-```
-
-**Protection Mechanisms:**
-
-1. **Random Delay**: 0-1 second prevents simultaneous attempts
-2. **30-Second Window**: Only one refresh per 30s across all tabs
-3. **Storage Lock**: Serializes actual refresh operations
-4. **Lock Timeout**: 5 seconds prevents deadlocks
-
-## Performance Characteristics
-
-### Latency Analysis
-
-| Scenario         | Min Latency | Max Latency | Notes                   |
-| ---------------- | ----------- | ----------- | ----------------------- |
-| Tab Wake         | 0ms         | 1000ms      | Random delay            |
-| Lock Acquisition | 0ms         | 5000ms      | Timeout limit           |
-| Refresh API Call | 200ms       | 3000ms      | Network dependent       |
-| Total E2E        | 200ms       | 9000ms      | Worst case with retries |
-
-### Storage Operations
-
-```mermaid
-pie title Storage Operations per Refresh
-    "Check Attempt" : 1
-    "Set Attempt" : 1
-    "Lock Operations" : 4
-    "Mark Completed" : 1
-    "Token Storage" : 1
-```
-
-Total: ~8 storage operations per successful refresh
-
-## Edge Cases Handled
+### Handled Scenarios
 
 1. **Stale Locks**: Automatically cleared after 30 seconds
-2. **Race Conditions**: Unique lock IDs with verification
+2. **Race Conditions**: Unique lock IDs with timestamp verification
 3. **Network Failures**: 3 retries with exponential backoff
 4. **Token Rotation**: Handles RefreshTokenReuseException
 5. **Browser Hibernation**: Watchdog ensures eventual refresh
 6. **Storage Failures**: Fail-open design allows refresh attempt
+7. **Concurrent Tabs**: Lock system serializes operations
+8. **User Sign-out**: Aborts scheduled refreshes and clears tracking
 
-## Key Design Decisions
+### Failed Refresh Recovery
 
-1. **Simplified State Machine**: Just timestamps instead of complex states
-2. **Fail-Open Philosophy**: Storage errors don't block refresh
-3. **Minimal Coordination**: 30-second window is sufficient
-4. **No In-Process Queue**: Reduces complexity, relies on storage lock
-5. **Dynamic Timing**: Adapts to actual token lifetime
+```typescript
+// On scheduled refresh failure:
+- Clear any locks/tracking
+- Wait 30 seconds before retry
+- Log error for debugging
+
+// On manual refresh failure:
+- Throw error to caller
+- Let UI handle user feedback
+```
+
+## Performance Characteristics
+
+### Timing Analysis
+
+| Operation | Duration | Notes |
+|-----------|----------|-------|
+| Lock Acquisition | 0-15s | Usually <100ms |
+| Refresh API Call | 200-3000ms | Network dependent |
+| Token Processing | <50ms | Storage writes |
+| Total Refresh | 250-3500ms | Typical case |
+
+### Storage Operations
+
+Per successful refresh:
+- 2 reads: Check attempt/completion
+- 1 write: Mark attempt
+- 4-6 operations: Lock acquire/release
+- 1 write: Mark completion
+- Multiple writes: Store tokens
+- **Total**: ~10-15 storage operations
+
+## Configuration
+
+### Timing Constants
+
+```typescript
+// Deduplication and delays
+REFRESH_DEDUPLICATION_WINDOW_MS = 300000  // 5 minutes
+FRESH_LOGIN_REFRESH_DELAY_MS = 120000     // 2 minutes
+
+// Coordination windows
+REFRESH_ATTEMPT_INTERVAL_MS = 5000        // 5 seconds
+REFRESH_ATTEMPT_JITTER_MS = 100          // 0-100ms random
+
+// Watchdog
+WATCHDOG_INTERVAL_MS = 300000            // 5 minutes
+
+// Lock timeouts
+DEFAULT_LOCK_TIMEOUT_MS = 15000          // 15 seconds
+STALE_LOCK_THRESHOLD_MS = 30000          // 30 seconds
+```
+
+### Per-User Isolation
+
+All refresh operations are isolated per user:
+- Separate storage keys include username
+- Independent refresh schedules
+- Isolated lock management
+- No cross-user interference
 
 ## Implementation Files
 
-- **`client/refresh.ts`**: Main refresh logic and scheduling
+- **`client/refresh.ts`**: Core refresh logic and scheduling
+- **`client/common.ts`**: Token processing and schedule management
 - **`client/lock.ts`**: Storage-based locking mechanism
-- **`client/retry.ts`**: Exponential backoff retry logic
+- **`client/retry.ts`**: Network retry logic
+- **`client/react/hooks.tsx`**: React integration and auto-refresh
 
-The system achieves its goal of preventing Cognito rate limit violations while maintaining token freshness across multiple browser tabs with minimal complexity.
+## Key Design Decisions
+
+1. **Multiple Entry Points**: Redundancy ensures tokens stay fresh
+2. **Fail-Open Philosophy**: Storage errors don't block critical operations
+3. **Per-User Isolation**: Multi-user support without interference
+4. **Dynamic Timing**: Adapts to actual token lifetimes
+5. **Minimal Coordination**: Simple timestamp-based coordination
+6. **No Central State**: Each tab manages its own state
+7. **Progressive Enhancement**: Works with or without advanced features

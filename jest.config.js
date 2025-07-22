@@ -15,5 +15,6 @@ module.exports = {
     "^(\\.{1,2}/.*)\\.js$": "$1",
   },
   extensionsToTreatAsEsm: [".ts"],
+  setupFiles: ["jest-localstorage-mock"],
   setupFilesAfterEnv: ["<rootDir>/test/setup.ts"],
 };
