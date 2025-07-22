@@ -9,6 +9,10 @@ coverage:
         target: auto
         threshold: 1%
         base: auto
+        # Only comment on coverage changes
+        if_ci_failed: error    # Still show status if CI fails
+        informational: false   # Make it a required check
+        only_pulls: false      # Also run on push to branches
     patch:
       default:
         target: 80%
