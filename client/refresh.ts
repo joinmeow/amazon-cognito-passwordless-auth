@@ -305,11 +305,11 @@ async function scheduleRefreshUnlocked({
     // If token is already expired or expires very soon, refresh immediately
     if (timeUntilExpiry <= 60000) {
       logDebug(
-        `Token expires in ${Math.round(timeUntilExpiry / 1000)}s, refreshing now`
+        `Token expires in ${Math.round(timeUntilExpiry / 1000)}s, refreshing immediately`
       );
 
       try {
-        const refreshedTokens = await refreshTokens({
+        await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
@@ -320,15 +320,8 @@ async function scheduleRefreshUnlocked({
         // Mark as completed
         await markRefreshCompleted();
 
-        // After a successful immediate refresh, schedule the next refresh
-        if (refreshedTokens?.expireAt) {
-          const newTimeUntilExpiry =
-            refreshedTokens.expireAt.valueOf() - Date.now();
-          if (newTimeUntilExpiry > 60000) {
-            logDebug("Immediate refresh complete, scheduling next refresh");
-            return scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
-          }
-        }
+        // processTokens already handles scheduling the next refresh,
+        // so we don't need to do it here
       } catch (err) {
         logDebug("Failed to refresh token:", err);
       }
