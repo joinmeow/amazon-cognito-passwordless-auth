@@ -29,8 +29,8 @@ type RefreshState = {
   /** Wall-clock timestamp (ms) when the current refreshTimer is scheduled to fire */
   nextRefreshTime?: number;
   lastRefreshTime?: number;
-  /** Timer for delayed visibility change handling */
-  visibilityTimer?: ReturnType<typeof setTimeout>;
+  /** Wall-clock timestamp (ms) when refresh was last scheduled */
+  lastScheduleTime?: number;
 };
 
 // Per-user refresh state to prevent conflicts
@@ -216,60 +216,29 @@ async function handleVisibilityChange() {
   logDebug(
     `visibilitychange event: document.hidden=${globalThis.document.hidden}`
   );
-  if (isDocumentVisible()) {
-    // Get username to determine which state to check
-    const tokens = await retrieveTokensForRefresh();
-    const username = tokens?.username;
-    const state = getRefreshState(username);
+  if (!isDocumentVisible()) return;
 
-    // Skip if refresh is already in progress or scheduled
-    if (state.isRefreshing || state.refreshTimer) {
-      logDebug(
-        "handleVisibilityChange: refresh already in progress or scheduled, skipping"
-      );
-      return;
-    }
+  const tokens = await retrieveTokensForRefresh();
+  if (!tokens?.expireAt) return;
 
-    // If page becomes visible and it's been a while since last refresh,
-    // check if we need to schedule a refresh
-    const timeThreshold = 60000; // 1 minute
-    const lastRefresh = state.lastRefreshTime || 0;
+  const state = getRefreshState(tokens.username);
+
+  // If already refreshing or has a timer, trust it
+  if (state.isRefreshing || state.refreshTimer) {
     logDebug(
-      `handleVisibilityChange: lastRefreshTime=${new Date(lastRefresh).toISOString()}`
+      "handleVisibilityChange: refresh already in progress or scheduled, skipping"
     );
+    return;
+  }
 
-    if (Date.now() - lastRefresh > timeThreshold) {
-      // Clear any existing visibility timer
-      if (state.visibilityTimer) {
-        clearTimeout(state.visibilityTimer);
-        state.visibilityTimer = undefined;
-      }
+  const timeUntilExpiry = tokens.expireAt.getTime() - Date.now();
 
-      // Small random delay to prevent thundering herd
-      const randomDelay = Math.random() * 1000; // 0-1 second
-      logDebug(
-        `handleVisibilityChange: threshold passed, scheduling refresh with ${Math.round(randomDelay)}ms delay`
-      );
-
-      state.visibilityTimer = setTimeout(() => {
-        state.visibilityTimer = undefined;
-
-        // Handle async operations
-        void (async () => {
-          // Check if we should attempt
-          if (!(await shouldAttemptRefresh())) {
-            return;
-          }
-
-          // Re-check conditions after delay
-          const currentState = getRefreshState(username);
-          if (!currentState.isRefreshing && !currentState.refreshTimer) {
-            logDebug("handleVisibilityChange: executing delayed refresh");
-            void scheduleRefresh();
-          }
-        })();
-      }, randomDelay);
-    }
+  // Only intervene if tokens are about to expire and nothing is scheduled
+  if (timeUntilExpiry < 5 * 60 * 1000) {
+    logDebug(
+      `handleVisibilityChange: tokens expiring in ${Math.round(timeUntilExpiry / 1000)}s, scheduling refresh`
+    );
+    void scheduleRefresh();
   }
 }
 
@@ -403,6 +372,7 @@ async function scheduleRefreshUnlocked({
 
     const desiredFireTime = Date.now() + refreshDelay;
     state.nextRefreshTime = desiredFireTime;
+    state.lastScheduleTime = Date.now();
 
     const minutesUntilRefresh = Math.round(refreshDelay / (60 * 1000));
     logDebug(`Scheduling token refresh in ${minutesUntilRefresh} minutes`);
@@ -1073,12 +1043,6 @@ export function cleanupRefreshSystem(username?: string): void {
     state.refreshTimer();
     state.refreshTimer = undefined;
     state.nextRefreshTime = undefined;
-  }
-
-  // Clean up visibility timer
-  if (state.visibilityTimer) {
-    clearTimeout(state.visibilityTimer);
-    state.visibilityTimer = undefined;
   }
 
   // Reset refresh state
