@@ -85,12 +85,11 @@ const {
 
 Common `signInStatus` values:
 
-| Value                | Meaning                        |
-| -------------------- | ------------------------------ |
-| `CHECKING`           | reading tokens from storage    |
-| `SIGNED_IN`          | valid tokens in memory         |
-| `REFRESHING_SIGN_IN` | background refresh in progress |
-| `NOT_SIGNED_IN`      | no (or expired) tokens         |
+| Value           | Meaning                     |
+| --------------- | --------------------------- |
+| `CHECKING`      | reading tokens from storage |
+| `SIGNED_IN`     | valid tokens in memory      |
+| `NOT_SIGNED_IN` | no (or expired) tokens      |
 
 ---
 

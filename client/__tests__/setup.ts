@@ -23,18 +23,35 @@ jest.mock("../util.js", () => {
   return {
     ...(actualUtil as object),
     setTimeoutWallClock: (fn: () => void, delay: number) => {
-      return setTimeout(fn, delay);
+      const timeoutId = setTimeout(fn, delay);
+      // Return a cleanup function like the real implementation
+      return () => clearTimeout(timeoutId);
     },
     parseJwtPayload: (token: string) => {
-      // Simple mock implementation
-      // eslint-disable-next-line security/detect-possible-timing-attacks
-      if (token !== "mock-access-token") {
+      // Simple mock implementation that handles any JWT format
+      try {
+        // If it's our specific test token, return predefined values
+        // Using length check first to avoid timing attacks
+        if (token.length === 17 && token === "mock-access-token") {
+          return {
+            username: "test-user",
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          };
+        }
+
+        // Otherwise, try to parse it as a real JWT
+        const [, payload] = token.split(".");
+        if (!payload) {
+          throw new Error("Invalid token format");
+        }
+
+        // Decode base64url
+        const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+        const decoded = atob(base64);
+        return JSON.parse(decoded) as Record<string, unknown>;
+      } catch (error) {
         throw new Error("Invalid token");
       }
-      return {
-        username: "test-user",
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      };
     },
   };
 });

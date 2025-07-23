@@ -13,11 +13,7 @@
  * language governing permissions and limitations under the License.
  */
 import { signOut } from "../common.js";
-import {
-  parseJwtPayload,
-  setTimeoutWallClock,
-  bufferToBase64,
-} from "../util.js";
+import { parseJwtPayload, bufferToBase64 } from "../util.js";
 import {
   fido2CreateCredential,
   fido2DeleteCredential,
@@ -250,7 +246,6 @@ interface PasswordlessState {
   creatingCredential: boolean;
   fido2Credentials?: Fido2Credential[];
   deviceKey: string | null;
-  isSchedulingRefresh?: boolean;
   isRefreshingTokens?: boolean;
   recheckSignInStatus: number;
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
@@ -261,7 +256,6 @@ interface PasswordlessState {
   };
   lastActivityAt: number;
   nowTick: number;
-  isAttemptingExpiredTokenRefresh: boolean;
 }
 
 // Define action types
@@ -282,15 +276,13 @@ type PasswordlessAction =
   | { type: "SET_DEVICE_KEY"; payload: string | null }
   | {
       type: "SET_REFRESH_STATUS";
-      isScheduling?: boolean;
-      isRefreshing?: boolean;
+      isRefreshing: boolean;
     }
   | { type: "INCREMENT_RECHECK_STATUS" }
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
   | { type: "SET_LAST_ACTIVITY"; payload: number }
   | { type: "SET_NOW_TICK"; payload: number }
-  | { type: "SET_ATTEMPTING_EXPIRED_REFRESH"; payload: boolean }
   | { type: "SIGN_OUT" };
 
 // Initial state
@@ -307,7 +299,6 @@ const initialPasswordlessState: PasswordlessState = {
   },
   lastActivityAt: Date.now(),
   nowTick: Date.now(),
-  isAttemptingExpiredTokenRefresh: false,
 };
 
 // Reducer function
@@ -369,12 +360,7 @@ function passwordlessReducer(
     case "SET_REFRESH_STATUS":
       return {
         ...state,
-        ...(action.isScheduling !== undefined && {
-          isSchedulingRefresh: action.isScheduling,
-        }),
-        ...(action.isRefreshing !== undefined && {
-          isRefreshingTokens: action.isRefreshing,
-        }),
+        isRefreshingTokens: action.isRefreshing,
       };
 
     case "INCREMENT_RECHECK_STATUS":
@@ -391,9 +377,6 @@ function passwordlessReducer(
 
     case "SET_NOW_TICK":
       return { ...state, nowTick: action.payload };
-
-    case "SET_ATTEMPTING_EXPIRED_REFRESH":
-      return { ...state, isAttemptingExpiredTokenRefresh: action.payload };
 
     case "SIGN_OUT":
       return {
@@ -427,14 +410,11 @@ function _usePasswordless() {
     creatingCredential,
     fido2Credentials,
     deviceKey,
-    isSchedulingRefresh,
     isRefreshingTokens,
-    recheckSignInStatus,
     authMethod,
     totpMfaStatus,
     lastActivityAt,
     nowTick,
-    isAttemptingExpiredTokenRefresh,
   } = state;
 
   // Helper functions for common dispatch actions
@@ -644,7 +624,6 @@ function _usePasswordless() {
       tokens &&
       (!tokens.accessToken || !tokens.expireAt) &&
       !isRefreshingTokens &&
-      !isSchedulingRefresh &&
       authMethod !== "SRP" &&
       signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
       signingInStatus !== "SIGNED_IN_WITH_PASSWORD" &&
@@ -683,7 +662,6 @@ function _usePasswordless() {
     tokens?.accessToken,
     tokens?.expireAt,
     isRefreshingTokens,
-    isSchedulingRefresh,
     authMethod,
     signingInStatus,
     parseAndSetTokens,
@@ -901,83 +879,45 @@ function _usePasswordless() {
     [deleteFido2Credential, updateFido2Credential]
   );
 
-  // Determine sign-in status (single authoritative state for UI)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Determine sign-in status (simplified to essential states only)
   const signInStatus = useMemo(() => {
-    // 1️⃣ Initial load – waiting for storage
+    // 1. Initial load – waiting for storage
     if (initiallyRetrievingTokensFromStorage) return "CHECKING";
 
-    // 2️⃣ Library is busy signing in/out
+    // 2. Library is busy signing in/out
     if (busyState.includes(signingInStatus as BusyState)) {
       return signingInStatus === "SIGNING_OUT" ? "SIGNING_OUT" : "SIGNING_IN";
     }
 
-    // 3️⃣ Decide which expiry timestamp to use
-    const isOAuth = tokens?.authMethod === "REDIRECT";
-    const expiresAt: Date | undefined = isOAuth
-      ? tokens?.expireAt
-      : tokensParsed?.expireAt;
+    // 3. Check token validity
+    const expiresAt = tokens?.expireAt || tokensParsed?.expireAt;
 
-    // 3a) Still waiting for JWTs to be parsed – treat as signing in to avoid flicker
-    if (!isOAuth && tokens && !tokensParsed) return "SIGNING_IN";
-
-    // Missing tokens → not signed in
+    // No tokens = not signed in
     if (!expiresAt) return "NOT_SIGNED_IN";
 
-    // 4️⃣ Refresh in progress (including expired token refresh attempts)
-    if (
-      isSchedulingRefresh ||
-      isRefreshingTokens ||
-      isAttemptingExpiredTokenRefresh
-    )
-      return "REFRESHING_SIGN_IN";
-
+    // Check if tokens are expired
     const now = Date.now();
+    const expireAtTime =
+      expiresAt instanceof Date
+        ? expiresAt.valueOf()
+        : new Date(expiresAt).valueOf();
 
-    // 5️⃣ Tokens expired - attempt refresh before changing status
-    if (now >= expiresAt.valueOf()) {
-      // Check if we have a refresh token to attempt refresh
-      if (tokens?.refreshToken && !isAttemptingExpiredTokenRefresh) {
-        // Return refreshing status and trigger refresh in useEffect
-        return "REFRESHING_SIGN_IN";
-      }
-
-      // No refresh token available or refresh already attempted and failed
+    // Expired tokens = not signed in
+    if (now >= expireAtTime) {
       return "NOT_SIGNED_IN";
     }
 
-    // 6️⃣ All good
+    // Valid tokens = signed in
     return "SIGNED_IN";
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
-    tokens,
-    tokensParsed,
-    isSchedulingRefresh,
-    isRefreshingTokens,
-    recheckSignInStatus,
-    isAttemptingExpiredTokenRefresh,
+    tokens?.expireAt,
+    tokensParsed?.expireAt,
   ]);
 
-  // Check signInStatus upon token expiry
-  useEffect(() => {
-    if (!tokens?.expireAt) return;
-    const checkIn = tokens.expireAt.valueOf() - Date.now();
-    if (checkIn < 0) return;
-    return setTimeoutWallClock(() => {
-      const { debug } = configure();
-      debug?.(
-        "Checking signInStatus as tokens have expired at:",
-        tokens.expireAt?.toISOString()
-      );
-      dispatch({ type: "INCREMENT_RECHECK_STATUS" });
-    }, checkIn);
-  }, [tokens?.expireAt]);
-
   // Track FIDO2 authenticators for the user
-  const isSignedIn =
-    signInStatus === "SIGNED_IN" || signInStatus === "REFRESHING_SIGN_IN";
+  const isSignedIn = signInStatus === "SIGNED_IN";
   const revalidateFido2Credentials = useCallback(() => {
     const { debug } = configure();
 
@@ -1139,65 +1079,6 @@ function _usePasswordless() {
     },
     [tokens, parseAndSetTokens, _setTokens]
   );
-
-  // Handle expired token refresh when signInStatus is REFRESHING_SIGN_IN
-  useEffect(() => {
-    if (
-      signInStatus === "REFRESHING_SIGN_IN" &&
-      tokens?.refreshToken &&
-      !isAttemptingExpiredTokenRefresh
-    ) {
-      const now = Date.now();
-      const isOAuth = tokens?.authMethod === "REDIRECT";
-      const expiresAt = isOAuth ? tokens?.expireAt : tokensParsed?.expireAt;
-
-      // Only refresh if tokens are actually expired
-      if (expiresAt && now >= expiresAt.valueOf()) {
-        const { debug } = configure();
-        debug?.("Tokens expired, attempting refresh");
-
-        dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: true });
-
-        // Use existing refreshTokens with built-in retry logic
-        refreshTokens({
-          tokensCb: (newTokens) => {
-            dispatch({
-              type: "SET_ATTEMPTING_EXPIRED_REFRESH",
-              payload: false,
-            });
-            if (newTokens) {
-              updateTokens(newTokens);
-              debug?.("Successfully refreshed expired tokens");
-            } else {
-              debug?.("Failed to refresh expired tokens");
-            }
-          },
-          isRefreshingCb: setIsRefreshingTokens,
-          force: true,
-        }).catch((err) => {
-          const { debug } = configure();
-          debug?.("Error refreshing expired tokens:", err);
-          dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: false });
-        });
-      }
-    }
-  }, [
-    signInStatus,
-    tokens,
-    tokensParsed,
-    isAttemptingExpiredTokenRefresh,
-    updateTokens,
-    setIsRefreshingTokens,
-  ]);
-
-  // Reset expired token refresh flag when tokens change successfully
-  useEffect(() => {
-    if (tokens && isAttemptingExpiredTokenRefresh) {
-      const { debug } = configure();
-      debug?.("Tokens updated, resetting expired token refresh flag");
-      dispatch({ type: "SET_ATTEMPTING_EXPIRED_REFRESH", payload: false });
-    }
-  }, [tokens, isAttemptingExpiredTokenRefresh]);
 
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
@@ -1443,24 +1324,23 @@ function _usePasswordless() {
       dispatch({ type: "SET_DEVICE_KEY", payload: null });
     },
     /** Register a FIDO2 credential with the Relying Party */
-    fido2CreateCredential: (
+    fido2CreateCredential: async (
       ...args: Parameters<typeof fido2CreateCredential>
     ) => {
       dispatch({ type: "SET_CREATING_CREDENTIAL", payload: true });
-      return fido2CreateCredential(...args)
-        .then((storedCredential) => {
-          const credential = toFido2Credential(storedCredential);
-          dispatch({
-            type: "SET_FIDO2_CREDENTIALS",
-            payload: fido2Credentials
-              ? [...fido2Credentials, credential]
-              : [credential],
-          });
-          return storedCredential;
-        })
-        .finally(() =>
-          dispatch({ type: "SET_CREATING_CREDENTIAL", payload: false })
-        );
+      try {
+        const storedCredential = await fido2CreateCredential(...args);
+        const credential = toFido2Credential(storedCredential);
+        dispatch({
+          type: "SET_FIDO2_CREDENTIALS",
+          payload: fido2Credentials
+            ? [...fido2Credentials, credential]
+            : [credential],
+        });
+        return storedCredential;
+      } finally {
+        dispatch({ type: "SET_CREATING_CREDENTIAL", payload: false });
+      }
     },
     /** Sign out */
     signOut: (options?: { skipTokenRevocation?: boolean }) => {

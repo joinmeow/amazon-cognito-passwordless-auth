@@ -97,7 +97,7 @@ describe("OAuth Integration with processTokens", () => {
     };
 
     mockConfigure.mockReturnValue(mockConfig as ConfigWithDefaults);
-    mockWithStorageLock.mockImplementation(async (key, fn) => fn());
+    mockWithStorageLock.mockImplementation(async (_, fn) => fn());
   });
 
   describe("handleCognitoOAuthCallback", () => {

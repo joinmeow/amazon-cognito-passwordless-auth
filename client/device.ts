@@ -78,7 +78,7 @@ async function generateDevicePassword(): Promise<string> {
  * This follows the same pattern as the Python example
  */
 async function calculateDeviceVerifier(
-  username: string,
+  _username: string,
   deviceKey: string,
   deviceGroupKey: string,
   devicePassword: string
