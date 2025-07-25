@@ -924,6 +924,7 @@ function _usePasswordless() {
     signingInStatus,
     tokens?.expireAt,
     tokensParsed?.expireAt,
+    isRefreshingTokens,
   ]);
 
   // Track FIDO2 authenticators for the user
