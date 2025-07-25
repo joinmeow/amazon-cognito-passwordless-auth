@@ -902,6 +902,28 @@ function _usePasswordless() {
         ? expiresAt.valueOf()
         : new Date(expiresAt).valueOf();
 
+    // Allow a grace period during token refresh to prevent temporary logout
+    // The refresh process typically completes within 15-20 seconds
+    const REFRESH_GRACE_PERIOD_MS = 30000; // 30 seconds grace period
+
+    // If we're currently refreshing tokens, maintain signed-in status
+    // even if tokens are technically expired
+    if (isRefreshingTokens && now < expireAtTime + REFRESH_GRACE_PERIOD_MS) {
+      return "SIGNED_IN";
+    }
+
+    // Check if tokens are expired
+    const now = Date.now();
+    const expireAtTime =
+      expiresAt instanceof Date
+        ? expiresAt.valueOf()
+        : new Date(expiresAt).valueOf();
+    
+    // If expireAtTime is NaN (invalid date), treat as not signed in
+    if (isNaN(expireAtTime)) {
+      return "NOT_SIGNED_IN";
+    }
+
     // Expired tokens = not signed in
     if (now >= expireAtTime) {
       return "NOT_SIGNED_IN";
@@ -914,6 +936,7 @@ function _usePasswordless() {
     signingInStatus,
     tokens?.expireAt,
     tokensParsed?.expireAt,
+    isRefreshingTokens,
   ]);
 
   // Track FIDO2 authenticators for the user
