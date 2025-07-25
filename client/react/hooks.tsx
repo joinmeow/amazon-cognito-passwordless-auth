@@ -912,6 +912,18 @@ function _usePasswordless() {
       return "SIGNED_IN";
     }
 
+    // Check if tokens are expired
+    const now = Date.now();
+    const expireAtTime =
+      expiresAt instanceof Date
+        ? expiresAt.valueOf()
+        : new Date(expiresAt).valueOf();
+    
+    // If expireAtTime is NaN (invalid date), treat as not signed in
+    if (isNaN(expireAtTime)) {
+      return "NOT_SIGNED_IN";
+    }
+
     // Expired tokens = not signed in
     if (now >= expireAtTime) {
       return "NOT_SIGNED_IN";
