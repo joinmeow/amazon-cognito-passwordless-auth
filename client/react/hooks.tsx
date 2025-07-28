@@ -918,7 +918,7 @@ function _usePasswordless() {
       expiresAt instanceof Date
         ? expiresAt.valueOf()
         : new Date(expiresAt).valueOf();
-    
+
     // If expireAtTime is NaN (invalid date), treat as not signed in
     if (isNaN(expireAtTime)) {
       return "NOT_SIGNED_IN";
