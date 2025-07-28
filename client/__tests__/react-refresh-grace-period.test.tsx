@@ -31,6 +31,11 @@ describe("Token Refresh Grace Period Logic", () => {
         ? expireAt.valueOf()
         : new Date(expireAt).valueOf();
 
+    // If expireAtTime is NaN (invalid date), treat as not signed in
+    if (isNaN(expireAtTime)) {
+      return "NOT_SIGNED_IN";
+    }
+
     // Allow a grace period during token refresh to prevent temporary logout
     // The refresh process typically completes within 15-20 seconds
     const REFRESH_GRACE_PERIOD_MS = 30000; // 30 seconds grace period
@@ -130,10 +135,9 @@ describe("Token Refresh Grace Period Logic", () => {
 
       const status = computeSignInStatus(invalidDate, isRefreshing);
 
-      // Invalid dates convert to NaN. In JavaScript, comparisons with NaN always return false
-      // So now >= NaN is false, making the function return "SIGNED_IN"
-      // This is actually a potential security issue - invalid dates shouldn't grant access
-      expect(status).toBe("SIGNED_IN");
+      // Invalid dates convert to NaN and should be treated as not signed in
+      // This prevents a security issue where invalid dates could grant access
+      expect(status).toBe("NOT_SIGNED_IN");
     });
   });
 
