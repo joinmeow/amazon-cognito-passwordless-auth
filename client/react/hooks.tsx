@@ -615,14 +615,47 @@ function _usePasswordless() {
   // fetch MFA status once per token rotation (per page load).
   const lastFetchedMfaTokenRef = useRef<string | undefined>();
 
+  /**
+   * Helper function to check if access token is present
+   * This is useful for API calls that only require access token
+   * @returns true if access token is present (from storage or parsed)
+   */
+  const hasAccessToken = useCallback(() => {
+    return !!(tokens?.accessToken || tokensParsed?.accessToken);
+  }, [tokens?.accessToken, tokensParsed?.accessToken]);
+
+  /**
+   * Helper function to check if refresh token is present
+   * @returns true if refresh token is present
+   */
+  const hasRefreshToken = useCallback(() => {
+    return !!tokens?.refreshToken;
+  }, [tokens?.refreshToken]);
+
+  /**
+   * Helper function to check if essential tokens are present
+   * @returns true if both access token (from storage or parsed) and refresh token are present
+   */
+  const hasEssentialTokens = useCallback(() => {
+    return hasAccessToken() && hasRefreshToken();
+  }, [hasAccessToken, hasRefreshToken]);
+
+  /**
+   * Helper function to check if tokens are incomplete (missing essential parts)
+   * This is useful for detecting when token refresh is needed
+   * @returns true if tokens exist but are missing access token or expiration
+   */
+  const hasIncompleteTokens = useCallback(() => {
+    return tokens && (!hasAccessToken() || !tokens.expireAt);
+  }, [tokens, hasAccessToken]);
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     // Don't run if we're currently handling incomplete tokens to avoid loops
     if (isHandlingIncompleteTokens.current) return;
 
     if (
-      tokens &&
-      (!tokens.accessToken || !tokens.expireAt) &&
+      hasIncompleteTokens() &&
       !isRefreshingTokens &&
       authMethod !== "SRP" &&
       signingInStatus !== "SIGNING_IN_WITH_PASSWORD" &&
@@ -658,9 +691,7 @@ function _usePasswordless() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    // Be specific about token properties that indicate incomplete tokens
-    tokens?.accessToken,
-    tokens?.expireAt,
+    hasIncompleteTokens,
     isRefreshingTokens,
     authMethod,
     signingInStatus,
@@ -890,11 +921,7 @@ function _usePasswordless() {
     }
 
     // 3. Check if we have the essential tokens
-    const hasAccessToken = !!(tokens?.accessToken || tokensParsed?.accessToken);
-    const hasRefreshToken = !!tokens?.refreshToken;
-
-    // If we don't have the essential tokens, not signed in
-    if (!hasAccessToken || !hasRefreshToken) {
+    if (!hasEssentialTokens()) {
       return "NOT_SIGNED_IN";
     }
 
@@ -938,12 +965,10 @@ function _usePasswordless() {
   }, [
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
-    tokens?.accessToken,
-    tokens?.refreshToken,
     tokens?.expireAt,
-    tokensParsed?.accessToken,
     tokensParsed?.expireAt,
     isRefreshingTokens,
+    hasEssentialTokens,
   ]);
 
   // Track FIDO2 authenticators for the user
@@ -1000,13 +1025,13 @@ function _usePasswordless() {
   // Fetch TOTP MFA status when the user is signed in – with rate limiting
   useEffect(() => {
     // Early return if not signed in or no token
-    if (!isSignedIn || !tokens?.accessToken) return;
+    if (!isSignedIn || !hasAccessToken()) return;
 
     const now = Date.now();
     const timeSinceLastFetch = now - lastMfaFetchTimeRef.current;
 
     // Skip if we've already fetched MFA status for this token value
-    if (tokens.accessToken === lastFetchedMfaTokenRef.current) return;
+    if (tokens?.accessToken === lastFetchedMfaTokenRef.current) return;
 
     // Skip if we fetched recently (within cooldown period)
     if (timeSinceLastFetch < MFA_FETCH_COOLDOWN) {
@@ -1018,6 +1043,10 @@ function _usePasswordless() {
       );
       return;
     }
+
+    // At this point, we know tokens exists because hasAccessToken() returned true
+    // But TypeScript doesn't know this, so we need to check again
+    if (!tokens?.accessToken) return;
 
     lastFetchedMfaTokenRef.current = tokens.accessToken;
     lastMfaFetchTimeRef.current = now;
@@ -1068,7 +1097,7 @@ function _usePasswordless() {
     return () => {
       abortController.abort();
     };
-  }, [isSignedIn, tokens?.accessToken]);
+  }, [isSignedIn, tokens?.accessToken, hasAccessToken]);
 
   useEffect(() => {
     const { debug } = configure();
@@ -1224,7 +1253,7 @@ function _usePasswordless() {
      * The device key must be available from a recent authentication response.
      */
     confirmDevice: async (deviceName: string) => {
-      if (!tokens?.accessToken) {
+      if (!hasAccessToken()) {
         throw new Error("User must be signed in to confirm a device");
       }
 
@@ -1252,8 +1281,17 @@ function _usePasswordless() {
         salt,
       };
 
+      if (!hasAccessToken()) {
+        throw new Error("Cannot confirm device: no access token available");
+      }
+
+      const accessToken = tokens?.accessToken;
+      if (!accessToken) {
+        throw new Error("Cannot confirm device: access token missing");
+      }
+
       const result = await confirmDeviceApi({
-        accessToken: tokens.accessToken,
+        accessToken,
         deviceKey,
         deviceName,
         deviceSecretVerifierConfig: deviceVerifierConfig,
@@ -1265,14 +1303,16 @@ function _usePasswordless() {
           "User confirmation necessary for device, setting as remembered"
         );
         await updateDeviceStatus({
-          accessToken: tokens.accessToken,
+          accessToken,
           deviceKey,
           deviceRememberedStatus: "remembered",
         });
       }
 
       // Ensure device key is stored in persistent storage
-      await storeDeviceKey(tokens.username, deviceKey);
+      if (tokens?.username) {
+        await storeDeviceKey(tokens.username, deviceKey);
+      }
 
       return result;
     },
@@ -1288,15 +1328,26 @@ function _usePasswordless() {
       deviceKey: string;
       deviceRememberedStatus: "remembered" | "not_remembered";
     }) => {
-      if (!tokens?.accessToken) {
+      if (!hasAccessToken()) {
         throw new Error("User must be signed in to update device status");
       }
 
       const { debug } = configure();
       debug?.(`Setting device ${deviceKey} as ${deviceRememberedStatus}`);
 
+      if (!hasAccessToken()) {
+        throw new Error(
+          "Cannot update device status: no access token available"
+        );
+      }
+
+      const accessToken = tokens?.accessToken;
+      if (!accessToken) {
+        throw new Error("Cannot update device status: access token missing");
+      }
+
       await updateDeviceStatus({
-        accessToken: tokens.accessToken,
+        accessToken,
         deviceKey,
         deviceRememberedStatus,
       });
@@ -1307,7 +1358,7 @@ function _usePasswordless() {
      * as it also removes the device from the user's account on the server
      */
     forgetDevice: async (deviceKeyToForget: string = deviceKey || "") => {
-      if (!tokens?.accessToken) {
+      if (!hasAccessToken()) {
         throw new Error("User must be signed in to forget a device");
       }
 
@@ -1318,8 +1369,17 @@ function _usePasswordless() {
       const { debug, storage, clientId } = configure();
       debug?.("Forgetting device:", deviceKeyToForget);
 
+      if (!hasAccessToken()) {
+        throw new Error("Cannot forget device: no access token available");
+      }
+
+      const accessToken = tokens?.accessToken;
+      if (!accessToken) {
+        throw new Error("Cannot forget device: access token missing");
+      }
+
       await forgetDeviceApi({
-        accessToken: tokens.accessToken,
+        accessToken,
         deviceKey: deviceKeyToForget,
       });
 
@@ -1683,10 +1743,14 @@ function _usePasswordless() {
     totpMfaStatus,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
-      if (!tokens?.accessToken) return;
+      if (!hasAccessToken()) return;
 
       try {
-        const user = await getUser({ accessToken: tokens.accessToken });
+        const accessToken = tokens?.accessToken;
+        if (!accessToken) {
+          return false;
+        }
+        const user = await getUser({ accessToken });
 
         // Simple approach - if we have a valid user with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
