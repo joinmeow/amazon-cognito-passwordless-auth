@@ -889,11 +889,22 @@ function _usePasswordless() {
       return signingInStatus === "SIGNING_OUT" ? "SIGNING_OUT" : "SIGNING_IN";
     }
 
-    // 3. Check token validity
+    // 3. Check if we have the essential tokens
+    const hasAccessToken = !!(tokens?.accessToken || tokensParsed?.accessToken);
+    const hasRefreshToken = !!tokens?.refreshToken;
+
+    // If we don't have the essential tokens, not signed in
+    if (!hasAccessToken || !hasRefreshToken) {
+      return "NOT_SIGNED_IN";
+    }
+
+    // We have tokens, now check expiration if possible
     const expiresAt = tokens?.expireAt || tokensParsed?.expireAt;
 
-    // No tokens = not signed in
-    if (!expiresAt) return "NOT_SIGNED_IN";
+    // If we can't determine expiration, assume tokens are valid
+    if (!expiresAt) {
+      return "SIGNED_IN";
+    }
 
     // Check if tokens are expired
     const now = Date.now();
@@ -902,9 +913,9 @@ function _usePasswordless() {
         ? expiresAt.valueOf()
         : new Date(expiresAt).valueOf();
 
-    // If expireAtTime is NaN (invalid date), treat as not signed in
+    // If expireAtTime is NaN (invalid date), assume tokens are valid
     if (isNaN(expireAtTime)) {
-      return "NOT_SIGNED_IN";
+      return "SIGNED_IN";
     }
 
     // Allow a grace period during token refresh to prevent temporary logout
@@ -927,7 +938,10 @@ function _usePasswordless() {
   }, [
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
+    tokens?.accessToken,
+    tokens?.refreshToken,
     tokens?.expireAt,
+    tokensParsed?.accessToken,
     tokensParsed?.expireAt,
     isRefreshingTokens,
   ]);
