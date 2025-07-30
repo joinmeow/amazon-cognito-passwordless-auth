@@ -29,7 +29,7 @@ configure({
   },
   hostedUi: {
     domain: "example.auth.eu-west-1.amazoncognito.com",
-    redirectUriSignIn: "http://localhost:5173/",
+    redirectSignIn: "http://localhost:5173/",
   },
   totp: { issuer: "Example" }, // Optional – TOTP MFA
   debug: console.log, // See what happens under the hood
@@ -143,15 +143,169 @@ sequenceDiagram
 
 ### 3.3 Hosted UI Redirect (Google, Apple, OIDC)
 
+#### Basic Usage
+
+```tsx
+const { signInWithRedirect } = usePasswordless();
+
+// Sign in with Google (default)
+signInWithRedirect();
+
+// Sign in with specific provider
+signInWithRedirect({ provider: "Facebook" });
+
+// Sign in with custom state (preserved through OAuth flow)
+signInWithRedirect({
+  provider: "Google",
+  customState: JSON.stringify({ returnTo: "/dashboard" }),
+});
+
+// Sign in with additional OAuth parameters
+signInWithRedirect({
+  provider: "COGNITO", // Direct Cognito login
+  oauthParams: {
+    prompt: "login", // Force re-authentication
+    login_hint: "user@example.com",
+  },
+});
+```
+
+#### Configuration Requirements
+
+```tsx
+configure({
+  // ... other config ...
+  hostedUi: {
+    // Your Cognito domain (without https://)
+    domain: "example.auth.eu-west-1.amazoncognito.com",
+
+    // Redirect URI - must be registered in Cognito app client
+    // Can be relative path (converted to absolute) or full URL
+    redirectUriSignIn: "/", // or "http://localhost:5173/"
+
+    // Optional: OAuth scopes (defaults shown)
+    scopes: ["openid", "email", "profile"],
+
+    // Optional: Response type (default: "code" for PKCE flow)
+    responseType: "code",
+  },
+});
+```
+
+#### OAuth Flow
+
 ```mermaid
-flowchart TD
-    subgraph Browser
-        direction LR
-        A[React App] -- 302 --> B(Cognito Hosted UI)
-        B -- token--> A
-    end
-    A -->|store| LocalStorage
-    A -->|parse| usePasswordless
+sequenceDiagram
+    participant U as User
+    participant A as React App
+    participant H as usePasswordless Hook
+    participant C as Cognito Hosted UI
+    participant P as Identity Provider
+
+    U->>A: Click "Sign in with Google"
+    A->>H: signInWithRedirect({provider: "Google"})
+    H->>H: Generate state & PKCE challenge
+    H->>H: Store OAuth state in localStorage
+    H->>C: Redirect to /oauth2/authorize
+    C->>P: Redirect to Google
+    P->>U: Show login screen
+    U->>P: Enter credentials
+    P->>C: Return with authorization code
+    C->>A: Redirect back with code & state
+
+    Note over A: On page load, hook automatically detects callback
+
+    A->>H: handleCognitoOAuthCallback() (automatic)
+    H->>H: Verify state & PKCE
+    H->>C: Exchange code for tokens
+    C->>H: Return tokens
+    H->>A: Update signInStatus to SIGNED_IN
+```
+
+#### Callback Handling
+
+The OAuth callback is **automatically handled** by the hook on page load. You don't need to call any function manually. The hook:
+
+1. Detects OAuth callback parameters in the URL
+2. Validates the OAuth state for security
+3. Exchanges the authorization code for tokens
+4. Stores tokens and updates the sign-in state
+5. Cleans up OAuth parameters from the URL
+
+#### Sign-In Status During OAuth Flow
+
+```tsx
+const { signInStatus, signingInStatus } = usePasswordless();
+
+// Status progression during OAuth:
+// 1. "NOT_SIGNED_IN" → Initial state
+// 2. "STARTING_SIGN_IN_WITH_REDIRECT" → After calling signInWithRedirect()
+// 3. [User redirected to Cognito/Provider]
+// 4. "STARTING_SIGN_IN_WITH_REDIRECT" → After redirect back
+// 5. "SIGNED_IN_WITH_REDIRECT" → After successful token exchange
+// 6. "SIGNED_IN" → Final state
+
+// Handle OAuth errors
+if (signingInStatus === "SIGNIN_WITH_REDIRECT_FAILED") {
+  console.error("OAuth sign-in failed:", lastError);
+}
+```
+
+#### Common Provider Values
+
+- `"COGNITO"` - Direct Cognito username/password login via Hosted UI
+- `"Google"` - Google OAuth
+- `"Facebook"` - Facebook OAuth
+- `"LoginWithAmazon"` - Amazon OAuth
+- `"Apple"` - Apple Sign In
+- Custom OIDC providers configured in your user pool
+
+#### Security Features
+
+- **PKCE (Proof Key for Code Exchange)**: Automatically implemented for authorization code flow
+- **State Parameter**: Prevents CSRF attacks, automatically generated and validated
+- **Custom State**: Your custom state is encoded and preserved through the flow
+- **Lock Protection**: Prevents race conditions during concurrent OAuth operations
+
+#### Error Handling
+
+```tsx
+const { lastError, signInStatus } = usePasswordless();
+
+// OAuth errors are captured in lastError
+if (lastError?.message.includes("access_denied")) {
+  // User cancelled the OAuth flow
+}
+
+// The hook automatically cleans up on errors:
+// - Removes OAuth state from storage
+// - Sets appropriate error status
+// - Clears in-progress flags
+```
+
+#### Advanced: Custom OAuth Parameters
+
+```tsx
+// Force account selection
+signInWithRedirect({
+  oauthParams: {
+    prompt: "select_account",
+  },
+});
+
+// Pre-fill email
+signInWithRedirect({
+  oauthParams: {
+    login_hint: "user@example.com",
+  },
+});
+
+// Request additional scopes
+signInWithRedirect({
+  oauthParams: {
+    scope: "openid email profile aws.cognito.signin.user.admin",
+  },
+});
 ```
 
 ### 3.4 Token Lifecycle
