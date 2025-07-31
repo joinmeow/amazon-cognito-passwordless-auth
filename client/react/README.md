@@ -181,7 +181,7 @@ configure({
 
     // Redirect URI - must be registered in Cognito app client
     // Can be relative path (converted to absolute) or full URL
-    redirectUriSignIn: "/", // or "http://localhost:5173/"
+    redirectSignIn: "/", // or "http://localhost:5173/"
 
     // Optional: OAuth scopes (defaults shown)
     scopes: ["openid", "email", "profile"],

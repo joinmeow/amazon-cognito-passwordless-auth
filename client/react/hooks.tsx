@@ -622,11 +622,11 @@ function _usePasswordless() {
   /**
    * Helper function to check if access token is present
    * This is useful for API calls that only require access token
-   * @returns true if access token is present (from storage or parsed)
+   * @returns true if access token is present
    */
   const hasAccessToken = useCallback(() => {
-    return !!(tokens?.accessToken || tokensParsed?.accessToken);
-  }, [tokens?.accessToken, tokensParsed?.accessToken]);
+    return !!tokens?.accessToken;
+  }, [tokens?.accessToken]);
 
   /**
    * Helper function to check if refresh token is present
@@ -662,18 +662,15 @@ function _usePasswordless() {
    */
   const getAccessTokenOrThrow = useCallback(
     (operation: string): string => {
-      if (!hasAccessToken()) {
-        throw new Error(`Cannot ${operation}: user must be signed in`);
-      }
-
+      // We need the actual token string, not just the parsed payload
       const accessToken = tokens?.accessToken;
       if (!accessToken) {
-        throw new Error(`Cannot ${operation}: access token missing`);
+        throw new Error(`Cannot ${operation}: user must be signed in`);
       }
 
       return accessToken;
     },
-    [hasAccessToken, tokens?.accessToken]
+    [tokens?.accessToken]
   );
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1733,8 +1730,6 @@ function _usePasswordless() {
     totpMfaStatus,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
-      if (!hasAccessToken()) return;
-
       try {
         const accessToken = getAccessTokenOrThrow("refresh TOTP MFA status");
         const user = await getUser({ accessToken });
