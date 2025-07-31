@@ -71,6 +71,10 @@ import {
   handleCognitoOAuthCallback,
 } from "../hosted-oauth.js";
 
+// Constants
+const MFA_FETCH_COOLDOWN = 5000; // 5 second cooldown between fetches
+const REFRESH_GRACE_PERIOD_MS = 30000; // 30 seconds grace period
+
 const PasswordlessContext = React.createContext<UsePasswordless | undefined>(
   undefined
 );
@@ -618,11 +622,11 @@ function _usePasswordless() {
   /**
    * Helper function to check if access token is present
    * This is useful for API calls that only require access token
-   * @returns true if access token is present (from storage or parsed)
+   * @returns true if access token is present
    */
   const hasAccessToken = useCallback(() => {
-    return !!(tokens?.accessToken || tokensParsed?.accessToken);
-  }, [tokens?.accessToken, tokensParsed?.accessToken]);
+    return !!tokens?.accessToken;
+  }, [tokens?.accessToken]);
 
   /**
    * Helper function to check if refresh token is present
@@ -648,6 +652,26 @@ function _usePasswordless() {
   const hasIncompleteTokens = useCallback(() => {
     return tokens && (!hasAccessToken() || !tokens.expireAt);
   }, [tokens, hasAccessToken]);
+
+  /**
+   * Helper function to get access token or throw an error
+   * Consolidates the common pattern of checking for access token before API calls
+   * @param operation - The operation being performed (for error messages)
+   * @returns The access token
+   * @throws Error if no access token is available
+   */
+  const getAccessTokenOrThrow = useCallback(
+    (operation: string): string => {
+      // We need the actual token string, not just the parsed payload
+      const accessToken = tokens?.accessToken;
+      if (!accessToken) {
+        throw new Error(`Cannot ${operation}: user must be signed in`);
+      }
+
+      return accessToken;
+    },
+    [tokens?.accessToken]
+  );
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -947,7 +971,6 @@ function _usePasswordless() {
 
     // Allow a grace period during token refresh to prevent temporary logout
     // The refresh process typically completes within 15-20 seconds
-    const REFRESH_GRACE_PERIOD_MS = 30000; // 30 seconds grace period
 
     // If we're currently refreshing tokens, maintain signed-in status
     // even if tokens are technically expired
@@ -1017,7 +1040,6 @@ function _usePasswordless() {
 
   // Track last fetch time to prevent spam
   const lastMfaFetchTimeRef = useRef<number>(0);
-  const MFA_FETCH_COOLDOWN = 5000; // 5 second cooldown between fetches
 
   // Track OAuth callback processing to prevent multiple executions
   const oauthProcessingRef = useRef(false);
@@ -1253,9 +1275,7 @@ function _usePasswordless() {
      * The device key must be available from a recent authentication response.
      */
     confirmDevice: async (deviceName: string) => {
-      if (!hasAccessToken()) {
-        throw new Error("User must be signed in to confirm a device");
-      }
+      const accessToken = getAccessTokenOrThrow("confirm device");
 
       if (!deviceKey) {
         throw new Error("No device key available");
@@ -1280,15 +1300,6 @@ function _usePasswordless() {
         passwordVerifier,
         salt,
       };
-
-      if (!hasAccessToken()) {
-        throw new Error("Cannot confirm device: no access token available");
-      }
-
-      const accessToken = tokens?.accessToken;
-      if (!accessToken) {
-        throw new Error("Cannot confirm device: access token missing");
-      }
 
       const result = await confirmDeviceApi({
         accessToken,
@@ -1328,23 +1339,10 @@ function _usePasswordless() {
       deviceKey: string;
       deviceRememberedStatus: "remembered" | "not_remembered";
     }) => {
-      if (!hasAccessToken()) {
-        throw new Error("User must be signed in to update device status");
-      }
+      const accessToken = getAccessTokenOrThrow("update device status");
 
       const { debug } = configure();
       debug?.(`Setting device ${deviceKey} as ${deviceRememberedStatus}`);
-
-      if (!hasAccessToken()) {
-        throw new Error(
-          "Cannot update device status: no access token available"
-        );
-      }
-
-      const accessToken = tokens?.accessToken;
-      if (!accessToken) {
-        throw new Error("Cannot update device status: access token missing");
-      }
 
       await updateDeviceStatus({
         accessToken,
@@ -1358,9 +1356,7 @@ function _usePasswordless() {
      * as it also removes the device from the user's account on the server
      */
     forgetDevice: async (deviceKeyToForget: string = deviceKey || "") => {
-      if (!hasAccessToken()) {
-        throw new Error("User must be signed in to forget a device");
-      }
+      const accessToken = getAccessTokenOrThrow("forget device");
 
       if (!deviceKeyToForget) {
         throw new Error("No device key provided");
@@ -1368,15 +1364,6 @@ function _usePasswordless() {
 
       const { debug, storage, clientId } = configure();
       debug?.("Forgetting device:", deviceKeyToForget);
-
-      if (!hasAccessToken()) {
-        throw new Error("Cannot forget device: no access token available");
-      }
-
-      const accessToken = tokens?.accessToken;
-      if (!accessToken) {
-        throw new Error("Cannot forget device: access token missing");
-      }
 
       await forgetDeviceApi({
         accessToken,
@@ -1743,13 +1730,8 @@ function _usePasswordless() {
     totpMfaStatus,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
-      if (!hasAccessToken()) return;
-
       try {
-        const accessToken = tokens?.accessToken;
-        if (!accessToken) {
-          return false;
-        }
+        const accessToken = getAccessTokenOrThrow("refresh TOTP MFA status");
         const user = await getUser({ accessToken });
 
         // Simple approach - if we have a valid user with MFA settings, use them
