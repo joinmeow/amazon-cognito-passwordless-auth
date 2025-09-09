@@ -168,6 +168,7 @@ export const PasswordlessContextProvider = (props: {
       passwordlessValue.creatingCredential,
       passwordlessValue.deviceKey,
       passwordlessValue.totpMfaStatus,
+      passwordlessValue.mfaStatusReady,
       passwordlessValue.timeSinceLastActivityMs,
       passwordlessValue.timeSinceLastActivitySeconds,
       passwordlessValue.authMethod,
@@ -254,6 +255,8 @@ interface PasswordlessState {
     preferred: boolean;
     availableMfaTypes: string[];
   };
+  /** True once we have a reliable MFA status from Cognito (via getUser) */
+  mfaStatusReady: boolean;
   lastActivityAt: number;
   nowTick: number;
 }
@@ -281,6 +284,7 @@ type PasswordlessAction =
   | { type: "INCREMENT_RECHECK_STATUS" }
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
+  | { type: "SET_MFA_STATUS_READY"; payload: boolean }
   | { type: "SET_LAST_ACTIVITY"; payload: number }
   | { type: "SET_NOW_TICK"; payload: number }
   | { type: "SIGN_OUT" };
@@ -297,6 +301,7 @@ const initialPasswordlessState: PasswordlessState = {
     preferred: false,
     availableMfaTypes: [],
   },
+  mfaStatusReady: false,
   lastActivityAt: Date.now(),
   nowTick: Date.now(),
 };
@@ -372,6 +377,9 @@ function passwordlessReducer(
     case "SET_TOTP_MFA_STATUS":
       return { ...state, totpMfaStatus: action.payload };
 
+    case "SET_MFA_STATUS_READY":
+      return { ...state, mfaStatusReady: action.payload };
+
     case "SET_LAST_ACTIVITY":
       return { ...state, lastActivityAt: action.payload };
 
@@ -413,6 +421,7 @@ function _usePasswordless() {
     isRefreshingTokens,
     authMethod,
     totpMfaStatus,
+    mfaStatusReady,
     lastActivityAt,
     nowTick,
   } = state;
@@ -1030,6 +1039,7 @@ function _usePasswordless() {
               availableMfaTypes: user.UserMFASettingList || [],
             },
           });
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
         } else {
           // Default to no MFA
           dispatch({
@@ -1040,6 +1050,7 @@ function _usePasswordless() {
               availableMfaTypes: [],
             },
           });
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
         }
       })
       .catch(() => {
@@ -1077,6 +1088,9 @@ function _usePasswordless() {
       if (!current || !next) {
         _setTokens(next);
         parseAndSetTokens(next);
+        if (!current || current.accessToken !== next?.accessToken) {
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: false });
+        }
         return;
       }
 
@@ -1090,6 +1104,9 @@ function _usePasswordless() {
       if (hasChanges) {
         _setTokens(next);
         parseAndSetTokens(next);
+        if (current.accessToken !== next.accessToken) {
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: false });
+        }
       }
       // If no changes, skip update to prevent re-renders
     },
@@ -1667,6 +1684,8 @@ function _usePasswordless() {
     },
     /** The current status of TOTP MFA for the user */
     totpMfaStatus,
+    /** True once we have a reliable MFA status from Cognito (via getUser) */
+    mfaStatusReady,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
       if (!tokens?.accessToken) return;
@@ -1689,6 +1708,7 @@ function _usePasswordless() {
               availableMfaTypes: user.UserMFASettingList || [],
             },
           });
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
         } else {
           // Default to no MFA
           dispatch({
@@ -1699,17 +1719,11 @@ function _usePasswordless() {
               availableMfaTypes: [],
             },
           });
+          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
         }
       } catch (error) {
-        // Just default to no MFA on any error
-        dispatch({
-          type: "SET_TOTP_MFA_STATUS",
-          payload: {
-            enabled: false,
-            preferred: false,
-            availableMfaTypes: [],
-          },
-        });
+        const { debug } = configure();
+        debug?.("refreshTotpMfaStatus failed; not marking ready");
       }
     },
     /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
