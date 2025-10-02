@@ -17,13 +17,21 @@
  * Base error class for all FIDO2/WebAuthn related errors
  */
 export class Fido2Error extends Error {
+  /**
+   * User-friendly message suitable for display to end users.
+   * Uses passkey terminology and avoids technical jargon.
+   */
+  public readonly userMessage: string;
+
   constructor(
     message: string,
     public readonly code: string,
+    userMessage?: string,
     public readonly cause?: unknown
   ) {
     super(message);
     this.name = "Fido2Error";
+    this.userMessage = userMessage ?? message;
 
     // Maintains proper stack trace for where our error was thrown (only available on V8)
     if (Error.captureStackTrace) {
@@ -38,8 +46,11 @@ export class Fido2Error extends Error {
  * Example: User closes passkey dialog, component unmounts during authentication
  */
 export class Fido2AbortError extends Fido2Error {
-  constructor(message = "WebAuthn operation was cancelled") {
-    super(message, "WEBAUTHN_ABORTED");
+  constructor(
+    message = "WebAuthn operation was cancelled",
+    userMessage = "Passkey verification was cancelled"
+  ) {
+    super(message, "WEBAUTHN_ABORTED", userMessage);
     this.name = "Fido2AbortError";
   }
 }
@@ -53,8 +64,13 @@ export class Fido2AbortError extends Fido2Error {
  * - Credential not found
  */
 export class Fido2CredentialError extends Fido2Error {
-  constructor(message: string, cause?: unknown) {
-    super(message, "CREDENTIAL_ERROR", cause);
+  constructor(message: string, userMessage?: string, cause?: unknown) {
+    super(
+      message,
+      "CREDENTIAL_ERROR",
+      userMessage ?? "Unable to complete passkey operation",
+      cause
+    );
     this.name = "Fido2CredentialError";
   }
 }
@@ -67,8 +83,12 @@ export class Fido2CredentialError extends Fido2Error {
  * - Invalid baseUrl or rpId
  */
 export class Fido2ConfigError extends Fido2Error {
-  constructor(message: string) {
-    super(message, "CONFIG_ERROR");
+  constructor(message: string, userMessage?: string) {
+    super(
+      message,
+      "CONFIG_ERROR",
+      userMessage ?? "Passkeys are not properly configured"
+    );
     this.name = "Fido2ConfigError";
   }
 }
@@ -84,9 +104,15 @@ export class Fido2ConfigError extends Fido2Error {
 export class Fido2ValidationError extends Fido2Error {
   constructor(
     message: string,
+    userMessage?: string,
     public readonly invalidValue?: unknown
   ) {
-    super(message, "VALIDATION_ERROR");
+    super(
+      message,
+      "VALIDATION_ERROR",
+      userMessage ?? "Unable to verify passkey",
+      invalidValue
+    );
     this.name = "Fido2ValidationError";
   }
 }
@@ -100,8 +126,12 @@ export class Fido2ValidationError extends Fido2Error {
  * - Insufficient permissions
  */
 export class Fido2AuthError extends Fido2Error {
-  constructor(message: string) {
-    super(message, "AUTH_ERROR");
+  constructor(message: string, userMessage?: string) {
+    super(
+      message,
+      "AUTH_ERROR",
+      userMessage ?? "Authentication with passkey failed"
+    );
     this.name = "Fido2AuthError";
   }
 }
@@ -117,10 +147,16 @@ export class Fido2AuthError extends Fido2Error {
 export class Fido2NetworkError extends Fido2Error {
   constructor(
     message: string,
+    userMessage?: string,
     public readonly statusCode?: number,
     public readonly response?: unknown
   ) {
-    super(message, "NETWORK_ERROR");
+    super(
+      message,
+      "NETWORK_ERROR",
+      userMessage ?? "Unable to connect to passkey service",
+      response
+    );
     this.name = "Fido2NetworkError";
   }
 }
@@ -152,13 +188,17 @@ export function fromDOMException(error: DOMException): Fido2Error {
   switch (error.name) {
     case "AbortError":
       // User cancelled via AbortController or timeout
-      return new Fido2AbortError("WebAuthn operation was aborted");
+      return new Fido2AbortError(
+        "WebAuthn operation was aborted",
+        "Passkey verification was cancelled"
+      );
 
     case "NotAllowedError":
       // User cancelled the ceremony, or no user gesture, or permission denied
       // This is a catch-all covering many scenarios
       return new Fido2CredentialError(
         "Operation not allowed (user cancelled, no gesture, or permission denied)",
+        "Passkey access was denied. Please try again.",
         error
       );
 
@@ -167,25 +207,29 @@ export function fromDOMException(error: DOMException): Fido2Error {
       // For get(): Authenticator is in invalid state
       return new Fido2CredentialError(
         "Authenticator is in invalid state or credential already registered",
+        "This passkey is already registered",
         error
       );
 
     case "NotSupportedError":
       // No pubKeyCredParams had type="public-key", or authenticator doesn't support algorithms
       return new Fido2ConfigError(
-        "WebAuthn not supported or requested algorithms not available"
+        "WebAuthn not supported or requested algorithms not available",
+        "Passkeys are not supported on this device"
       );
 
     case "SecurityError":
       // Invalid domain, rp.id not valid, or related origins validation failed
       return new Fido2ConfigError(
-        "Security requirements not met (invalid domain, rp.id mismatch, or HTTPS required)"
+        "Security requirements not met (invalid domain, rp.id mismatch, or HTTPS required)",
+        "Passkeys cannot be used on this website"
       );
 
     case "ConstraintError":
       // residentKey=required but not supported, or userVerification=required but unavailable
       return new Fido2ValidationError(
         "Authenticator constraints not satisfied (resident key or user verification required)",
+        "Your device doesn't support the required security features",
         error
       );
 
@@ -194,6 +238,7 @@ export function fromDOMException(error: DOMException): Fido2Error {
       return new Fido2Error(
         "Unknown WebAuthn error occurred",
         "WEBAUTHN_UNKNOWN_ERROR",
+        "Something went wrong with your passkey",
         error
       );
 
@@ -202,6 +247,7 @@ export function fromDOMException(error: DOMException): Fido2Error {
       return new Fido2Error(
         `WebAuthn operation failed: ${error.message}`,
         "WEBAUTHN_ERROR",
+        "Unable to use passkey. Please try again.",
         error
       );
   }
