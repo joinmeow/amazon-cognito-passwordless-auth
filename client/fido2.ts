@@ -31,6 +31,13 @@ import { configure } from "./config.js";
 import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
 import { CognitoIdTokenPayload } from "./jwt-model.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
+import {
+  Fido2CredentialError,
+  Fido2ConfigError,
+  Fido2ValidationError,
+  Fido2AuthError,
+  fromDOMException,
+} from "./errors.js";
 
 export interface StoredCredential {
   credentialId: string;
@@ -48,6 +55,42 @@ type AuthenticatorAttestationResponseWithOptionalMembers =
     getPublicKey?: () => unknown;
     getPublicKeyAlgorithm?: () => unknown;
   };
+
+// Some environments/browsers/polyfills make instanceof checks unreliable for WebAuthn types
+// (e.g., RHS missing a prototype). Use structural checks instead.
+function isPublicKeyCredentialLike(o: unknown): o is PublicKeyCredential {
+  return (
+    !!o &&
+    typeof o === "object" &&
+    "type" in o &&
+    o.type === "public-key" &&
+    "rawId" in o &&
+    "response" in o
+  );
+}
+
+function isAuthenticatorAttestationResponseLike(
+  o: unknown
+): o is AuthenticatorAttestationResponseWithOptionalMembers {
+  return (
+    !!o &&
+    typeof o === "object" &&
+    "attestationObject" in (o as Record<string, unknown>) &&
+    "clientDataJSON" in (o as Record<string, unknown>)
+  );
+}
+
+function isAuthenticatorAssertionResponseLike(
+  o: unknown
+): o is AuthenticatorAssertionResponse {
+  return (
+    !!o &&
+    typeof o === "object" &&
+    "authenticatorData" in (o as Record<string, unknown>) &&
+    "clientDataJSON" in (o as Record<string, unknown>) &&
+    "signature" in (o as Record<string, unknown>)
+  );
+}
 
 export async function fido2CreateCredential({
   friendlyName,
@@ -80,18 +123,27 @@ export async function fido2CreateCredential({
     ),
   };
   debug?.("Assembled public key options:", publicKey);
-  const credential = await navigator.credentials.create({
-    publicKey,
-  });
+  let credential;
+  try {
+    credential = await navigator.credentials.create({
+      publicKey,
+    });
+  } catch (err) {
+    if (err instanceof DOMException) {
+      throw fromDOMException(err);
+    }
+    throw err;
+  }
   if (!credential) {
-    throw new Error("empty credential");
+    throw new Fido2CredentialError("No credential returned from browser");
   }
   if (
-    !(credential instanceof PublicKeyCredential) ||
-    !(credential.response instanceof AuthenticatorAttestationResponse)
+    !isPublicKeyCredentialLike(credential) ||
+    !isAuthenticatorAttestationResponseLike(credential.response)
   ) {
-    throw new Error(
-      "credential.response is not an instance of AuthenticatorAttestationResponse"
+    throw new Fido2ValidationError(
+      "Invalid credential response: expected AuthenticatorAttestationResponse",
+      credential
     );
   }
   const response: AuthenticatorAttestationResponseWithOptionalMembers =
@@ -138,7 +190,9 @@ export interface ParsedCredential {
 function getFullFido2Url(path: string) {
   const { fido2 } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   return `${fido2.baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -146,11 +200,15 @@ function getFullFido2Url(path: string) {
 export async function fido2StartCreateCredential() {
   const { fido2, fetch, location } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   const { idToken } = (await retrieveTokens()) ?? {};
   if (!idToken) {
-    throw new Error("No JWT to invoke Fido2 API with");
+    throw new Fido2AuthError(
+      "No authentication token available. User must be signed in."
+    );
   }
   return fetch(
     getFullFido2Url(
@@ -179,7 +237,9 @@ export async function fido2CompleteCreateCredential({
   const { fetch } = configure();
   const { idToken } = (await retrieveTokens()) ?? {};
   if (!idToken) {
-    throw new Error("No JWT to invoke Fido2 API with");
+    throw new Fido2AuthError(
+      "No authentication token available. User must be signed in."
+    );
   }
   const parsedCredential =
     "response" in credential
@@ -222,11 +282,15 @@ export async function fido2CompleteCreateCredential({
 export async function fido2ListCredentials() {
   const { fido2, fetch, location } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   const tokens = await retrieveTokens();
   if (!tokens?.idToken) {
-    throw new Error("No JWT to invoke Fido2 API with");
+    throw new Fido2AuthError(
+      "No authentication token available. User must be signed in."
+    );
   }
   return fetch(
     getFullFido2Url(
@@ -273,11 +337,15 @@ export async function fido2DeleteCredential({
 }) {
   const { fido2, fetch } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   const tokens = await retrieveTokens();
   if (!tokens?.idToken) {
-    throw new Error("No JWT to invoke Fido2 API with");
+    throw new Fido2AuthError(
+      "No authentication token available. User must be signed in."
+    );
   }
   return fetch(getFullFido2Url("authenticators/delete"), {
     method: "POST",
@@ -299,11 +367,15 @@ export async function fido2UpdateCredential({
 }) {
   const { fido2, fetch } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   const tokens = await retrieveTokens();
   if (!tokens?.idToken) {
-    throw new Error("No JWT to invoke Fido2 API with");
+    throw new Fido2AuthError(
+      "No authentication token available. User must be signed in."
+    );
   }
   return fetch(getFullFido2Url("authenticators/update"), {
     method: "POST",
@@ -322,6 +394,7 @@ interface Fido2Options {
   userVerification?: UserVerificationRequirement;
   relyingPartyId?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  signal?: AbortSignal;
 }
 
 function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
@@ -349,7 +422,7 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
     const { debug } = configure();
     // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
     debug?.(`Invalid Fido2 options: ${JSON.stringify(o)}`);
-    throw new Error("Invalid Fido2 options");
+    throw new Fido2ValidationError("Invalid Fido2 options from server", o);
   }
 }
 
@@ -359,6 +432,7 @@ export async function fido2getCredential({
   credentials,
   timeout,
   userVerification,
+  signal,
 }: Fido2Options) {
   const { debug, fido2: { extensions } = {} } = configure();
   const publicKey: CredentialRequestOptions["publicKey"] = {
@@ -374,18 +448,28 @@ export async function fido2getCredential({
     extensions,
   };
   debug?.("Assembled public key options:", publicKey);
-  const credential = await navigator.credentials.get({
-    publicKey,
-  });
+  let credential;
+  try {
+    credential = await navigator.credentials.get({
+      publicKey,
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException) {
+      throw fromDOMException(err);
+    }
+    throw err;
+  }
   if (!credential) {
-    throw new Error(`Failed to get credential`);
+    throw new Fido2CredentialError("No credential returned from browser");
   }
   if (
-    !(credential instanceof PublicKeyCredential) ||
-    !(credential.response instanceof AuthenticatorAssertionResponse)
+    !isPublicKeyCredentialLike(credential) ||
+    !isAuthenticatorAssertionResponseLike(credential.response)
   ) {
-    throw new Error(
-      "credential.response is not an instance of AuthenticatorAssertionResponse"
+    throw new Fido2ValidationError(
+      "Invalid credential response: expected AuthenticatorAssertionResponse",
+      credential
     );
   }
   debug?.("Credential:", credential);
@@ -443,7 +527,9 @@ const parseAuthenticatorAssertionResponse = async (
 async function requestUsernamelessSignInChallenge() {
   const { fido2, fetch } = configure();
   if (!fido2) {
-    throw new Error("Missing Fido2 config");
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
   }
   return fetch(getFullFido2Url("sign-in-challenge"), {
     method: "POST",
@@ -488,7 +574,9 @@ export function authenticateWithFido2({
   const signedIn = (async () => {
     const { debug, fido2 } = configure();
     if (!fido2) {
-      throw new Error("Missing Fido2 config");
+      throw new Fido2ConfigError(
+        "Fido2 configuration not initialized. Call configure() with fido2 options."
+      );
     }
     statusCb?.("STARTING_SIGN_IN_WITH_FIDO2");
     let existingDeviceKey: string | undefined;

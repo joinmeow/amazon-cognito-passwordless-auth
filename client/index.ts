@@ -37,6 +37,7 @@ export const Passwordless = {
 
 // Re-export everything from the other modules
 export * from "./common.js";
+export * from "./errors.js";
 export * from "./fido2.js";
 export * from "./model.js";
 export * from "./plaintext.js";
