@@ -48,6 +48,10 @@
       "import": "./dist/client/common.js",
       "types": "./common.d.ts"
     },
+    "./errors": {
+      "import": "./dist/client/errors.js",
+      "types": "./errors.d.ts"
+    },
     "./fido2": {
       "import": "./dist/client/fido2.js",
       "types": "./fido2.d.ts"
@@ -113,6 +117,7 @@
     "cognito-api.d.ts",
     "common.d.ts",
     "config.d.ts",
+    "errors.d.ts",
     "fido2.d.ts",
     "index.d.ts",
     "jwt-model.d.ts",
