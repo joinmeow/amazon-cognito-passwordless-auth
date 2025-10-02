@@ -26,6 +26,7 @@ import {
   Fido2CredentialError,
   Fido2ConfigError,
   Fido2AuthError,
+  Fido2ValidationError,
 } from "../errors.js";
 import type { ConfigWithDefaults } from "../config.js";
 import { configure } from "../config.js";
@@ -419,6 +420,269 @@ describe("fido2.ts error handling", () => {
         expect(error).toBeInstanceOf(Fido2AuthError);
         expect((error as Fido2AuthError).code).toBe("AUTH_ERROR");
       }
+    });
+  });
+
+  describe("Type guard tests", () => {
+    it("should throw Fido2ValidationError for invalid credential type", async () => {
+      mockRetrieveTokens.mockResolvedValue({
+        username: "testuser",
+        idToken: "test-token",
+      } as Partial<TokensFromStorage> as TokensFromStorage);
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: "Test RP" },
+          user: { id: "user-123", name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      mockConfigure.mockReturnValue(
+        createMockConfig({
+          fido2: { baseUrl: "https://example.com" },
+          fetch: mockFetch,
+          debug: jest.fn(),
+        })
+      );
+
+      // Mock credential with wrong type
+      const mockCreate = jest.fn().mockResolvedValue({
+        type: "wrong-type",
+        rawId: new ArrayBuffer(8),
+        response: {},
+      });
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { create: mockCreate },
+        configurable: true,
+      });
+
+      await expect(
+        fido2CreateCredential({ friendlyName: "Test" })
+      ).rejects.toThrow(Fido2ValidationError);
+    });
+
+    it("should throw Fido2ValidationError for credential without type", async () => {
+      mockRetrieveTokens.mockResolvedValue({
+        username: "testuser",
+        idToken: "test-token",
+      } as Partial<TokensFromStorage> as TokensFromStorage);
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: "Test RP" },
+          user: { id: "user-123", name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      mockConfigure.mockReturnValue(
+        createMockConfig({
+          fido2: { baseUrl: "https://example.com" },
+          fetch: mockFetch,
+          debug: jest.fn(),
+        })
+      );
+
+      const mockCreate = jest.fn().mockResolvedValue({
+        rawId: new ArrayBuffer(8),
+        response: {},
+      });
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { create: mockCreate },
+        configurable: true,
+      });
+
+      await expect(
+        fido2CreateCredential({ friendlyName: "Test" })
+      ).rejects.toThrow(Fido2ValidationError);
+    });
+
+    it("should throw Fido2ValidationError for invalid response type", async () => {
+      const mockGet = jest.fn().mockResolvedValue({
+        type: "public-key",
+        rawId: new ArrayBuffer(8),
+        response: { not: "valid" },
+      });
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      await expect(
+        fido2getCredential({
+          challenge: "test-challenge",
+          relyingPartyId: "example.com",
+        })
+      ).rejects.toThrow(Fido2ValidationError);
+    });
+  });
+
+  describe("Additional DOMException conversions", () => {
+    it("should convert InvalidStateError to Fido2CredentialError", async () => {
+      const mockGet = jest
+        .fn()
+        .mockRejectedValue(
+          new DOMException("Invalid state", "InvalidStateError")
+        );
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      await expect(
+        fido2getCredential({
+          challenge: "test-challenge",
+          relyingPartyId: "example.com",
+        })
+      ).rejects.toThrow(Fido2CredentialError);
+    });
+
+    it("should convert NotSupportedError to Fido2ConfigError for create", async () => {
+      mockRetrieveTokens.mockResolvedValue({
+        username: "testuser",
+        idToken: "test-token",
+      } as Partial<TokensFromStorage> as TokensFromStorage);
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: "Test RP" },
+          user: { id: "user-123", name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      mockConfigure.mockReturnValue(
+        createMockConfig({
+          fido2: { baseUrl: "https://example.com" },
+          fetch: mockFetch,
+          debug: jest.fn(),
+        })
+      );
+
+      const mockCreate = jest
+        .fn()
+        .mockRejectedValue(
+          new DOMException("Not supported", "NotSupportedError")
+        );
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { create: mockCreate },
+        configurable: true,
+      });
+
+      await expect(
+        fido2CreateCredential({ friendlyName: "Test" })
+      ).rejects.toThrow(Fido2ConfigError);
+    });
+
+    it("should convert ConstraintError to Fido2ValidationError for create", async () => {
+      mockRetrieveTokens.mockResolvedValue({
+        username: "testuser",
+        idToken: "test-token",
+      } as Partial<TokensFromStorage> as TokensFromStorage);
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: "Test RP" },
+          user: { id: "user-123", name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      mockConfigure.mockReturnValue(
+        createMockConfig({
+          fido2: { baseUrl: "https://example.com" },
+          fetch: mockFetch,
+          debug: jest.fn(),
+        })
+      );
+
+      const mockCreate = jest
+        .fn()
+        .mockRejectedValue(
+          new DOMException("Constraint error", "ConstraintError")
+        );
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { create: mockCreate },
+        configurable: true,
+      });
+
+      await expect(
+        fido2CreateCredential({ friendlyName: "Test" })
+      ).rejects.toThrow(Fido2ValidationError);
+    });
+
+    it("should handle non-DOMException errors in create", async () => {
+      mockRetrieveTokens.mockResolvedValue({
+        username: "testuser",
+        idToken: "test-token",
+      } as Partial<TokensFromStorage> as TokensFromStorage);
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: "Test RP" },
+          user: { id: "user-123", name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      mockConfigure.mockReturnValue(
+        createMockConfig({
+          fido2: { baseUrl: "https://example.com" },
+          fetch: mockFetch,
+          debug: jest.fn(),
+        })
+      );
+
+      const mockCreate = jest.fn().mockRejectedValue(new Error("Random error"));
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { create: mockCreate },
+        configurable: true,
+      });
+
+      await expect(
+        fido2CreateCredential({ friendlyName: "Test" })
+      ).rejects.toThrow("Random error");
+    });
+
+    it("should handle non-DOMException errors in get", async () => {
+      const mockGet = jest.fn().mockRejectedValue(new Error("Random error"));
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      await expect(
+        fido2getCredential({
+          challenge: "test-challenge",
+          relyingPartyId: "example.com",
+        })
+      ).rejects.toThrow("Random error");
     });
   });
 });
