@@ -398,31 +398,72 @@ interface Fido2Options {
 }
 
 function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
-  if (
-    !o ||
-    typeof o !== "object" ||
-    ("relyingPartyId" in o && typeof o.relyingPartyId !== "string") ||
-    !("challenge" in o) ||
-    typeof o.challenge !== "string" ||
-    ("timeout" in o && typeof o.timeout !== "number") ||
-    ("userVerification" in o && typeof o.userVerification !== "string") ||
-    ("credentials" in o &&
-      !Array.isArray(o.credentials) &&
-      (o.credentials as unknown[]).every(
-        (c) =>
-          !!c &&
-          typeof c === "object" &&
-          "id" in c &&
-          typeof c.id === "string" &&
-          (!("transports" in c) ||
-            (Array.isArray(c.transports) &&
-              (c.transports as unknown[]).every((t) => typeof t === "string")))
-      ))
-  ) {
-    const { debug } = configure();
-    // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
-    debug?.(`Invalid Fido2 options: ${JSON.stringify(o)}`);
-    throw new Fido2ValidationError("Invalid Fido2 options from server", o);
+  // Basic object check
+  if (!o || typeof o !== "object") {
+    throw new Fido2ValidationError("Fido2 options must be an object", o);
+  }
+
+  // Required: challenge
+  if (!("challenge" in o) || typeof o.challenge !== "string") {
+    throw new Fido2ValidationError(
+      "Fido2 options must have a challenge string",
+      o
+    );
+  }
+
+  // Optional: relyingPartyId
+  if ("relyingPartyId" in o && typeof o.relyingPartyId !== "string") {
+    throw new Fido2ValidationError("relyingPartyId must be a string", o);
+  }
+
+  // Optional: timeout
+  if ("timeout" in o && typeof o.timeout !== "number") {
+    throw new Fido2ValidationError("timeout must be a number", o);
+  }
+
+  // Optional: userVerification
+  if ("userVerification" in o && typeof o.userVerification !== "string") {
+    throw new Fido2ValidationError("userVerification must be a string", o);
+  }
+
+  // Optional: credentials
+  if ("credentials" in o) {
+    if (!Array.isArray(o.credentials)) {
+      throw new Fido2ValidationError("credentials must be an array", o);
+    }
+
+    for (const credential of o.credentials) {
+      if (!credential || typeof credential !== "object") {
+        throw new Fido2ValidationError("Each credential must be an object", o);
+      }
+
+      const cred = credential as Record<string, unknown>;
+
+      if (!("id" in cred) || typeof cred.id !== "string") {
+        throw new Fido2ValidationError(
+          "Each credential must have an id string",
+          o
+        );
+      }
+
+      if ("transports" in cred) {
+        if (!Array.isArray(cred.transports)) {
+          throw new Fido2ValidationError(
+            "credential.transports must be an array",
+            o
+          );
+        }
+
+        for (const transport of cred.transports) {
+          if (typeof transport !== "string") {
+            throw new Fido2ValidationError(
+              "Each transport must be a string",
+              o
+            );
+          }
+        }
+      }
+    }
   }
 }
 
