@@ -30,7 +30,7 @@ describe("Fido2Error classes", () => {
   describe("Fido2Error (base class)", () => {
     it("should create error with message, code, and optional cause", () => {
       const cause = new Error("original error");
-      const error = new Fido2Error("Test error", "TEST_CODE", cause);
+      const error = new Fido2Error("Test error", "TEST_CODE", undefined, cause);
 
       expect(error.message).toBe("Test error");
       expect(error.code).toBe("TEST_CODE");

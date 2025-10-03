@@ -64,7 +64,7 @@ export class Fido2AbortError extends Fido2Error {
  * - Credential not found
  */
 export class Fido2CredentialError extends Fido2Error {
-  constructor(message: string, userMessage?: string, cause?: unknown) {
+  constructor(message: string, cause?: unknown, userMessage?: string) {
     super(
       message,
       "CREDENTIAL_ERROR",
@@ -104,8 +104,8 @@ export class Fido2ConfigError extends Fido2Error {
 export class Fido2ValidationError extends Fido2Error {
   constructor(
     message: string,
-    userMessage?: string,
-    public readonly invalidValue?: unknown
+    public readonly invalidValue?: unknown,
+    userMessage?: string
   ) {
     super(
       message,
@@ -147,9 +147,9 @@ export class Fido2AuthError extends Fido2Error {
 export class Fido2NetworkError extends Fido2Error {
   constructor(
     message: string,
-    userMessage?: string,
     public readonly statusCode?: number,
-    public readonly response?: unknown
+    public readonly response?: unknown,
+    userMessage?: string
   ) {
     super(
       message,
@@ -198,8 +198,8 @@ export function fromDOMException(error: DOMException): Fido2Error {
       // This is a catch-all covering many scenarios
       return new Fido2CredentialError(
         "Operation not allowed (user cancelled, no gesture, or permission denied)",
-        "Passkey access was denied. Please try again.",
-        error
+        error,
+        "Passkey access was denied. Please try again."
       );
 
     case "InvalidStateError":
@@ -207,8 +207,8 @@ export function fromDOMException(error: DOMException): Fido2Error {
       // For get(): Authenticator is in invalid state
       return new Fido2CredentialError(
         "Authenticator is in invalid state or credential already registered",
-        "This passkey is already registered",
-        error
+        error,
+        "This passkey is already registered"
       );
 
     case "NotSupportedError":
@@ -229,8 +229,8 @@ export function fromDOMException(error: DOMException): Fido2Error {
       // residentKey=required but not supported, or userVerification=required but unavailable
       return new Fido2ValidationError(
         "Authenticator constraints not satisfied (resident key or user verification required)",
-        "Your device doesn't support the required security features",
-        error
+        error,
+        "Your device doesn't support the required security features"
       );
 
     case "UnknownError":
