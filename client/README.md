@@ -5,9 +5,9 @@
 To use the library, you need to first configure it:
 
 ```javascript
-import { Passwordless } from "@joinmeow/cognito-passwordless-auth/react";
+import { configure } from "@joinmeow/cognito-passwordless-auth";
 
-Passwordless.configure({
+configure({
   cognitoIdpEndpoint: "us-east-2", // you can also use the full endpoint URL, potentially to use a proxy
   clientId: "<client id>",
   // optional, only required if you want to use FIDO2:
@@ -41,7 +41,7 @@ Passwordless.configure({
     "<header 1>": "<value 1>",
     "<header 2>": "<value 2>",
   },
-  storage: localStorage, // Optional, default to localStorage
+  storage: localStorage, // Optional, defaults to localStorage
   // Whether to use the new GetTokensFromRefreshToken API
   useGetTokensFromRefreshToken: true, // Default is true
 });
@@ -139,7 +139,7 @@ import { timeAgo } from "@joinmeow/cognito-passwordless-auth/util";
 
 const now = timeAgo(Date.now(), new Date()); // Just now
 const seconds = timeAgo(Date.now(), new Date(Date.now() - 30 * 1000)); // 30 seconds ago
-const hours = timeAgo(Date.now(), newDate(Date.now() - 2 * 3600 * 1000)); // 2 hours ago
+const hours = timeAgo(Date.now(), new Date(Date.now() - 2 * 3600 * 1000)); // 2 hours ago
 ```
 
 ## Refresh Token Rotation

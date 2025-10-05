@@ -32,14 +32,16 @@ This library provides implementations for different frontend frameworks:
 
 ```javascript
 import {
-  Passwordless,
+  configure,
   initialize,
   signUp,
   confirmSignUp,
+  authenticateWithFido2,
+  authenticateWithSRP,
 } from "@joinmeow/cognito-passwordless-auth";
 
 // Configure the client
-Passwordless.configure({
+configure({
   userPoolId: "us-east-1_example",
   clientId: "abcdefghijklmnopqrstuvwxyz",
   // Other configuration parameters as needed
@@ -247,7 +249,7 @@ export function GoogleCallback() {
 
 Steps:
 
-1. Configure Google OAuth in `Passwordless.configure({ google: { clientId, redirectUri, scopes } })`.
+1. Configure Google OAuth in `configure({ google: { clientId, redirectUri, scopes } })`.
 2. Initiate sign-in:
 
 ```js
@@ -601,16 +603,27 @@ function FIDO2Manager() {
 #### FIDO2 Authentication Flow
 
 ```javascript
+import {
+  authenticateWithFido2,
+  fido2CreateCredential,
+  detectMediationCapabilities,
+} from "@joinmeow/cognito-passwordless-auth";
+
 // 1. Check if platform authenticator is available
 if (userVerifyingPlatformAuthenticatorAvailable) {
-  // 2. Create a new credential
+  // 2. Detect browser capabilities for enhanced WebAuthn UX
+  const { conditional } = await detectMediationCapabilities();
+
+  // 3. Optionally create a new credential using conditional create (autofill)
   await fido2CreateCredential({
     friendlyName: "iPhone Face ID",
+    conditionalCreate: conditional,
   });
 
-  // 3. Sign in with FIDO2
+  // 4. Sign in with FIDO2, enabling conditional mediation when supported
   const { signedIn } = await authenticateWithFido2({
     username: "user@example.com",
+    mediation: conditional ? "conditional" : undefined,
     // Optional: specify credentials to use
     credentials: fido2Credentials?.map((c) => ({
       id: c.credentialId,
@@ -621,6 +634,10 @@ if (userVerifyingPlatformAuthenticatorAvailable) {
   await signedIn;
 }
 ```
+
+> **Tip:** For advanced capability checks (e.g., detecting upcoming "immediate" mediation or hybrid transports), call
+> `getClientCapabilities()` directly. It returns the full WebAuthn client capabilities dictionary when supported by the
+> browser.
 
 ### Local User Cache Management
 
@@ -857,6 +874,7 @@ authenticateWithFido2(options?: {
   username?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   clientMetadata?: Record<string, string>;
+  mediation?: "conditional" | "immediate" | "optional" | "required" | "silent";
 }) => { signedIn: Promise<TokensFromSignIn> }
 
 authenticateWithSRP(options: {
@@ -904,7 +922,12 @@ clearDeviceKey() => void
 // FIDO2 credential management
 fido2CreateCredential(options: {
   friendlyName: string | (() => string | Promise<string>);
+  conditionalCreate?: boolean;
 }) => Promise<StoredCredential>
+
+// WebAuthn helpers
+detectMediationCapabilities(): Promise<{ conditional: boolean; immediate: boolean }>
+getClientCapabilities(): Promise<WebAuthnClientCapabilities | null>
 
 // TOTP MFA
 refreshTotpMfaStatus() => Promise<void>
@@ -913,7 +936,7 @@ refreshTotpMfaStatus() => Promise<void>
 > **Note:** Activity tracking features require enabling in your configuration:
 >
 > ```javascript
-> Passwordless.configure({
+> configure({
 >   // ... other configuration
 >   tokenRefresh: {
 >     useActivityTracking: true,
