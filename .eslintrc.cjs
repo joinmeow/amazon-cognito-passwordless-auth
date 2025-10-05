@@ -11,7 +11,7 @@ module.exports = {
     ecmaVersion: "latest",
     sourceType: "module",
   },
-  overrides: [getClientOverrides("client")],
+  overrides: [getClientOverrides("client"), getTestOverrides()],
   plugins: ["@typescript-eslint", "header", "import"],
   root: true,
 };
@@ -74,5 +74,22 @@ function getClientOverrides(basedir) {
       ],
     },
     plugins: ["react", "@typescript-eslint", "header", "import"],
+  };
+}
+
+function getTestOverrides() {
+  return {
+    files: ["client/__tests__/**/*.ts", "client/__tests__/**/*.tsx"],
+    rules: {
+      // Test files need flexibility for mocking and assertions
+      // This is standard practice in major TS projects (React, Vue, Angular, etc.)
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+      // Security rules create false positives in test fixtures
+      "security/detect-object-injection": "off",
+    },
   };
 }

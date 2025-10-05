@@ -39,6 +39,154 @@ import {
   fromDOMException,
 } from "./errors.js";
 
+// Enhanced type definitions for mediation support
+export type MediationMode =
+  | "conditional"
+  | "immediate"
+  | "optional"
+  | "required"
+  | "silent";
+
+/**
+ * WebAuthn Client Capabilities as defined in the W3C spec.
+ * @see https://w3c.github.io/webauthn/#sctn-client-capabilities
+ */
+export interface WebAuthnClientCapabilities {
+  /** Client can create discoverable credentials */
+  conditionalCreate?: boolean;
+  /** Client can authenticate using discoverable credentials (autofill) */
+  conditionalGet?: boolean;
+  /** Client supports hybrid transport (Bluetooth, NFC, USB) */
+  hybridTransport?: boolean;
+  /** Client has passkey platform authenticator with MFA support */
+  passkeyPlatformAuthenticator?: boolean;
+  /** Client has user-verifying platform authenticator */
+  userVerifyingPlatformAuthenticator?: boolean;
+  /** Client supports Related Origin Requests */
+  relatedOrigins?: boolean;
+  /** Client supports signalAllAcceptedCredentials() */
+  signalAllAcceptedCredentials?: boolean;
+  /** Client supports signalCurrentUserDetails() */
+  signalCurrentUserDetails?: boolean;
+  /** Client supports signalUnknownCredential() */
+  signalUnknownCredential?: boolean;
+  /** Chrome-specific: immediate mediation support (Chrome 139+, origin trial) */
+  immediateGet?: boolean;
+  /** Extension support: prefixed with 'extension:' */
+  [key: `extension:${string}`]: boolean | undefined;
+}
+
+/**
+ * Extended PublicKeyCredential interface with getClientCapabilities.
+ * @see https://w3c.github.io/webauthn/#sctn-client-capabilities
+ */
+interface PublicKeyCredentialWithCapabilities {
+  getClientCapabilities(): Promise<WebAuthnClientCapabilities>;
+}
+
+/**
+ * Type guard to check if PublicKeyCredential has getClientCapabilities.
+ */
+function hasGetClientCapabilities(
+  pkc: typeof PublicKeyCredential
+): pkc is typeof PublicKeyCredential & PublicKeyCredentialWithCapabilities {
+  return (
+    "getClientCapabilities" in pkc &&
+    typeof pkc.getClientCapabilities === "function"
+  );
+}
+
+/**
+ * Get WebAuthn client capabilities with proper type safety.
+ * Returns null if getClientCapabilities is not supported.
+ *
+ * @example
+ * ```typescript
+ * const capabilities = await getClientCapabilities();
+ * if (capabilities?.immediateGet) {
+ *   // Use immediate mediation
+ * }
+ * ```
+ */
+export async function getClientCapabilities(): Promise<WebAuthnClientCapabilities | null> {
+  if (typeof PublicKeyCredential === "undefined") {
+    return null;
+  }
+
+  if (!hasGetClientCapabilities(PublicKeyCredential)) {
+    return null;
+  }
+
+  try {
+    return await PublicKeyCredential.getClientCapabilities();
+  } catch (error) {
+    // SecurityError DOMException if RP domain is not valid
+    console.error("Failed to get client capabilities:", error);
+    return null;
+  }
+}
+
+/**
+ * Feature detection for WebAuthn mediation capabilities.
+ * Simplified helper that checks both conditional and immediate mediation support.
+ *
+ * @returns Object with capability flags
+ *
+ * @example
+ * ```typescript
+ * const capabilities = await detectMediationCapabilities();
+ * if (capabilities.conditional) {
+ *   // Use conditional mediation for autofill
+ *   authenticateWithFido2({ mediation: 'conditional' });
+ * } else if (capabilities.immediate) {
+ *   // Use immediate mediation for smart sign-in button
+ *   try {
+ *     await authenticateWithFido2({ mediation: 'immediate' });
+ *   } catch (error) {
+ *     if (error.name === 'NotAllowedError') {
+ *       showPasswordForm();
+ *     }
+ *   }
+ * }
+ * ```
+ */
+export async function detectMediationCapabilities(): Promise<{
+  conditional: boolean;
+  immediate: boolean;
+}> {
+  let conditional = false;
+  let immediate = false;
+
+  if (typeof PublicKeyCredential === "undefined") {
+    return { conditional, immediate };
+  }
+
+  // Check conditional mediation support using legacy API
+  if (
+    typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
+  ) {
+    try {
+      conditional = await PublicKeyCredential.isConditionalMediationAvailable();
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // Check immediate mediation support using new getClientCapabilities API
+  const capabilities = await getClientCapabilities();
+  if (capabilities) {
+    // immediateGet is Chrome 139+ specific capability
+    immediate = capabilities.immediateGet === true;
+
+    // Fallback: conditionalGet also indicates conditional mediation support
+    if (!conditional && capabilities.conditionalGet) {
+      conditional = capabilities.conditionalGet;
+    }
+  }
+
+  return { conditional, immediate };
+}
+
 export interface StoredCredential {
   credentialId: string;
   friendlyName: string;
@@ -395,6 +543,7 @@ interface Fido2Options {
   relyingPartyId?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   signal?: AbortSignal;
+  mediation?: MediationMode;
 }
 
 function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
@@ -474,8 +623,79 @@ export async function fido2getCredential({
   timeout,
   userVerification,
   signal,
+  mediation,
 }: Fido2Options) {
   const { debug, fido2: { extensions } = {} } = configure();
+
+  // Runtime validation and parameter adjustments based on mediation mode
+  if (mediation === "conditional") {
+    // Conditional mediation: autofill UI for password managers
+    if (typeof PublicKeyCredential === "undefined") {
+      throw new Fido2ConfigError(
+        "Conditional mediation requested but PublicKeyCredential is not available. " +
+          "This browser may not support WebAuthn."
+      );
+    }
+    if (
+      typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
+    ) {
+      try {
+        const isAvailable =
+          await PublicKeyCredential.isConditionalMediationAvailable();
+        if (!isAvailable) {
+          throw new Fido2ConfigError(
+            "Conditional mediation requested but not supported by this browser."
+          );
+        }
+      } catch (error) {
+        debug?.(
+          "⚠️ Cannot verify conditional mediation support - treating as unsupported",
+          error
+        );
+      }
+    } else {
+      debug?.(
+        "⚠️ Cannot verify conditional mediation support - PublicKeyCredential.isConditionalMediationAvailable() not available"
+      );
+    }
+  } else if (mediation === "immediate") {
+    // Immediate mediation: frictionless sign-in with instant fallback
+    if (typeof PublicKeyCredential === "undefined") {
+      throw new Fido2ConfigError(
+        "Immediate mediation requested but PublicKeyCredential is not available. " +
+          "This browser may not support WebAuthn."
+      );
+    }
+    // Note: Feature detection via getClientCapabilities().immediateGet should be done by caller
+    debug?.(
+      "Using immediate mediation - will fail fast with NotAllowedError if no local credentials"
+    );
+  }
+
+  // Adjust parameters based on mediation mode
+  let effectiveUserVerification = userVerification;
+  let effectiveTimeout = timeout;
+
+  if (mediation === "conditional") {
+    // Conditional mediation requires "preferred" userVerification and no timeout
+    effectiveUserVerification = "preferred";
+    effectiveTimeout = undefined;
+
+    if (userVerification && userVerification !== "preferred") {
+      debug?.(
+        `⚠️ WebAuthn spec requires userVerification="preferred" for conditional mediation. ` +
+          `Overriding "${userVerification}" → "preferred"`
+      );
+    }
+    if (timeout) {
+      debug?.(
+        `⚠️ WebAuthn spec recommends removing timeout for conditional mediation. ` +
+          `Overriding timeout ${timeout}ms → undefined (browser default)`
+      );
+    }
+  }
+  // Immediate mediation uses parameters as-is (no overrides needed)
+
   const publicKey: CredentialRequestOptions["publicKey"] = {
     challenge: bufferFromBase64Url(challenge),
     allowCredentials: credentials?.map((credential) => ({
@@ -483,17 +703,20 @@ export async function fido2getCredential({
       transports: credential.transports,
       type: "public-key" as const,
     })),
-    timeout,
-    userVerification,
+    timeout: effectiveTimeout,
+    userVerification: effectiveUserVerification,
     rpId: relyingPartyId,
     extensions,
   };
   debug?.("Assembled public key options:", publicKey);
   let credential;
   try {
+    // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
+    // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
     credential = await navigator.credentials.get({
       publicKey,
       signal,
+      mediation: mediation as CredentialMediationRequirement,
     });
   } catch (err) {
     if (err instanceof DOMException) {
@@ -590,6 +813,7 @@ export function authenticateWithFido2({
   currentStatus,
   clientMetadata,
   credentialGetter = fido2getCredential,
+  mediation,
 }: {
   /**
    * Username, or alias (e-mail, phone number)
@@ -607,6 +831,63 @@ export function authenticateWithFido2({
   currentStatus?: BusyState | IdleState;
   clientMetadata?: Record<string, string>;
   credentialGetter?: typeof fido2getCredential;
+  /**
+   * WebAuthn mediation mode for controlling authentication flow.
+   *
+   * **'conditional'** - Autofill UI (Password Manager Integration):
+   * - Passkeys appear in browser autofill suggestions
+   * - "Set and forget" - only resolves if user selects from autofill
+   * - userVerification automatically set to "preferred"
+   * - timeout removed (per WebAuthn spec)
+   * - Requires: HTML input with autocomplete="username webauthn"
+   *
+   * **'immediate'** - Frictionless Sign-In Button:
+   * - Shows credential picker if local credentials exist
+   * - Fails fast with NotAllowedError if no local credentials
+   * - Enables intelligent fallback to password forms
+   * - No cross-device/QR code prompts
+   * - Requires: User gesture (button click)
+   *
+   * Usage patterns:
+   * ```typescript
+   * import { detectMediationCapabilities, getClientCapabilities } from './fido2';
+   *
+   * // Option 1: Simple detection helper
+   * const { conditional, immediate } = await detectMediationCapabilities();
+   * if (conditional) {
+   *   authenticateWithFido2({
+   *     mediation: 'conditional',
+   *     statusCb: (status) => console.log(status),
+   *     tokensCb: (tokens) => handleSignIn(tokens)
+   *   });
+   * }
+   *
+   * // Option 2: Full capabilities check (advanced)
+   * const capabilities = await getClientCapabilities();
+   * if (capabilities?.immediateGet) {
+   *   try {
+   *     await authenticateWithFido2({ mediation: 'immediate' });
+   *   } catch (error) {
+   *     if (error.name === 'NotAllowedError') {
+   *       // No local credentials - show password form
+   *       showPasswordForm();
+   *     }
+   *   }
+   * }
+   *
+   * // Option 3: Check multiple capabilities
+   * if (capabilities?.passkeyPlatformAuthenticator) {
+   *   // Show biometric icon
+   * }
+   * if (capabilities?.hybridTransport) {
+   *   // Offer QR code option
+   * }
+   * ```
+   *
+   * @see https://passkeys.dev/docs/use-cases/bootstrapping (conditional)
+   * @see https://developer.chrome.com/blog/webauthn-immediate-mediation (immediate)
+   */
+  mediation?: MediationMode;
 }) {
   if (currentStatus && busyState.includes(currentStatus as BusyState)) {
     throw new Error(`Can't sign in while in status ${currentStatus}`);
@@ -660,6 +941,8 @@ export function authenticateWithFido2({
                 )
             ) ?? []
           ),
+          mediation,
+          signal: abort.signal,
         });
         session = initAuthResponse.Session;
       } else {
@@ -674,6 +957,8 @@ export function authenticateWithFido2({
           userVerification:
             fido2.authenticatorSelection?.userVerification ??
             fido2options.userVerification,
+          mediation,
+          signal: abort.signal,
         });
         if (!fido2credential.userHandleB64) {
           throw new Error("No discoverable credentials available");
