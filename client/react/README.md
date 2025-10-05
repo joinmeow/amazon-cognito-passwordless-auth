@@ -119,6 +119,45 @@ sequenceDiagram
     H-->>C: signedIn Promise resolves
 ```
 
+#### Conditional mediation & passkey autofill
+
+```tsx
+import { useEffect } from "react";
+import { detectMediationCapabilities } from "@joinmeow/cognito-passwordless-auth";
+import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
+
+function AutofillSignInButton() {
+  const { authenticateWithFido2, fido2CreateCredential } = usePasswordless();
+
+  useEffect(() => {
+    (async () => {
+      const { conditional } = await detectMediationCapabilities();
+      if (!conditional) return;
+
+      // Automatically create a passkey after password login
+      await fido2CreateCredential({
+        friendlyName: "My Passkey",
+        conditionalCreate: true,
+      });
+
+      // Start conditional mediation on page load (autofill UI)
+      authenticateWithFido2({ mediation: "conditional" });
+    })();
+  }, [authenticateWithFido2, fido2CreateCredential]);
+
+  return (
+    <button onClick={() => authenticateWithFido2({ mediation: "immediate" })}>
+      Sign in with passkey
+    </button>
+  );
+}
+```
+
+`detectMediationCapabilities()` safely determines whether the browser supports
+conditional (autofill) or immediate (fast fail) mediation modes. Import
+`getClientCapabilities()` from the core package if you need the full WebAuthn
+capability matrix.
+
 ### 3.2 SRP Password
 
 ```mermaid
