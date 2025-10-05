@@ -127,23 +127,17 @@ import { detectMediationCapabilities } from "@joinmeow/cognito-passwordless-auth
 import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
 
 function AutofillSignInButton() {
-  const { authenticateWithFido2, fido2CreateCredential } = usePasswordless();
+  const { authenticateWithFido2 } = usePasswordless();
 
   useEffect(() => {
     (async () => {
       const { conditional } = await detectMediationCapabilities();
       if (!conditional) return;
 
-      // Automatically create a passkey after password login
-      await fido2CreateCredential({
-        friendlyName: "My Passkey",
-        conditionalCreate: true,
-      });
-
       // Start conditional mediation on page load (autofill UI)
       authenticateWithFido2({ mediation: "conditional" });
     })();
-  }, [authenticateWithFido2, fido2CreateCredential]);
+  }, [authenticateWithFido2]);
 
   return (
     <button onClick={() => authenticateWithFido2({ mediation: "immediate" })}>
