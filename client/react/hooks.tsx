@@ -1399,17 +1399,17 @@ function _usePasswordless() {
       username,
       credentials,
       clientMetadata,
-      conditionalMediation,
+      mediation,
     }: {
       /** Username, alias (e-mail, phone number) */
       username?: string;
       credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
       clientMetadata?: Record<string, string>;
       /**
-       * Enable conditional mediation (passkey autofill UI)
-       * When true, passkeys will appear in the browser's autofill suggestions
+       * WebAuthn mediation mode ('conditional' for autofill, 'immediate' for smart sign-in button)
+       * @see fido2.ts authenticateWithFido2() for detailed documentation
        */
-      conditionalMediation?: boolean;
+      mediation?: "conditional" | "immediate";
     } = {}) => {
       const { debug } = configure();
       debug?.("Starting FIDO2 sign-in (hook)");
@@ -1419,7 +1419,7 @@ function _usePasswordless() {
         username,
         credentials,
         clientMetadata,
-        conditionalMediation,
+        mediation,
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens) => {
           // 1) Update tokens in state and deviceKey
