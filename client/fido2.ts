@@ -94,8 +94,45 @@ function isAuthenticatorAssertionResponseLike(
 
 export async function fido2CreateCredential({
   friendlyName,
+  conditionalCreate,
 }: {
   friendlyName: string | (() => string | Promise<string>);
+  /**
+   * Enable conditional create (automatic passkey creation).
+   *
+   * When true:
+   * - Creates a passkey automatically after successful password login
+   * - Works silently without user interaction if conditions are met
+   * - User must have recently used a saved password for this site
+   * - User presence and user verification may be false on the server
+   *
+   * Usage pattern:
+   * ```typescript
+   * // Check if conditional create is available
+   * if (PublicKeyCredential.getClientCapabilities) {
+   *   const capabilities = await PublicKeyCredential.getClientCapabilities();
+   *   if (capabilities.conditionalCreate) {
+   *     // Call immediately after successful password login
+   *     await fido2CreateCredential({
+   *       friendlyName: "My Passkey",
+   *       conditionalCreate: true
+   *     });
+   *   }
+   * }
+   * ```
+   *
+   * Important error handling:
+   * - InvalidStateError: Passkey already exists (ignore gracefully)
+   * - NotAllowedError: Conditions not met (ignore gracefully)
+   * - AbortError: Call was aborted (ignore gracefully)
+   *
+   * Server considerations:
+   * - Ignore user presence and user verification flags
+   * - User must be authenticated before accepting the credential
+   *
+   * @see https://web.dev/articles/webauthn-conditional-create
+   */
+  conditionalCreate?: boolean;
 }) {
   const { debug, fido2 } = configure();
   const publicKeyOptions = await fido2StartCreateCredential();
@@ -127,7 +164,8 @@ export async function fido2CreateCredential({
   try {
     credential = await navigator.credentials.create({
       publicKey,
-    });
+      mediation: conditionalCreate ? "conditional" : undefined,
+    } as CredentialCreationOptions);
   } catch (err) {
     if (err instanceof DOMException) {
       throw fromDOMException(err);
@@ -395,6 +433,7 @@ interface Fido2Options {
   relyingPartyId?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   signal?: AbortSignal;
+  conditionalMediation?: boolean;
 }
 
 function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
@@ -474,8 +513,18 @@ export async function fido2getCredential({
   timeout,
   userVerification,
   signal,
+  conditionalMediation,
 }: Fido2Options) {
   const { debug, fido2: { extensions } = {} } = configure();
+
+  // Per passkeys.dev docs: conditional mediation should use "preferred" userVerification
+  const effectiveUserVerification = conditionalMediation
+    ? "preferred"
+    : userVerification;
+
+  // Per Corbado article: timeout should be removed for conditional mediation
+  const effectiveTimeout = conditionalMediation ? undefined : timeout;
+
   const publicKey: CredentialRequestOptions["publicKey"] = {
     challenge: bufferFromBase64Url(challenge),
     allowCredentials: credentials?.map((credential) => ({
@@ -483,8 +532,8 @@ export async function fido2getCredential({
       transports: credential.transports,
       type: "public-key" as const,
     })),
-    timeout,
-    userVerification,
+    timeout: effectiveTimeout,
+    userVerification: effectiveUserVerification,
     rpId: relyingPartyId,
     extensions,
   };
@@ -494,7 +543,8 @@ export async function fido2getCredential({
     credential = await navigator.credentials.get({
       publicKey,
       signal,
-    });
+      mediation: conditionalMediation ? "conditional" : undefined,
+    } as CredentialRequestOptions);
   } catch (err) {
     if (err instanceof DOMException) {
       throw fromDOMException(err);
@@ -590,6 +640,7 @@ export function authenticateWithFido2({
   currentStatus,
   clientMetadata,
   credentialGetter = fido2getCredential,
+  conditionalMediation,
 }: {
   /**
    * Username, or alias (e-mail, phone number)
@@ -607,6 +658,43 @@ export function authenticateWithFido2({
   currentStatus?: BusyState | IdleState;
   clientMetadata?: Record<string, string>;
   credentialGetter?: typeof fido2getCredential;
+  /**
+   * Enable conditional mediation (passkey autofill UI).
+   *
+   * When true:
+   * - Passkeys will appear in the browser's autofill suggestions
+   * - The WebAuthn get() call becomes "set and forget" - it only resolves if user selects a passkey
+   * - userVerification is automatically set to "preferred" (per WebAuthn spec)
+   * - timeout is removed (per WebAuthn spec for conditional mediation)
+   * - An AbortController signal should be provided to cancel the request if needed
+   *
+   * Usage pattern:
+   * ```typescript
+   * // Check if conditional mediation is available
+   * if (PublicKeyCredential.isConditionalMediationAvailable &&
+   *     await PublicKeyCredential.isConditionalMediationAvailable()) {
+   *
+   *   const abortController = new AbortController();
+   *
+   *   // Start conditional mediation on page load
+   *   authenticateWithFido2({
+   *     conditionalMediation: true,
+   *     // username is optional - omit for discoverable credentials
+   *     statusCb: (status) => console.log(status),
+   *     tokensCb: (tokens) => handleSignIn(tokens)
+   *   });
+   *
+   *   // If user clicks "sign in with password" button, abort the autofill request
+   *   abortController.abort();
+   * }
+   * ```
+   *
+   * Important: Ensure your HTML input has autocomplete="username webauthn"
+   *
+   * @see https://passkeys.dev/docs/use-cases/bootstrapping
+   * @see https://www.corbado.com/blog/webauthn-conditional-ui
+   */
+  conditionalMediation?: boolean;
 }) {
   if (currentStatus && busyState.includes(currentStatus as BusyState)) {
     throw new Error(`Can't sign in while in status ${currentStatus}`);
@@ -660,6 +748,8 @@ export function authenticateWithFido2({
                 )
             ) ?? []
           ),
+          conditionalMediation,
+          signal: abort.signal,
         });
         session = initAuthResponse.Session;
       } else {
@@ -674,6 +764,8 @@ export function authenticateWithFido2({
           userVerification:
             fido2.authenticatorSelection?.userVerification ??
             fido2options.userVerification,
+          conditionalMediation,
+          signal: abort.signal,
         });
         if (!fido2credential.userHandleB64) {
           throw new Error("No discoverable credentials available");
