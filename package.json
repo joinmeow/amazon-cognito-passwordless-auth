@@ -1,6 +1,6 @@
 {
   "name": "@joinmeow/cognito-passwordless-auth",
-  "version": "1.0.94",
+  "version": "1.0.95",
   "description": "Passwordless authentication with Amazon Cognito: FIDO2 (WebAuthn, support for Passkeys)",
   "keywords": [
     "AWS",
