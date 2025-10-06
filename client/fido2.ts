@@ -642,6 +642,15 @@ export async function fido2getCredential({
 }: Fido2Options): Promise<ParsedFido2Assertion> {
   const { debug, fido2: { extensions } = {} } = configure();
 
+  debug?.("🔐 fido2getCredential called", {
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    timeout,
+    userVerification,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
   // Runtime validation and parameter adjustments based on mediation mode
   if (mediation === "conditional") {
     // Conditional mediation: autofill UI for password managers
@@ -724,6 +733,15 @@ export async function fido2getCredential({
     extensions,
   };
   debug?.("Assembled public key options:", publicKey);
+
+  debug?.("🚀 Calling navigator.credentials.get()", {
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    effectiveTimeout,
+    effectiveUserVerification,
+  });
+
   let credential;
   try {
     // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
@@ -733,10 +751,20 @@ export async function fido2getCredential({
       signal,
       mediation: mediation as CredentialMediationRequirement,
     });
+    debug?.("✅ navigator.credentials.get() succeeded");
   } catch (err) {
     if (err instanceof DOMException) {
+      debug?.("❌ credentials.get() threw DOMException", {
+        name: err.name,
+        message: err.message,
+        wasSignalAborted: signal?.aborted,
+        mediation,
+      });
       throw fromDOMException(err);
     }
+    debug?.("❌ credentials.get() threw non-DOMException error", {
+      error: err,
+    });
     throw err;
   }
   if (!credential) {
@@ -751,7 +779,7 @@ export async function fido2getCredential({
       credential
     );
   }
-  debug?.("Credential:", credential);
+  debug?.("✅ Credential received and validated:", credential);
   return parseAuthenticatorAssertionResponse(
     credential.rawId,
     credential.response
@@ -820,6 +848,30 @@ async function requestUsernamelessSignInChallenge() {
     .then((res) => res.json() as unknown);
 }
 
+/**
+ * Prepares a FIDO2 sign-in by obtaining WebAuthn credentials and Cognito session.
+ * Can be called early (e.g., page load) and the result passed to authenticateWithFido2 later.
+ *
+ * **Performance Tip**: For conditional mediation (autofill), always provide the username if available:
+ * - ✅ WITH username: Challenge created upfront → fast, correct flow
+ * - ⚠️ WITHOUT username: Credential first → extract username → get session → slower, requires backend coordination
+ *
+ * Password managers typically store usernames, so username-based flow is recommended.
+ *
+ * @example
+ * ```typescript
+ * // ✅ Recommended: Fast path with username
+ * const prepared = await prepareFido2SignIn({
+ *   username: 'alice@example.com',
+ *   mediation: 'conditional'
+ * });
+ *
+ * // ⚠️ Slower: Usernameless (only use when username truly unknown)
+ * const prepared = await prepareFido2SignIn({
+ *   mediation: 'conditional'
+ * });
+ * ```
+ */
 export async function prepareFido2SignIn({
   username,
   credentials,
@@ -827,6 +879,7 @@ export async function prepareFido2SignIn({
   mediation,
   signal,
 }: {
+  /** Username or alias. Providing this enables the FAST username-based flow. */
   username?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   credentialGetter?: typeof fido2getCredential;
@@ -840,13 +893,37 @@ export async function prepareFido2SignIn({
     );
   }
 
+  debug?.("🔓 prepareFido2SignIn called", {
+    hasUsername: !!username,
+    username: username ? `${username.substring(0, 3)}***` : undefined,
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
+  // Monitor abort signal
+  if (signal) {
+    const abortHandler = () => {
+      debug?.("⚠️ prepareFido2SignIn: abort signal fired", {
+        hasUsername: !!username,
+        mediation,
+      });
+    };
+    signal.addEventListener("abort", abortHandler, { once: true });
+  }
+
   let resolvedUsername = username;
   let existingDeviceKey: string | undefined;
   let session: string | undefined;
   let assertion: ParsedFido2Assertion;
 
+  // ✅ Flow 1: Username provided - Use fast username-based passkey flow
+  // This is MUCH faster for conditional mediation when password manager knows the username
+  // Challenge is created upfront → credential signed with correct challenge → no second initiateAuth needed
   if (resolvedUsername) {
-    debug?.("Preparing FIDO2 sign-in with explicit username", {
+    debug?.("🔐 Username-based passkey flow (FAST PATH)", {
+      username: resolvedUsername,
       mediation,
     });
 
@@ -859,9 +936,8 @@ export async function prepareFido2SignIn({
       },
       abort: signal,
     });
-    debug?.("Response from initiateAuth:", initAuthResponse);
-    assertIsChallengeResponse(initAuthResponse);
 
+    assertIsChallengeResponse(initAuthResponse);
     if (!initAuthResponse.ChallengeParameters.fido2options) {
       throw new Error("Server did not send a FIDO2 challenge");
     }
@@ -870,7 +946,7 @@ export async function prepareFido2SignIn({
       initAuthResponse.ChallengeParameters.fido2options
     );
     assertIsFido2Options(fido2options);
-    debug?.("FIDO2 options from Cognito challenge:", fido2options);
+    debug?.("FIDO2 challenge received from Cognito");
 
     assertion = await credentialGetter({
       ...fido2options,
@@ -892,13 +968,16 @@ export async function prepareFido2SignIn({
     });
 
     session = initAuthResponse.Session;
-  } else {
-    debug?.("Preparing FIDO2 usernameless authentication", {
-      mediation,
-    });
+  }
+  // ⚠️ Flow 2: Usernameless - SLOWER but works when username unknown
+  // Only use this when password manager doesn't have username stored
+  // credential first → extract username → get session (requires backend coordination)
+  else {
+    debug?.("🌐 Usernameless passkey flow (SLOW PATH - no username available)");
+
     const fido2options = await requestUsernamelessSignInChallenge();
     assertIsFido2Options(fido2options);
-    debug?.("FIDO2 options from usernameless challenge:", fido2options);
+    debug?.("Usernameless challenge received");
 
     assertion = await credentialGetter({
       ...fido2options,
@@ -907,6 +986,15 @@ export async function prepareFido2SignIn({
       userVerification:
         fido2.authenticatorSelection?.userVerification ??
         fido2options.userVerification,
+      // Merge server credentials with client-provided credentials (same as username flow)
+      credentials: (fido2options.credentials ?? []).concat(
+        credentials?.filter(
+          (cred) =>
+            !fido2options.credentials?.find(
+              (optionsCred) => cred.id === optionsCred.id
+            )
+        ) ?? []
+      ),
       mediation,
       signal,
     });
@@ -927,11 +1015,14 @@ export async function prepareFido2SignIn({
     }
 
     decodedUsername = decodedUsername.replace(/^u\|/, "");
-    resolvedUsername = decodedUsername;
-    debug?.(
-      `Proceeding with discovered credential for username: ${resolvedUsername} (b64: ${assertion.userHandleB64})`
-    );
+    if (!decodedUsername) {
+      throw new Error("Invalid userHandle: username cannot be empty");
+    }
 
+    resolvedUsername = decodedUsername;
+    debug?.(`✅ Username discovered: ${resolvedUsername}`);
+
+    // Now get the Cognito session for this username
     existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
     const initAuthResponse = await initiateAuth({
       authflow: "CUSTOM_AUTH",
@@ -941,14 +1032,19 @@ export async function prepareFido2SignIn({
       },
       abort: signal,
     });
-    debug?.("Response from initiateAuth:", initAuthResponse);
+
     assertIsChallengeResponse(initAuthResponse);
     session = initAuthResponse.Session;
   }
 
-  if (!resolvedUsername || !session) {
-    throw new Fido2AuthError("Failed to prepare FIDO2 authentication");
+  if (!session) {
+    throw new Fido2AuthError("Failed to obtain Cognito session");
   }
+
+  debug?.("✅ FIDO2 sign-in prepared", {
+    username: resolvedUsername,
+    hasDeviceKey: !!existingDeviceKey,
+  });
 
   return {
     username: resolvedUsername,
@@ -1053,14 +1149,44 @@ export function authenticateWithFido2({
     throw new Error(`Can't sign in while in status ${currentStatus}`);
   }
   const abort = new AbortController();
+
+  const { debug, fido2 } = configure();
+
+  debug?.("🔑 authenticateWithFido2 called", {
+    hasUsername: !!username,
+    username: username ? `${username.substring(0, 3)}***` : undefined,
+    hasPrepared: !!prepared,
+    mediation,
+    hasCredentials: !!credentials,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
+  // Monitor abort signal for this authentication session
+  abort.signal.addEventListener("abort", () => {
+    debug?.("⚠️ authenticateWithFido2: internal abort signal fired", {
+      hasUsername: !!username,
+      hasPrepared: !!prepared,
+      mediation,
+    });
+  });
+
   const signedIn = (async () => {
-    const { debug, fido2 } = configure();
     if (!fido2) {
       throw new Fido2ConfigError(
         "Fido2 configuration not initialized. Call configure() with fido2 options."
       );
     }
     statusCb?.("STARTING_SIGN_IN_WITH_FIDO2");
+
+    if (prepared) {
+      debug?.("📦 Using prepared FIDO2 bundle", {
+        username: prepared.username,
+        hasSession: !!prepared.session,
+        hasCredential: !!prepared.credential,
+        hasDeviceKey: !!prepared.existingDeviceKey,
+      });
+    }
+
     try {
       const preparedSignIn =
         prepared ??
