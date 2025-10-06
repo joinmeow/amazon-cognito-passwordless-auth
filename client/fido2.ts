@@ -642,6 +642,15 @@ export async function fido2getCredential({
 }: Fido2Options): Promise<ParsedFido2Assertion> {
   const { debug, fido2: { extensions } = {} } = configure();
 
+  debug?.("🔐 fido2getCredential called", {
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    timeout,
+    userVerification,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
   // Runtime validation and parameter adjustments based on mediation mode
   if (mediation === "conditional") {
     // Conditional mediation: autofill UI for password managers
@@ -724,6 +733,15 @@ export async function fido2getCredential({
     extensions,
   };
   debug?.("Assembled public key options:", publicKey);
+
+  debug?.("🚀 Calling navigator.credentials.get()", {
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    effectiveTimeout,
+    effectiveUserVerification,
+  });
+
   let credential;
   try {
     // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
@@ -733,10 +751,20 @@ export async function fido2getCredential({
       signal,
       mediation: mediation as CredentialMediationRequirement,
     });
+    debug?.("✅ navigator.credentials.get() succeeded");
   } catch (err) {
     if (err instanceof DOMException) {
+      debug?.("❌ credentials.get() threw DOMException", {
+        name: err.name,
+        message: err.message,
+        wasSignalAborted: signal?.aborted,
+        mediation,
+      });
       throw fromDOMException(err);
     }
+    debug?.("❌ credentials.get() threw non-DOMException error", {
+      error: err,
+    });
     throw err;
   }
   if (!credential) {
@@ -751,7 +779,7 @@ export async function fido2getCredential({
       credential
     );
   }
-  debug?.("Credential:", credential);
+  debug?.("✅ Credential received and validated:", credential);
   return parseAuthenticatorAssertionResponse(
     credential.rawId,
     credential.response
@@ -838,6 +866,26 @@ export async function prepareFido2SignIn({
     throw new Fido2ConfigError(
       "Fido2 configuration not initialized. Call configure() with fido2 options."
     );
+  }
+
+  debug?.("🔓 prepareFido2SignIn called", {
+    hasUsername: !!username,
+    username: username ? `${username.substring(0, 3)}***` : undefined,
+    mediation,
+    hasSignal: !!signal,
+    signalAborted: signal?.aborted,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
+  // Monitor abort signal
+  if (signal) {
+    const abortHandler = () => {
+      debug?.("⚠️ prepareFido2SignIn: abort signal fired", {
+        hasUsername: !!username,
+        mediation,
+      });
+    };
+    signal.addEventListener("abort", abortHandler, { once: true });
   }
 
   let resolvedUsername = username;
@@ -1053,14 +1101,44 @@ export function authenticateWithFido2({
     throw new Error(`Can't sign in while in status ${currentStatus}`);
   }
   const abort = new AbortController();
+
+  const { debug, fido2 } = configure();
+
+  debug?.("🔑 authenticateWithFido2 called", {
+    hasUsername: !!username,
+    username: username ? `${username.substring(0, 3)}***` : undefined,
+    hasPrepared: !!prepared,
+    mediation,
+    hasCredentials: !!credentials,
+    credentialsCount: credentials?.length ?? 0,
+  });
+
+  // Monitor abort signal for this authentication session
+  abort.signal.addEventListener("abort", () => {
+    debug?.("⚠️ authenticateWithFido2: internal abort signal fired", {
+      hasUsername: !!username,
+      hasPrepared: !!prepared,
+      mediation,
+    });
+  });
+
   const signedIn = (async () => {
-    const { debug, fido2 } = configure();
     if (!fido2) {
       throw new Fido2ConfigError(
         "Fido2 configuration not initialized. Call configure() with fido2 options."
       );
     }
     statusCb?.("STARTING_SIGN_IN_WITH_FIDO2");
+
+    if (prepared) {
+      debug?.("📦 Using prepared FIDO2 bundle", {
+        username: prepared.username,
+        hasSession: !!prepared.session,
+        hasCredential: !!prepared.credential,
+        hasDeviceKey: !!prepared.existingDeviceKey,
+      });
+    }
+
     try {
       const preparedSignIn =
         prepared ??
