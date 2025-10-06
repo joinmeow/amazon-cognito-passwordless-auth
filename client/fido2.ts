@@ -848,6 +848,30 @@ async function requestUsernamelessSignInChallenge() {
     .then((res) => res.json() as unknown);
 }
 
+/**
+ * Prepares a FIDO2 sign-in by obtaining WebAuthn credentials and Cognito session.
+ * Can be called early (e.g., page load) and the result passed to authenticateWithFido2 later.
+ *
+ * **Performance Tip**: For conditional mediation (autofill), always provide the username if available:
+ * - ✅ WITH username: Challenge created upfront → fast, correct flow
+ * - ⚠️ WITHOUT username: Credential first → extract username → get session → slower, requires backend coordination
+ *
+ * Password managers typically store usernames, so username-based flow is recommended.
+ *
+ * @example
+ * ```typescript
+ * // ✅ Recommended: Fast path with username
+ * const prepared = await prepareFido2SignIn({
+ *   username: 'alice@example.com',
+ *   mediation: 'conditional'
+ * });
+ *
+ * // ⚠️ Slower: Usernameless (only use when username truly unknown)
+ * const prepared = await prepareFido2SignIn({
+ *   mediation: 'conditional'
+ * });
+ * ```
+ */
 export async function prepareFido2SignIn({
   username,
   credentials,
@@ -855,6 +879,7 @@ export async function prepareFido2SignIn({
   mediation,
   signal,
 }: {
+  /** Username or alias. Providing this enables the FAST username-based flow. */
   username?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   credentialGetter?: typeof fido2getCredential;
@@ -890,11 +915,15 @@ export async function prepareFido2SignIn({
 
   let resolvedUsername = username;
   let existingDeviceKey: string | undefined;
-  let session: string | undefined;
+  let session: string;
   let assertion: ParsedFido2Assertion;
 
+  // ✅ Flow 1: Username provided - Use fast username-based passkey flow
+  // This is MUCH faster for conditional mediation when password manager knows the username
+  // Challenge is created upfront → credential signed with correct challenge → no second initiateAuth needed
   if (resolvedUsername) {
-    debug?.("Preparing FIDO2 sign-in with explicit username", {
+    debug?.("🔐 Username-based passkey flow (FAST PATH)", {
+      username: resolvedUsername,
       mediation,
     });
 
@@ -907,9 +936,8 @@ export async function prepareFido2SignIn({
       },
       abort: signal,
     });
-    debug?.("Response from initiateAuth:", initAuthResponse);
-    assertIsChallengeResponse(initAuthResponse);
 
+    assertIsChallengeResponse(initAuthResponse);
     if (!initAuthResponse.ChallengeParameters.fido2options) {
       throw new Error("Server did not send a FIDO2 challenge");
     }
@@ -918,7 +946,7 @@ export async function prepareFido2SignIn({
       initAuthResponse.ChallengeParameters.fido2options
     );
     assertIsFido2Options(fido2options);
-    debug?.("FIDO2 options from Cognito challenge:", fido2options);
+    debug?.("FIDO2 challenge received from Cognito");
 
     assertion = await credentialGetter({
       ...fido2options,
@@ -940,13 +968,16 @@ export async function prepareFido2SignIn({
     });
 
     session = initAuthResponse.Session;
-  } else {
-    debug?.("Preparing FIDO2 usernameless authentication", {
-      mediation,
-    });
+  }
+  // ⚠️ Flow 2: Usernameless - SLOWER but works when username unknown
+  // Only use this when password manager doesn't have username stored
+  // credential first → extract username → get session (requires backend coordination)
+  else {
+    debug?.("🌐 Usernameless passkey flow (SLOW PATH - no username available)");
+
     const fido2options = await requestUsernamelessSignInChallenge();
     assertIsFido2Options(fido2options);
-    debug?.("FIDO2 options from usernameless challenge:", fido2options);
+    debug?.("Usernameless challenge received");
 
     assertion = await credentialGetter({
       ...fido2options,
@@ -955,6 +986,7 @@ export async function prepareFido2SignIn({
       userVerification:
         fido2.authenticatorSelection?.userVerification ??
         fido2options.userVerification,
+      credentials: credentials ?? fido2options.credentials,
       mediation,
       signal,
     });
@@ -975,11 +1007,14 @@ export async function prepareFido2SignIn({
     }
 
     decodedUsername = decodedUsername.replace(/^u\|/, "");
-    resolvedUsername = decodedUsername;
-    debug?.(
-      `Proceeding with discovered credential for username: ${resolvedUsername} (b64: ${assertion.userHandleB64})`
-    );
+    if (!decodedUsername) {
+      throw new Error("Invalid userHandle: username cannot be empty");
+    }
 
+    resolvedUsername = decodedUsername;
+    debug?.(`✅ Username discovered: ${resolvedUsername}`);
+
+    // Now get the Cognito session for this username
     existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
     const initAuthResponse = await initiateAuth({
       authflow: "CUSTOM_AUTH",
@@ -989,14 +1024,19 @@ export async function prepareFido2SignIn({
       },
       abort: signal,
     });
-    debug?.("Response from initiateAuth:", initAuthResponse);
+
     assertIsChallengeResponse(initAuthResponse);
     session = initAuthResponse.Session;
   }
 
-  if (!resolvedUsername || !session) {
-    throw new Fido2AuthError("Failed to prepare FIDO2 authentication");
+  if (!session) {
+    throw new Fido2AuthError("Failed to obtain Cognito session");
   }
+
+  debug?.("✅ FIDO2 sign-in prepared", {
+    username: resolvedUsername,
+    hasDeviceKey: !!existingDeviceKey,
+  });
 
   return {
     username: resolvedUsername,
