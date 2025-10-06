@@ -36,6 +36,7 @@ import {
   initialize,
   signUp,
   confirmSignUp,
+  prepareFido2SignIn,
   authenticateWithFido2,
   authenticateWithSRP,
 } from "@joinmeow/cognito-passwordless-auth";
@@ -66,10 +67,15 @@ await confirmSignUp({
   confirmationCode: "123456",
 });
 
-// Start the sign-in process with FIDO2
-const { signedIn } = await authenticateWithFido2({
+// Optionally pre-fetch the WebAuthn assertion (e.g. for conditional mediation)
+const prepared = await prepareFido2SignIn({
   username: "user@example.com",
 });
+
+// Start the sign-in process with FIDO2. Pass the prepared bundle to skip
+// re-triggering navigator.credentials.get(). If you omit `prepared`, the
+// helper will prompt the user as usual.
+const { signedIn } = await authenticateWithFido2({ prepared });
 
 // Wait for the sign-in process to complete
 await signedIn;
@@ -115,6 +121,7 @@ function App() {
 function YourApp() {
   const {
     signInStatus,
+    prepareFido2SignIn,
     authenticateWithFido2,
     authenticateWithSRP,
     tokens,
@@ -604,6 +611,7 @@ function FIDO2Manager() {
 
 ```javascript
 import {
+  prepareFido2SignIn,
   authenticateWithFido2,
   fido2CreateCredential,
   detectMediationCapabilities,
@@ -620,16 +628,19 @@ if (userVerifyingPlatformAuthenticatorAvailable) {
     conditionalCreate: conditional,
   });
 
-  // 4. Sign in with FIDO2, enabling conditional mediation when supported
-  const { signedIn } = await authenticateWithFido2({
+  // 4. Prepare the WebAuthn assertion (conditional mediation when supported)
+  const prepared = await prepareFido2SignIn({
     username: "user@example.com",
     mediation: conditional ? "conditional" : undefined,
-    // Optional: specify credentials to use
+    // Optional: specify credentials to bias the allow list
     credentials: fido2Credentials?.map((c) => ({
       id: c.credentialId,
       transports: c.transports,
     })),
   });
+
+  // 5. Complete the Cognito challenge using the prepared bundle
+  const { signedIn } = await authenticateWithFido2({ prepared });
 
   await signedIn;
 }
@@ -870,11 +881,19 @@ timeSinceLastActivitySeconds: number | null // Seconds since last activity
 
 ```typescript
 // Authentication methods
+prepareFido2SignIn(options?: {
+  username?: string;
+  credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  mediation?: "conditional" | "immediate" | "optional" | "required" | "silent";
+  signal?: AbortSignal;
+}) => Promise<PreparedFido2SignIn>
+
 authenticateWithFido2(options?: {
   username?: string;
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   clientMetadata?: Record<string, string>;
   mediation?: "conditional" | "immediate" | "optional" | "required" | "silent";
+  prepared?: PreparedFido2SignIn;
 }) => { signedIn: Promise<TokensFromSignIn> }
 
 authenticateWithSRP(options: {

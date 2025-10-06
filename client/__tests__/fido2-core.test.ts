@@ -13,7 +13,11 @@
  * language governing permissions and limitations under the License.
  */
 
-import { fido2getCredential } from "../fido2.js";
+import {
+  fido2getCredential,
+  prepareFido2SignIn,
+  authenticateWithFido2,
+} from "../fido2.js";
 import { configure } from "../config.js";
 import { Fido2CredentialError, Fido2ValidationError } from "../errors.js";
 import {
@@ -29,6 +33,16 @@ import {
   createWebAuthnError,
   assertTransformedCredentialMatches,
 } from "./__utils__/webauthn-mocks.js";
+import { initiateAuth } from "../cognito-api.js";
+import { retrieveDeviceKey } from "../storage.js";
+import { bufferToBase64Url } from "../util.js";
+import { TextDecoder as NodeTextDecoder } from "util";
+
+if (typeof globalThis.TextDecoder === "undefined") {
+  (
+    globalThis as unknown as { TextDecoder: typeof NodeTextDecoder }
+  ).TextDecoder = NodeTextDecoder;
+}
 
 // Mock dependencies
 jest.mock("../config");
@@ -36,9 +50,16 @@ jest.mock("../cognito-api");
 jest.mock("../storage");
 
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
+const mockInitiateAuth = initiateAuth as jest.MockedFunction<
+  typeof initiateAuth
+>;
+const mockRetrieveDeviceKey = retrieveDeviceKey as jest.MockedFunction<
+  typeof retrieveDeviceKey
+>;
 
 describe("FIDO2 Core Functionality", () => {
   let cleanup: (() => void) | null = null;
+  let baseConfig: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -47,13 +68,21 @@ describe("FIDO2 Core Functionality", () => {
       cleanup = null;
     }
 
-    mockConfigure.mockReturnValue({
+    baseConfig = {
       debug: jest.fn(),
+      fetch: jest.fn(),
       fido2: {
         rp: { id: TEST_RP.id, name: TEST_RP.name },
+        baseUrl: "https://example.com/fido2",
+        timeout: 45000,
+        authenticatorSelection: { userVerification: "preferred" },
         extensions: {},
       },
-    } as any);
+    } as any;
+
+    mockConfigure.mockReturnValue(baseConfig);
+    mockRetrieveDeviceKey.mockResolvedValue(undefined);
+    mockInitiateAuth.mockReset();
   });
 
   afterEach(() => {
@@ -326,6 +355,216 @@ describe("FIDO2 Core Functionality", () => {
           challenge: TEST_CHALLENGES.basic,
         })
       ).rejects.toThrow("Network error");
+    });
+  });
+
+  describe("prepareFido2SignIn", () => {
+    const toArrayBuffer = (buf: Buffer) =>
+      buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+
+    it("prepares authentication with explicit username and merges credentials", async () => {
+      const parsedAssertion = {
+        credentialIdB64: "cred-1",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "signature",
+        userHandleB64: null,
+      };
+      const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+
+      mockRetrieveDeviceKey.mockResolvedValueOnce("device-key-123");
+      mockInitiateAuth.mockResolvedValueOnce({
+        ChallengeParameters: {
+          fido2options: JSON.stringify({
+            challenge: "server-challenge",
+            relyingPartyId: "server-rp",
+            timeout: 60000,
+            userVerification: "discouraged",
+            credentials: [{ id: "cred-existing" }],
+          }),
+        },
+        Session: "session-token",
+      } as any);
+
+      const result = await prepareFido2SignIn({
+        username: "alice",
+        credentials: [{ id: "cred-existing" }, { id: "cred-new" }],
+        mediation: "immediate",
+        credentialGetter,
+      });
+
+      expect(mockRetrieveDeviceKey).toHaveBeenCalledWith("alice");
+      expect(mockInitiateAuth).toHaveBeenCalledWith(
+        expect.objectContaining({
+          authflow: "CUSTOM_AUTH",
+          authParameters: {
+            USERNAME: "alice",
+            DEVICE_KEY: "device-key-123",
+          },
+        })
+      );
+
+      const credentialGetterArgs = credentialGetter.mock.calls[0][0];
+      expect(credentialGetterArgs.challenge).toBe("server-challenge");
+      expect(credentialGetterArgs.relyingPartyId).toBe(TEST_RP.id);
+      expect(credentialGetterArgs.timeout).toBe(baseConfig.fido2.timeout);
+      expect(credentialGetterArgs.userVerification).toBe(
+        baseConfig.fido2.authenticatorSelection.userVerification
+      );
+      expect(credentialGetterArgs.mediation).toBe("immediate");
+      const allowCredentials = (credentialGetterArgs.credentials ?? []) as {
+        id: string;
+      }[];
+      expect(Array.isArray(allowCredentials)).toBe(true);
+      expect(allowCredentials.map((cred) => cred.id)).toEqual([
+        "cred-existing",
+        "cred-new",
+      ]);
+
+      expect(result).toEqual({
+        username: "alice",
+        credential: parsedAssertion,
+        session: "session-token",
+        existingDeviceKey: "device-key-123",
+      });
+    });
+
+    it("derives username from discoverable credential when none provided", async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          challenge: "autofill-challenge",
+          relyingPartyId: "server-rp",
+          timeout: 30000,
+          userVerification: "required",
+        }),
+      });
+      baseConfig.fetch = fetchMock;
+
+      const encodedUserHandle = bufferToBase64Url(
+        toArrayBuffer(Buffer.from("u|charlie", "utf8"))
+      );
+      const parsedAssertion = {
+        credentialIdB64: "cred-2",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "signature",
+        userHandleB64: encodedUserHandle,
+      };
+      const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+
+      mockInitiateAuth.mockResolvedValueOnce({
+        ChallengeParameters: {
+          fido2options: JSON.stringify({
+            challenge: "server-challenge",
+            relyingPartyId: "server-rp",
+          }),
+        },
+        Session: "session-autofill",
+      } as any);
+
+      const result = await prepareFido2SignIn({
+        mediation: "conditional",
+        credentialGetter,
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://example.com/fido2/sign-in-challenge",
+        expect.objectContaining({ method: "POST" })
+      );
+      expect(mockInitiateAuth).toHaveBeenCalledWith(
+        expect.objectContaining({
+          authflow: "CUSTOM_AUTH",
+          authParameters: { USERNAME: "charlie" },
+        })
+      );
+      expect(credentialGetter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mediation: "conditional",
+          relyingPartyId: TEST_RP.id,
+        })
+      );
+      expect(result).toEqual({
+        username: "charlie",
+        credential: parsedAssertion,
+        session: "session-autofill",
+        existingDeviceKey: undefined,
+      });
+    });
+
+    it("throws when usernameless assertion lacks userHandle", async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          challenge: "missing-user-handle",
+        }),
+      });
+      baseConfig.fetch = fetchMock;
+
+      const credentialGetter = jest.fn().mockResolvedValue({
+        credentialIdB64: "cred-3",
+        authenticatorDataB64: "auth",
+        clientDataJSON_B64: "client",
+        signatureB64: "sig",
+        userHandleB64: null,
+      });
+
+      await expect(prepareFido2SignIn({ credentialGetter })).rejects.toThrow(
+        "No discoverable credentials available"
+      );
+    });
+
+    it("throws when discoverable credential maps to sub identifier", async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          challenge: "sub-prefix",
+        }),
+      });
+      baseConfig.fetch = fetchMock;
+
+      const encodedUserHandle = bufferToBase64Url(
+        toArrayBuffer(Buffer.from("s|123456", "utf8"))
+      );
+      const credentialGetter = jest.fn().mockResolvedValue({
+        credentialIdB64: "cred-4",
+        authenticatorDataB64: "auth",
+        clientDataJSON_B64: "client",
+        signatureB64: "sig",
+        userHandleB64: encodedUserHandle,
+      });
+
+      await expect(prepareFido2SignIn({ credentialGetter })).rejects.toThrow(
+        "Username is required for initiating sign-in"
+      );
+    });
+
+    it("rejects authenticateWithFido2 when provided username mismatches prepared bundle", async () => {
+      const prepared = {
+        username: "bundle-user",
+        session: "mock-session",
+        credential: {
+          credentialIdB64: "cred-id",
+          authenticatorDataB64: "auth-data",
+          clientDataJSON_B64: "client-data",
+          signatureB64: "sig",
+          userHandleB64: null,
+        },
+      };
+
+      mockConfigure.mockReturnValue({ ...baseConfig });
+
+      const result = authenticateWithFido2({
+        username: "provided-user",
+        prepared,
+      });
+
+      await expect(result.signedIn).rejects.toThrow(
+        /Prepared credentials belong to username/
+      );
     });
   });
 });

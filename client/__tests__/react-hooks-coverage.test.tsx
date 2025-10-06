@@ -23,11 +23,34 @@ import {
 import { configure } from "../config.js";
 import { retrieveTokens } from "../storage.js";
 import { handleCognitoOAuthCallback } from "../hosted-oauth.js";
+import {
+  prepareFido2SignIn as prepareFido2SignInCore,
+  authenticateWithFido2 as authenticateWithFido2Core,
+} from "../fido2.js";
+import type { PreparedFido2SignIn } from "../fido2.js";
 
 // Mocks
 jest.mock("../config");
 jest.mock("../storage");
 jest.mock("../hosted-oauth");
+jest.mock("../fido2", () => {
+  const actual = jest.requireActual("../fido2");
+  return {
+    ...actual,
+    authenticateWithFido2: jest.fn(() => ({
+      signedIn: Promise.resolve({
+        accessToken: "mock",
+        idToken: "mock",
+        refreshToken: "mock",
+        expireAt: new Date(Date.now() + 60_000),
+        username: "user",
+        authMethod: "FIDO2",
+      }),
+      abort: jest.fn(),
+    })),
+    prepareFido2SignIn: jest.fn(),
+  };
+});
 
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
 const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
@@ -36,6 +59,13 @@ const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
 const mockHandleOAuth = handleCognitoOAuthCallback as jest.MockedFunction<
   typeof handleCognitoOAuthCallback
 >;
+const mockPrepareFido2SignIn = prepareFido2SignInCore as jest.MockedFunction<
+  typeof prepareFido2SignInCore
+>;
+const mockAuthenticateWithFido2 =
+  authenticateWithFido2Core as jest.MockedFunction<
+    typeof authenticateWithFido2Core
+  >;
 
 // Helper wrapper to mount the hook with the provider
 const makeWrapper = () =>
@@ -48,6 +78,8 @@ const makeWrapper = () =>
 describe("React hooks coverage for hooks.tsx branches", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockPrepareFido2SignIn.mockReset();
+    mockAuthenticateWithFido2.mockClear();
 
     // Minimal default config for tests
     mockConfigure.mockReturnValue({
@@ -182,5 +214,80 @@ describe("React hooks coverage for hooks.tsx branches", () => {
     expect(debugSpy).toHaveBeenCalledWith(
       "markUserActive called but activity tracking is disabled"
     );
+  });
+
+  it("exposes prepareFido2SignIn passthrough", async () => {
+    const prepared: PreparedFido2SignIn = {
+      username: "alice",
+      session: "mock-session",
+      credential: {
+        credentialIdB64: "cred",
+        authenticatorDataB64: "auth",
+        clientDataJSON_B64: "client",
+        signatureB64: "sig",
+        userHandleB64: "user",
+      },
+      existingDeviceKey: "device",
+    };
+
+    mockPrepareFido2SignIn.mockResolvedValueOnce(prepared);
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await expect(
+      result.current.prepareFido2SignIn({ username: "alice" })
+    ).resolves.toBe(prepared);
+
+    expect(mockPrepareFido2SignIn).toHaveBeenCalledWith({
+      username: "alice",
+      credentials: undefined,
+      mediation: undefined,
+      signal: undefined,
+    });
+  });
+
+  it("forwards prepared bundle to authenticateWithFido2", async () => {
+    const prepared: PreparedFido2SignIn = {
+      username: "charlie",
+      session: "session-123",
+      credential: {
+        credentialIdB64: "cred",
+        authenticatorDataB64: "auth",
+        clientDataJSON_B64: "client",
+        signatureB64: "sig",
+        userHandleB64: "user",
+      },
+      existingDeviceKey: undefined,
+    };
+
+    const resolvedTokens = {
+      accessToken: "access",
+      idToken: "id",
+      refreshToken: "refresh",
+      expireAt: new Date(Date.now() + 5_000),
+      username: "charlie",
+      authMethod: "FIDO2" as const,
+    };
+
+    mockAuthenticateWithFido2.mockReturnValueOnce({
+      signedIn: Promise.resolve(resolvedTokens),
+      abort: jest.fn(),
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    const response = result.current.authenticateWithFido2({ prepared });
+
+    expect(mockAuthenticateWithFido2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prepared,
+        statusCb: expect.any(Function),
+        tokensCb: expect.any(Function),
+      })
+    );
+
+    await expect(response.signedIn).resolves.toEqual(resolvedTokens);
   });
 });

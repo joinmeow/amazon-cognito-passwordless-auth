@@ -196,6 +196,21 @@ export interface StoredCredential {
   transports?: AuthenticatorTransport[];
 }
 
+export interface ParsedFido2Assertion {
+  credentialIdB64: string;
+  authenticatorDataB64: string;
+  clientDataJSON_B64: string;
+  signatureB64: string;
+  userHandleB64: string | null;
+}
+
+export interface PreparedFido2SignIn {
+  username: string;
+  session: string;
+  credential: ParsedFido2Assertion;
+  existingDeviceKey?: string;
+}
+
 type AuthenticatorAttestationResponseWithOptionalMembers =
   AuthenticatorAttestationResponse & {
     getTransports?: () => "" | string[];
@@ -624,7 +639,7 @@ export async function fido2getCredential({
   userVerification,
   signal,
   mediation,
-}: Fido2Options) {
+}: Fido2Options): Promise<ParsedFido2Assertion> {
   const { debug, fido2: { extensions } = {} } = configure();
 
   // Runtime validation and parameter adjustments based on mediation mode
@@ -805,6 +820,144 @@ async function requestUsernamelessSignInChallenge() {
     .then((res) => res.json() as unknown);
 }
 
+export async function prepareFido2SignIn({
+  username,
+  credentials,
+  credentialGetter = fido2getCredential,
+  mediation,
+  signal,
+}: {
+  username?: string;
+  credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+  credentialGetter?: typeof fido2getCredential;
+  mediation?: MediationMode;
+  signal?: AbortSignal;
+}): Promise<PreparedFido2SignIn> {
+  const { debug, fido2 } = configure();
+  if (!fido2) {
+    throw new Fido2ConfigError(
+      "Fido2 configuration not initialized. Call configure() with fido2 options."
+    );
+  }
+
+  let resolvedUsername = username;
+  let existingDeviceKey: string | undefined;
+  let session: string | undefined;
+  let assertion: ParsedFido2Assertion;
+
+  if (resolvedUsername) {
+    debug?.("Preparing FIDO2 sign-in with explicit username", {
+      mediation,
+    });
+
+    existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
+    const initAuthResponse = await initiateAuth({
+      authflow: "CUSTOM_AUTH",
+      authParameters: {
+        USERNAME: resolvedUsername,
+        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
+      },
+      abort: signal,
+    });
+    debug?.("Response from initiateAuth:", initAuthResponse);
+    assertIsChallengeResponse(initAuthResponse);
+
+    if (!initAuthResponse.ChallengeParameters.fido2options) {
+      throw new Error("Server did not send a FIDO2 challenge");
+    }
+
+    const fido2options: unknown = JSON.parse(
+      initAuthResponse.ChallengeParameters.fido2options
+    );
+    assertIsFido2Options(fido2options);
+    debug?.("FIDO2 options from Cognito challenge:", fido2options);
+
+    assertion = await credentialGetter({
+      ...fido2options,
+      relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
+      timeout: fido2.timeout ?? fido2options.timeout,
+      userVerification:
+        fido2.authenticatorSelection?.userVerification ??
+        fido2options.userVerification,
+      credentials: (fido2options.credentials ?? []).concat(
+        credentials?.filter(
+          (cred) =>
+            !fido2options.credentials?.find(
+              (optionsCred) => cred.id === optionsCred.id
+            )
+        ) ?? []
+      ),
+      mediation,
+      signal,
+    });
+
+    session = initAuthResponse.Session;
+  } else {
+    debug?.("Preparing FIDO2 usernameless authentication", {
+      mediation,
+    });
+    const fido2options = await requestUsernamelessSignInChallenge();
+    assertIsFido2Options(fido2options);
+    debug?.("FIDO2 options from usernameless challenge:", fido2options);
+
+    assertion = await credentialGetter({
+      ...fido2options,
+      relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
+      timeout: fido2.timeout ?? fido2options.timeout,
+      userVerification:
+        fido2.authenticatorSelection?.userVerification ??
+        fido2options.userVerification,
+      mediation,
+      signal,
+    });
+
+    if (!assertion.userHandleB64) {
+      throw new Error("No discoverable credentials available");
+    }
+
+    let decodedUsername = new TextDecoder().decode(
+      bufferFromBase64Url(assertion.userHandleB64)
+    );
+
+    if (decodedUsername.startsWith("s|")) {
+      debug?.(
+        "Credential userHandle isn't a username. In order to use the username as userHandle, so users can sign in without typing their username, usernames must be opaque"
+      );
+      throw new Error("Username is required for initiating sign-in");
+    }
+
+    decodedUsername = decodedUsername.replace(/^u\|/, "");
+    resolvedUsername = decodedUsername;
+    debug?.(
+      `Proceeding with discovered credential for username: ${resolvedUsername} (b64: ${assertion.userHandleB64})`
+    );
+
+    existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
+    const initAuthResponse = await initiateAuth({
+      authflow: "CUSTOM_AUTH",
+      authParameters: {
+        USERNAME: resolvedUsername,
+        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
+      },
+      abort: signal,
+    });
+    debug?.("Response from initiateAuth:", initAuthResponse);
+    assertIsChallengeResponse(initAuthResponse);
+    session = initAuthResponse.Session;
+  }
+
+  if (!resolvedUsername || !session) {
+    throw new Fido2AuthError("Failed to prepare FIDO2 authentication");
+  }
+
+  return {
+    username: resolvedUsername,
+    credential: assertion,
+    session,
+    existingDeviceKey,
+  };
+}
+
 export function authenticateWithFido2({
   username,
   credentials,
@@ -814,6 +967,7 @@ export function authenticateWithFido2({
   clientMetadata,
   credentialGetter = fido2getCredential,
   mediation,
+  prepared,
 }: {
   /**
    * Username, or alias (e-mail, phone number)
@@ -888,6 +1042,12 @@ export function authenticateWithFido2({
    * @see https://developer.chrome.com/blog/webauthn-immediate-mediation (immediate)
    */
   mediation?: MediationMode;
+  /**
+   * Optional pre-fetched WebAuthn assertion bundle returned by prepareFido2SignIn().
+   * When provided, authenticateWithFido2() will skip navigator.credentials.get()
+   * and directly complete the Cognito challenge using this data.
+   */
+  prepared?: PreparedFido2SignIn;
 }) {
   if (currentStatus && busyState.includes(currentStatus as BusyState)) {
     throw new Error(`Can't sign in while in status ${currentStatus}`);
@@ -901,103 +1061,36 @@ export function authenticateWithFido2({
       );
     }
     statusCb?.("STARTING_SIGN_IN_WITH_FIDO2");
-    let existingDeviceKey: string | undefined;
-    let fido2credential: Awaited<ReturnType<typeof credentialGetter>>,
-      session: string;
     try {
-      if (username) {
-        debug?.(`Invoking initiateAuth ...`);
-        existingDeviceKey = await retrieveDeviceKey(username);
-        const initAuthResponse = await initiateAuth({
-          authflow: "CUSTOM_AUTH",
-          authParameters: {
-            USERNAME: username,
-            ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
-          },
-          abort: abort.signal,
-        });
-        debug?.(`Response from initiateAuth:`, initAuthResponse);
-        assertIsChallengeResponse(initAuthResponse);
-        if (!initAuthResponse.ChallengeParameters.fido2options) {
-          throw new Error("Server did not send a FIDO2 challenge");
-        }
-        const fido2options: unknown = JSON.parse(
-          initAuthResponse.ChallengeParameters.fido2options
-        );
-        assertIsFido2Options(fido2options);
-        debug?.("FIDO2 options from Cognito challenge:", fido2options);
-        fido2credential = await credentialGetter({
-          ...fido2options,
-          relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-          timeout: fido2.timeout ?? fido2options.timeout,
-          userVerification:
-            fido2.authenticatorSelection?.userVerification ??
-            fido2options.userVerification,
-          credentials: (fido2options.credentials ?? []).concat(
-            credentials?.filter(
-              (cred) =>
-                !fido2options.credentials?.find(
-                  (optionsCred) => cred.id === optionsCred.id
-                )
-            ) ?? []
-          ),
+      const preparedSignIn =
+        prepared ??
+        (await prepareFido2SignIn({
+          username,
+          credentials,
+          credentialGetter,
           mediation,
           signal: abort.signal,
-        });
-        session = initAuthResponse.Session;
-      } else {
-        debug?.("Starting usernameless authentication");
-        const fido2options = await requestUsernamelessSignInChallenge();
-        assertIsFido2Options(fido2options);
-        debug?.("FIDO2 options from usernameless challenge:", fido2options);
-        fido2credential = await credentialGetter({
-          ...fido2options,
-          relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-          timeout: fido2.timeout ?? fido2options.timeout,
-          userVerification:
-            fido2.authenticatorSelection?.userVerification ??
-            fido2options.userVerification,
-          mediation,
-          signal: abort.signal,
-        });
-        if (!fido2credential.userHandleB64) {
-          throw new Error("No discoverable credentials available");
-        }
-        username = new TextDecoder().decode(
-          bufferFromBase64Url(fido2credential.userHandleB64)
+        }));
+
+      if (username && username !== preparedSignIn.username) {
+        throw new Fido2ValidationError(
+          `Prepared credentials belong to username "${preparedSignIn.username}" but "${username}" was provided. Omit the username parameter or ensure it matches.`,
+          {
+            providedUsername: username,
+            preparedUsername: preparedSignIn.username,
+          }
         );
-        // The userHandle must map to a username, not a sub
-        if (username.startsWith("s|")) {
-          debug?.(
-            "Credential userHandle isn't a username. In order to use the username as userHandle, so users can sign in without typing their username, usernames must be opaque"
-          );
-          throw new Error("Username is required for initiating sign-in");
-        }
-        // remove (potential) prefix to recover username
-        username = username.replace(/^u\|/, "");
-        debug?.(
-          `Proceeding with discovered credential for username: ${username} (b64: ${fido2credential.userHandleB64})`
-        );
-        debug?.(`Invoking initiateAuth ...`);
-        existingDeviceKey = await retrieveDeviceKey(username);
-        const initAuthResponse = await initiateAuth({
-          authflow: "CUSTOM_AUTH",
-          authParameters: {
-            USERNAME: username,
-            ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
-          },
-          abort: abort.signal,
-        });
-        debug?.(`Response from initiateAuth:`, initAuthResponse);
-        assertIsChallengeResponse(initAuthResponse);
-        session = initAuthResponse.Session;
       }
+
+      username = preparedSignIn.username;
       statusCb?.("COMPLETING_SIGN_IN_WITH_FIDO2");
       debug?.(`Invoking respondToAuthChallenge ...`);
       const challengeResponses: Record<string, string> = {
-        ANSWER: JSON.stringify(fido2credential),
+        ANSWER: JSON.stringify(preparedSignIn.credential),
         USERNAME: username,
-        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
+        ...(preparedSignIn.existingDeviceKey
+          ? { DEVICE_KEY: preparedSignIn.existingDeviceKey }
+          : {}),
       };
       const authResult = await respondToAuthChallenge({
         challengeName: "CUSTOM_CHALLENGE",
@@ -1006,7 +1099,7 @@ export function authenticateWithFido2({
           ...clientMetadata,
           signInMethod: "FIDO2",
         },
-        session: session,
+        session: preparedSignIn.session,
         abort: abort.signal,
       });
 
@@ -1040,8 +1133,11 @@ export function authenticateWithFido2({
         );
 
         // Pre-create a device handler if we know the device key; if not, handleAuthResponse will create one lazily
-        const deviceHandler = existingDeviceKey
-          ? await createDeviceSrpAuthHandler(username, existingDeviceKey)
+        const deviceHandler = preparedSignIn.existingDeviceKey
+          ? await createDeviceSrpAuthHandler(
+              username,
+              preparedSignIn.existingDeviceKey
+            )
           : undefined;
 
         tokens = await handleAuthResponse({
