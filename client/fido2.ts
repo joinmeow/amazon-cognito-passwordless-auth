@@ -1072,6 +1072,16 @@ export function authenticateWithFido2({
           signal: abort.signal,
         }));
 
+      if (username && username !== preparedSignIn.username) {
+        throw new Fido2ValidationError(
+          `Prepared credentials belong to username "${preparedSignIn.username}" but "${username}" was provided. Omit the username parameter or ensure it matches.`,
+          {
+            providedUsername: username,
+            preparedUsername: preparedSignIn.username,
+          }
+        );
+      }
+
       username = preparedSignIn.username;
       statusCb?.("COMPLETING_SIGN_IN_WITH_FIDO2");
       debug?.(`Invoking respondToAuthChallenge ...`);

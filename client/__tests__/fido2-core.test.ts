@@ -13,7 +13,11 @@
  * language governing permissions and limitations under the License.
  */
 
-import { fido2getCredential, prepareFido2SignIn } from "../fido2.js";
+import {
+  fido2getCredential,
+  prepareFido2SignIn,
+  authenticateWithFido2,
+} from "../fido2.js";
 import { configure } from "../config.js";
 import { Fido2CredentialError, Fido2ValidationError } from "../errors.js";
 import {
@@ -535,6 +539,31 @@ describe("FIDO2 Core Functionality", () => {
 
       await expect(prepareFido2SignIn({ credentialGetter })).rejects.toThrow(
         "Username is required for initiating sign-in"
+      );
+    });
+
+    it("rejects authenticateWithFido2 when provided username mismatches prepared bundle", async () => {
+      const prepared = {
+        username: "bundle-user",
+        session: "mock-session",
+        credential: {
+          credentialIdB64: "cred-id",
+          authenticatorDataB64: "auth-data",
+          clientDataJSON_B64: "client-data",
+          signatureB64: "sig",
+          userHandleB64: null,
+        },
+      };
+
+      mockConfigure.mockReturnValue({ ...baseConfig });
+
+      const result = authenticateWithFido2({
+        username: "provided-user",
+        prepared,
+      });
+
+      await expect(result.signedIn).rejects.toThrow(
+        /Prepared credentials belong to username/
       );
     });
   });
