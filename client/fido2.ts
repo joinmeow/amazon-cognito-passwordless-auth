@@ -915,7 +915,7 @@ export async function prepareFido2SignIn({
 
   let resolvedUsername = username;
   let existingDeviceKey: string | undefined;
-  let session: string;
+  let session: string | undefined;
   let assertion: ParsedFido2Assertion;
 
   // ✅ Flow 1: Username provided - Use fast username-based passkey flow
@@ -986,7 +986,15 @@ export async function prepareFido2SignIn({
       userVerification:
         fido2.authenticatorSelection?.userVerification ??
         fido2options.userVerification,
-      credentials: credentials ?? fido2options.credentials,
+      // Merge server credentials with client-provided credentials (same as username flow)
+      credentials: (fido2options.credentials ?? []).concat(
+        credentials?.filter(
+          (cred) =>
+            !fido2options.credentials?.find(
+              (optionsCred) => cred.id === optionsCred.id
+            )
+        ) ?? []
+      ),
       mediation,
       signal,
     });
