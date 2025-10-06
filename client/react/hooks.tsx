@@ -21,7 +21,9 @@ import {
   fido2UpdateCredential,
   StoredCredential,
   authenticateWithFido2,
+  prepareFido2SignIn as prepareFido2SignInCore,
 } from "../fido2.js";
+import type { PreparedFido2SignIn } from "../fido2.js";
 import { authenticateWithSRP } from "../srp.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
@@ -1394,12 +1396,39 @@ function _usePasswordless() {
       );
       return signingOut;
     },
+    /** Prepare a FIDO2 assertion without completing authentication */
+    prepareFido2SignIn: ({
+      username,
+      credentials,
+      mediation,
+      signal,
+    }: {
+      /** Username, alias (e-mail, phone number) */
+      username?: string;
+      credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
+      /**
+       * WebAuthn mediation mode ('conditional' for autofill, 'immediate' for smart sign-in button)
+       * @see fido2.ts prepareFido2SignIn() for detailed documentation
+       */
+      mediation?: "conditional" | "immediate";
+      signal?: AbortSignal;
+    } = {}): Promise<PreparedFido2SignIn> => {
+      const { debug } = configure();
+      debug?.("Preparing FIDO2 sign-in (hook)");
+      return prepareFido2SignInCore({
+        username,
+        credentials,
+        mediation,
+        signal,
+      });
+    },
     /** Sign in with FIDO2 (e.g. Face ID or Touch) */
     authenticateWithFido2: ({
       username,
       credentials,
       clientMetadata,
       mediation,
+      prepared,
     }: {
       /** Username, alias (e-mail, phone number) */
       username?: string;
@@ -1410,6 +1439,11 @@ function _usePasswordless() {
        * @see fido2.ts authenticateWithFido2() for detailed documentation
        */
       mediation?: "conditional" | "immediate";
+      /**
+       * Optional prepared bundle returned by `prepareFido2SignIn`.
+       * Pass this to skip re-requesting the WebAuthn assertion.
+       */
+      prepared?: PreparedFido2SignIn;
     } = {}) => {
       const { debug } = configure();
       debug?.("Starting FIDO2 sign-in (hook)");
@@ -1420,6 +1454,7 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         mediation,
+        prepared,
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens) => {
           // 1) Update tokens in state and deviceKey

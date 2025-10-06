@@ -49,6 +49,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 ```tsx
 const {
   /* sign-in */
+  prepareFido2SignIn,
   authenticateWithFido2,
   authenticateWithSRP,
   authenticateWithPlaintextPassword,
@@ -99,6 +100,8 @@ Below diagrams mirror the actual TypeScript implementation in `client/`. Dashed 
 
 ### 3.1 FIDO2 / WebAuthn
 
+Use `prepareFido2SignIn()` when you want to run the WebAuthn prompt ahead of time – for example, on page load to trigger the browser's passkey autofill. The function returns the fully parsed assertion, Cognito session token, and existing device key (if any). When you're ready to finish authentication, pass that bundle straight into `authenticateWithFido2({ prepared })` to reuse the assertion without re-triggering the browser UI. If you skip the preparation step, `authenticateWithFido2()` will call WebAuthn itself just like before.
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -127,17 +130,28 @@ import { detectMediationCapabilities } from "@joinmeow/cognito-passwordless-auth
 import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
 
 function AutofillSignInButton() {
-  const { authenticateWithFido2 } = usePasswordless();
+  const { prepareFido2SignIn, authenticateWithFido2 } = usePasswordless();
 
   useEffect(() => {
     (async () => {
       const { conditional } = await detectMediationCapabilities();
       if (!conditional) return;
 
-      // Start conditional mediation on page load (autofill UI)
-      authenticateWithFido2({ mediation: "conditional" });
+      try {
+        // Kick off WebAuthn via conditional mediation without completing auth yet.
+        const prepared = await prepareFido2SignIn({ mediation: "conditional" });
+
+        // User selected a passkey – finish sign-in using the prepared assertion.
+        authenticateWithFido2({ prepared });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "NotAllowedError") {
+          // User ignored the autofill UI – fall back gracefully.
+          return;
+        }
+        console.error("Conditional mediation failed", error);
+      }
     })();
-  }, [authenticateWithFido2]);
+  }, [prepareFido2SignIn, authenticateWithFido2]);
 
   return (
     <button onClick={() => authenticateWithFido2({ mediation: "immediate" })}>
