@@ -1062,6 +1062,8 @@ function _usePasswordless() {
         // falsely disabling security-gated UI. Log for debugging.
         const { debug } = configure();
         debug?.("getUser failed; retaining previous TOTP MFA status");
+        // Ensure UI never hangs behind a loader due to a transient failure
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       });
 
     return () => {
@@ -1766,6 +1768,8 @@ function _usePasswordless() {
       } catch (error) {
         const { debug } = configure();
         debug?.("refreshTotpMfaStatus failed; not marking ready");
+        // Make the current (last-known) status consumable by the UI
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       }
     },
     /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
