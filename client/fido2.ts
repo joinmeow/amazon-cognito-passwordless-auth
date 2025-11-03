@@ -718,7 +718,14 @@ export async function fido2getCredential({
       );
     }
   }
-  // Immediate mediation uses parameters as-is (no overrides needed)
+  // For any mediation mode, rely on browser-managed timeout semantics
+  if (mediation && effectiveTimeout !== undefined) {
+    debug?.(
+      `⚠️ Ignoring timeout ${effectiveTimeout}ms for mediation="${mediation}". ` +
+        "WebAuthn mediation flows rely on browser defaults."
+    );
+    effectiveTimeout = undefined;
+  }
 
   const publicKey: CredentialRequestOptions["publicKey"] = {
     challenge: bufferFromBase64Url(challenge),
@@ -951,7 +958,7 @@ export async function prepareFido2SignIn({
     assertion = await credentialGetter({
       ...fido2options,
       relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-      timeout: fido2.timeout ?? fido2options.timeout,
+      timeout: mediation ? undefined : fido2.timeout ?? fido2options.timeout,
       userVerification:
         fido2.authenticatorSelection?.userVerification ??
         fido2options.userVerification,
@@ -982,7 +989,7 @@ export async function prepareFido2SignIn({
     assertion = await credentialGetter({
       ...fido2options,
       relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-      timeout: fido2.timeout ?? fido2options.timeout,
+      timeout: mediation ? undefined : fido2.timeout ?? fido2options.timeout,
       userVerification:
         fido2.authenticatorSelection?.userVerification ??
         fido2options.userVerification,
@@ -1088,7 +1095,7 @@ export function authenticateWithFido2({
    * - Passkeys appear in browser autofill suggestions
    * - "Set and forget" - only resolves if user selects from autofill
    * - userVerification automatically set to "preferred"
-   * - timeout removed (per WebAuthn spec)
+   * - Timeout ignored (per WebAuthn spec - browser default applies)
    * - Requires: HTML input with autocomplete="username webauthn"
    *
    * **'immediate'** - Frictionless Sign-In Button:
@@ -1096,6 +1103,7 @@ export function authenticateWithFido2({
    * - Fails fast with NotAllowedError if no local credentials
    * - Enables intelligent fallback to password forms
    * - No cross-device/QR code prompts
+   * - Timeout ignored (browser default applies)
    * - Requires: User gesture (button click)
    *
    * Usage patterns:

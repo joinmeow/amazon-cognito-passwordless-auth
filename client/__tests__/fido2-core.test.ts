@@ -257,6 +257,28 @@ describe("FIDO2 Core Functionality", () => {
       );
     });
 
+    it("omits timeout when mediation is specified", async () => {
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+
+      cleanup = setupWebAuthnMock({
+        customCredentials: {
+          get: getSpy,
+          create: jest.fn(),
+        } as any,
+      });
+
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        timeout: 45000,
+        mediation: "immediate",
+      });
+
+      expect(getSpy).toHaveBeenCalledTimes(1);
+      const callArgs = getSpy.mock.calls[0][0];
+      expect(callArgs.mediation).toBe("immediate");
+      expect(callArgs.publicKey.timeout).toBeUndefined();
+    });
+
     it("uses config extensions when available with known values", async () => {
       const knownExtensions = {
         credProps: true,
@@ -407,7 +429,7 @@ describe("FIDO2 Core Functionality", () => {
       const credentialGetterArgs = credentialGetter.mock.calls[0][0];
       expect(credentialGetterArgs.challenge).toBe("server-challenge");
       expect(credentialGetterArgs.relyingPartyId).toBe(TEST_RP.id);
-      expect(credentialGetterArgs.timeout).toBe(baseConfig.fido2.timeout);
+      expect(credentialGetterArgs.timeout).toBeUndefined();
       expect(credentialGetterArgs.userVerification).toBe(
         baseConfig.fido2.authenticatorSelection.userVerification
       );

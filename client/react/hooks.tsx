@@ -421,6 +421,7 @@ function _usePasswordless() {
     fido2Credentials,
     deviceKey,
     isRefreshingTokens,
+    recheckSignInStatus,
     authMethod,
     totpMfaStatus,
     mfaStatusReady,
@@ -1055,19 +1056,22 @@ function _usePasswordless() {
           dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (abortController.signal.aborted) return;
 
         // On error we keep the previously known MFA status to avoid
         // falsely disabling security-gated UI. Log for debugging.
         const { debug } = configure();
-        debug?.("getUser failed; retaining previous TOTP MFA status");
+        debug?.("getUser failed; retaining previous TOTP MFA status", error);
+        lastFetchedMfaTokenRef.current = undefined;
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
       });
 
     return () => {
       abortController.abort();
     };
-  }, [isSignedIn, tokens?.accessToken]);
+  }, [isSignedIn, tokens?.accessToken, recheckSignInStatus]);
 
   useEffect(() => {
     const { debug } = configure();
@@ -1765,7 +1769,8 @@ function _usePasswordless() {
         }
       } catch (error) {
         const { debug } = configure();
-        debug?.("refreshTotpMfaStatus failed; not marking ready");
+        debug?.("refreshTotpMfaStatus failed; not marking ready", error);
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       }
     },
     /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */

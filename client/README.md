@@ -47,6 +47,8 @@ configure({
 });
 ```
 
+> Note: When WebAuthn mediation is used (for example `conditional` or `immediate`), the configured FIDO2 `timeout` is ignored and the browser's default mediation behavior determines timing.
+
 ### Sign Up
 
 If your User Pool is enabled for self sign-up, users can sign up like so:
