@@ -421,6 +421,7 @@ function _usePasswordless() {
     fido2Credentials,
     deviceKey,
     isRefreshingTokens,
+    recheckSignInStatus,
     authMethod,
     totpMfaStatus,
     mfaStatusReady,
@@ -625,6 +626,10 @@ function _usePasswordless() {
   // Track which accessToken we have already used for GetUser, so we only
   // fetch MFA status once per token rotation (per page load).
   const lastFetchedMfaTokenRef = useRef<string | undefined>();
+  // Silent retry timer for MFA status fetch
+  const mfaRetryTimeoutRef = useRef<
+    ReturnType<typeof setTimeout> | undefined
+  >();
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -1042,6 +1047,11 @@ function _usePasswordless() {
             },
           });
           dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          // Successful fetch – cancel any scheduled retry
+          if (mfaRetryTimeoutRef.current) {
+            clearTimeout(mfaRetryTimeoutRef.current);
+            mfaRetryTimeoutRef.current = undefined;
+          }
         } else {
           // Default to no MFA
           dispatch({
@@ -1053,6 +1063,10 @@ function _usePasswordless() {
             },
           });
           dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          if (mfaRetryTimeoutRef.current) {
+            clearTimeout(mfaRetryTimeoutRef.current);
+            mfaRetryTimeoutRef.current = undefined;
+          }
         }
       })
       .catch(() => {
@@ -1062,12 +1076,30 @@ function _usePasswordless() {
         // falsely disabling security-gated UI. Log for debugging.
         const { debug } = configure();
         debug?.("getUser failed; retaining previous TOTP MFA status");
+        // Ensure UI never hangs behind a loader due to a transient failure
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        // Schedule a simple early silent retry with jitter (6–8s)
+        if (mfaRetryTimeoutRef.current) {
+          clearTimeout(mfaRetryTimeoutRef.current);
+          mfaRetryTimeoutRef.current = undefined;
+        }
+        const jitterMs = 6000 + Math.floor(Math.random() * 2000);
+        mfaRetryTimeoutRef.current = setTimeout(() => {
+          // Clear token guard so the effect can try again
+          lastFetchedMfaTokenRef.current = undefined;
+          // Nudge a re-run
+          dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+        }, jitterMs);
       });
 
     return () => {
       abortController.abort();
+      if (mfaRetryTimeoutRef.current) {
+        clearTimeout(mfaRetryTimeoutRef.current);
+        mfaRetryTimeoutRef.current = undefined;
+      }
     };
-  }, [isSignedIn, tokens?.accessToken]);
+  }, [isSignedIn, tokens?.accessToken, recheckSignInStatus]);
 
   useEffect(() => {
     const { debug } = configure();
@@ -1766,6 +1798,8 @@ function _usePasswordless() {
       } catch (error) {
         const { debug } = configure();
         debug?.("refreshTotpMfaStatus failed; not marking ready");
+        // Make the current (last-known) status consumable by the UI
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       }
     },
     /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
