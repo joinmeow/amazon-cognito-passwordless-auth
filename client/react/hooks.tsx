@@ -1078,12 +1078,12 @@ function _usePasswordless() {
         debug?.("getUser failed; retaining previous TOTP MFA status");
         // Ensure UI never hangs behind a loader due to a transient failure
         dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
-        // Schedule a silent retry with basic backoff + jitter (15–25s)
+        // Schedule a simple early silent retry with jitter (6–8s)
         if (mfaRetryTimeoutRef.current) {
           clearTimeout(mfaRetryTimeoutRef.current);
           mfaRetryTimeoutRef.current = undefined;
         }
-        const jitterMs = 15000 + Math.floor(Math.random() * 10000);
+        const jitterMs = 6000 + Math.floor(Math.random() * 2000);
         mfaRetryTimeoutRef.current = setTimeout(() => {
           // Clear token guard so the effect can try again
           lastFetchedMfaTokenRef.current = undefined;
