@@ -738,12 +738,30 @@ function _usePasswordless() {
 
     // Check for OAuth callback
     const checkOAuthCallback = async () => {
-      const urlParams = new URLSearchParams(globalThis.location.search);
-      const hashParams = new URLSearchParams(
-        globalThis.location.hash.substring(1)
+      const safeParams = (s: unknown) => {
+        try {
+          return new URLSearchParams(typeof s === "string" ? s : "");
+        } catch {
+          return new URLSearchParams("");
+        }
+      };
+
+      const urlParams = safeParams(globalThis?.location?.search ?? "");
+      const rawHash = globalThis?.location?.hash ?? "";
+      const hashParams = safeParams(
+        typeof rawHash === "string"
+          ? rawHash.startsWith("#")
+            ? rawHash.slice(1)
+            : rawHash
+          : ""
       );
 
-      if (urlParams.has("code") || hashParams.has("access_token")) {
+      const hasCode =
+        typeof urlParams.has === "function" && urlParams.has("code");
+      const hasAccessToken =
+        typeof hashParams.has === "function" && hashParams.has("access_token");
+
+      if (hasCode || hasAccessToken) {
         // Prevent multiple simultaneous OAuth callback processing
         if (oauthProcessingRef.current) {
           debug?.("OAuth callback already being processed, skipping...");

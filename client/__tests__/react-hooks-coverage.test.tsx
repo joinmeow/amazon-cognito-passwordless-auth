@@ -161,6 +161,73 @@ describe("React hooks coverage for hooks.tsx branches", () => {
     globalThis.history?.replaceState?.({}, "", originalHref);
   });
 
+  it("gracefully handles malformed location search/hash values without throwing", async () => {
+    mockRetrieveTokens.mockResolvedValue(undefined);
+    const OriginalURLSearchParams = globalThis.URLSearchParams;
+    const originalHref = globalThis.location.href;
+    const ctorMock = jest.fn((arg: any) => {
+      if (typeof arg === "string" && arg.length > 0) {
+        throw new Error("URLSearchParams failed");
+      }
+      return new OriginalURLSearchParams(arg);
+    });
+
+    try {
+      // Simulate a broken polyfill that throws for non-empty strings
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).URLSearchParams = ctorMock;
+      globalThis.history?.replaceState?.({}, "", "/bad");
+
+      const wrapper = makeWrapper();
+      const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      expect(mockHandleOAuth).not.toHaveBeenCalled();
+      expect(result.current.signInStatus).toBe("NOT_SIGNED_IN");
+    } finally {
+      // Restore globals
+      (globalThis as any).URLSearchParams = OriginalURLSearchParams;
+      globalThis.history?.replaceState?.({}, "", originalHref);
+    }
+  });
+
+  it("detects access_token in hash even with leading # and processes OAuth callback", async () => {
+    mockRetrieveTokens.mockResolvedValue(undefined);
+    const processed = {
+      accessToken: "hash-access-token",
+      idToken: "hash-id-token",
+      refreshToken: "hash-refresh-token",
+      expireAt: new Date(Date.now() + 3600_000),
+      username: "hash-user",
+      authMethod: "REDIRECT" as const,
+    };
+    mockHandleOAuth.mockResolvedValue(processed);
+
+    const originalHref = globalThis.location?.href || "";
+    globalThis.history?.replaceState?.(
+      {},
+      "",
+      "/signin-redirect#access_token=hash-access-token&state=abc"
+    );
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(mockHandleOAuth).toHaveBeenCalledTimes(1);
+    expect(result.current.signInStatus).toBe("SIGNED_IN");
+    expect(result.current.tokens?.accessToken).toBe("hash-access-token");
+
+    // Restore original location and URL
+    globalThis.history?.replaceState?.({}, "", originalHref);
+  });
+
   it("renders error fallback via PasswordlessErrorBoundary when child throws", async () => {
     const debugSpy = jest.fn();
     mockConfigure.mockReturnValue({
