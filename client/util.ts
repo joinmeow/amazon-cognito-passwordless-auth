@@ -56,6 +56,28 @@ export function parseJwtPayload<
 }
 
 /**
+ * Compute the client clock drift (in ms) at the moment a token is received:
+ * the local wall clock minus the access token's server-issued `iat` claim.
+ *
+ * Positive => the device clock is AHEAD of server time (the case that makes a
+ * freshly-issued token look already-expired and forces a logout loop). This is
+ * anchored at receipt (when `iat` ≈ server "now"), so it measures the clock
+ * offset, not the token's age. Returns 0 when it can't be determined, which
+ * preserves the previous (uncorrected) behavior. Mirrors the `clockDrift` that
+ * AWS Cognito's CognitoUserSession computes for its `isValid()` check.
+ */
+export function computeClockDriftMs(accessToken?: string): number {
+  if (!accessToken) return 0;
+  try {
+    const { iat } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+    if (typeof iat !== "number" || !Number.isFinite(iat) || iat <= 0) return 0;
+    return Date.now() - iat * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Schedule a callback once, like setTimeout, but count
  * time spent sleeping also as time spent. This way, if the browser tab
  * where this is happening is activated again after sleeping,

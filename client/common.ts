@@ -28,6 +28,7 @@ import {
   busyState,
 } from "./model.js";
 import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
+import { computeClockDriftMs } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
@@ -154,6 +155,34 @@ async function processTokensInternal(
 
   // 2. Store tokens for persistence
   debug?.("🔄 [Process Tokens] Storing tokens for persistence");
+
+  // Capture client clock drift at token receipt. The access token's `iat` is
+  // server-trusted and "now" here ≈ receipt time, so this measures the device's
+  // clock offset (not the token's age). Persisting it lets token expiry be
+  // evaluated against a skew-corrected clock, so a wrong device clock can't make
+  // freshly-issued tokens look expired and trap the user in a logout loop.
+  const clockDriftMs = computeClockDriftMs(normalizedTokens.accessToken);
+  normalizedTokens.clockDriftMs = clockDriftMs;
+  const { clockSkewWarningThresholdMs, onClockSkewDetected } = configure();
+  const skewThresholdMs = clockSkewWarningThresholdMs ?? 5 * 60 * 1000;
+  if (Math.abs(clockDriftMs) > skewThresholdMs) {
+    debug?.(
+      `⏰ [Process Tokens] Client clock skew detected: ~${Math.round(
+        clockDriftMs / 1000
+      )}s vs server (threshold ${Math.round(
+        skewThresholdMs / 1000
+      )}s). Token expiry will be evaluated against a corrected clock.`
+    );
+    try {
+      onClockSkewDetected?.({
+        clockDriftMs,
+        thresholdMs: skewThresholdMs,
+        username: normalizedTokens.username,
+      });
+    } catch (err) {
+      debug?.("[Process Tokens] onClockSkewDetected callback threw:", err);
+    }
+  }
 
   // Store the already normalized tokens
   await storeTokens(normalizedTokens);

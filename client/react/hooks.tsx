@@ -911,8 +911,10 @@ function _usePasswordless() {
     // No tokens = not signed in
     if (!expiresAt) return "NOT_SIGNED_IN";
 
-    // Check if tokens are expired
-    const now = Date.now();
+    // Check if tokens are expired, against a skew-corrected clock: a wrong
+    // device clock must not make valid, freshly-issued tokens look expired
+    // (which would bounce the user straight back to sign-in).
+    const now = Date.now() - (tokens?.clockDriftMs ?? 0);
     const expireAtTime =
       expiresAt instanceof Date
         ? expiresAt.valueOf()
@@ -944,6 +946,7 @@ function _usePasswordless() {
     initiallyRetrievingTokensFromStorage,
     signingInStatus,
     tokens?.expireAt,
+    tokens?.clockDriftMs,
     tokensParsed?.expireAt,
     isRefreshingTokens,
   ]);

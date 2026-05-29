@@ -40,6 +40,12 @@ export interface TokensToStore {
    * Helps the refresh mechanism determine how to refresh tokens
    */
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  /**
+   * Client clock drift (ms) captured at token receipt (local time minus the
+   * access token's `iat`). Persisted so token expiry can be evaluated against
+   * a skew-corrected clock. Absent => treated as 0 (previous behavior).
+   */
+  clockDriftMs?: number;
 }
 export interface TokensFromStorage {
   accessToken?: string;
@@ -50,6 +56,8 @@ export interface TokensFromStorage {
   deviceKey?: string;
   /** The authentication method used with these tokens */
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  /** Client clock drift (ms) captured at token receipt; 0 when unknown. */
+  clockDriftMs?: number;
 }
 
 /**
@@ -89,6 +97,21 @@ export async function retrieveAuthMethod(
   }
 
   return undefined;
+}
+
+/**
+ * Retrieve the client clock drift (ms) captured at the last token receipt.
+ * Returns 0 when not present (e.g. legacy tokens stored before this field
+ * existed), preserving the prior uncorrected behavior for those.
+ */
+export async function retrieveClockDriftMs(username: string): Promise<number> {
+  if (!username) return 0;
+  const { clientId, storage } = configure();
+  const key = `CognitoIdentityServiceProvider.${clientId}.${username}.clockDriftMs`;
+  const raw = await storage.getItem(key);
+  if (!raw) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export async function storeTokens(tokens: TokensToStore) {
@@ -210,6 +233,21 @@ export async function storeTokens(tokens: TokensToStore) {
     )
   );
 
+  // Persist the clock drift captured at token receipt so expiry can later be
+  // evaluated against a skew-corrected clock (see retrieveTokens). Only written
+  // when known, so legacy/test paths that don't set it default to 0.
+  if (
+    typeof tokens.clockDriftMs === "number" &&
+    Number.isFinite(tokens.clockDriftMs)
+  ) {
+    promises.push(
+      storage.setItem(
+        `${amplifyKeyPrefix}.${username}.clockDriftMs`,
+        String(Math.round(tokens.clockDriftMs))
+      )
+    );
+  }
+
   // --------- 6. Execute writes ---------
   await Promise.all(promises.filter(Boolean));
 
@@ -246,8 +284,14 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     }
   }
 
+  // Evaluate expiry against a skew-corrected "now" (local clock minus the drift
+  // captured at token receipt). This prevents a wrong device clock from making
+  // valid, freshly-issued tokens look expired and dropping the whole session.
+  const clockDriftMs = await retrieveClockDriftMs(username);
+  const correctedNow = Date.now() - clockDriftMs;
+
   // Safety-net: if we don't have a valid future expiry timestamp, discard all tokens
-  if (!expireAtDate || expireAtDate.valueOf() <= Date.now()) {
+  if (!expireAtDate || expireAtDate.valueOf() <= correctedNow) {
     debug?.(
       "[retrieveTokens] Tokens missing valid future expiry. Dropping cached tokens."
     );
@@ -268,6 +312,7 @@ export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
     username,
     deviceKey,
     authMethod,
+    clockDriftMs,
   };
 }
 
@@ -327,6 +372,7 @@ export async function retrieveTokensForRefresh(): Promise<
   // Get device key and auth method
   const deviceKey = await retrieveDeviceKey(username);
   const authMethod = await retrieveAuthMethod(username);
+  const clockDriftMs = await retrieveClockDriftMs(username);
 
   return {
     idToken: idToken ?? undefined,
@@ -336,6 +382,7 @@ export async function retrieveTokensForRefresh(): Promise<
     username,
     deviceKey,
     authMethod,
+    clockDriftMs,
   };
 }
 

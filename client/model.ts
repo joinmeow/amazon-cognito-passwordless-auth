@@ -34,6 +34,12 @@ export interface TokensFromSignIn {
    * Used for token refresh to determine how to refresh tokens
    */
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  /**
+   * Client clock drift (ms) measured at token receipt: local time minus the
+   * access token's `iat`. Positive => device clock is ahead of server time.
+   * Used to evaluate token expiry against a skew-corrected clock.
+   */
+  clockDriftMs?: number;
 }
 export interface TokensFromRefresh {
   accessToken: string;
@@ -51,6 +57,12 @@ export interface TokensFromRefresh {
    * Used for token refresh to determine how to refresh tokens
    */
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  /**
+   * Client clock drift (ms) measured at token receipt: local time minus the
+   * access token's `iat`. Positive => device clock is ahead of server time.
+   * Used to evaluate token expiry against a skew-corrected clock.
+   */
+  clockDriftMs?: number;
 }
 
 export const busyState = [
