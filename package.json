@@ -130,7 +130,6 @@
     "hosted-oauth.d.ts"
   ],
   "dependencies": {
-    "@aws-sdk/client-cognito-identity-provider": "^3.598.0",
     "aws-jwt-verify": "^4.0.1",
     "cbor": "^9.0.2"
   },
