@@ -308,7 +308,10 @@ async function scheduleRefreshUnlocked({
     clearExistingTimer();
 
     const tokenExpiryTime = tokens.expireAt.valueOf();
-    const currentTime = Date.now();
+    // Evaluate against a skew-corrected clock (local time minus the drift
+    // captured at receipt) so a wrong device clock doesn't make us treat valid
+    // tokens as already-expired and refresh in a tight loop.
+    const currentTime = Date.now() - (tokens.clockDriftMs ?? 0);
     const timeUntilExpiry = tokenExpiryTime - currentTime;
 
     // If token is already expired or expires very soon, refresh immediately
@@ -879,6 +882,11 @@ export async function refreshTokens({
             }),
             ...(currentTokens.authMethod && {
               authMethod: currentTokens.authMethod,
+            }),
+            // Carry over the clock drift persisted by the tab that refreshed,
+            // so the skew-corrected expiry check stays correct in this tab too.
+            ...(currentTokens.clockDriftMs !== undefined && {
+              clockDriftMs: currentTokens.clockDriftMs,
             }),
           };
 

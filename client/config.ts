@@ -58,6 +58,26 @@ export interface Config {
      */
     useActivityTracking?: boolean;
   };
+  /**
+   * Threshold (ms) of client-vs-server clock drift above which
+   * `onClockSkewDetected` is invoked. Drift is measured at token receipt from
+   * the access token's `iat` claim. Token validity is always corrected for
+   * drift regardless of this threshold; this only gates the warning callback.
+   * Default: 300000 (5 minutes).
+   */
+  clockSkewWarningThresholdMs?: number;
+  /**
+   * Called when the device clock differs from server time by more than
+   * `clockSkewWarningThresholdMs`. Use this to warn the user that their device
+   * clock is wrong. Without it the skew is corrected silently for token
+   * validity, but a badly wrong clock can still cause confusing behavior
+   * elsewhere, so surfacing it lets the user fix the root cause.
+   */
+  onClockSkewDetected?: (info: {
+    clockDriftMs: number;
+    thresholdMs: number;
+    username?: string;
+  }) => void;
   /** FIDO2 (WebAuthn) configuration */
   fido2?: {
     /** The base URL (i.e. the URL with path "/") of your FIDO2 API */
