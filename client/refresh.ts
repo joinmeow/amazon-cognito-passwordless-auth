@@ -883,6 +883,11 @@ export async function refreshTokens({
             ...(currentTokens.authMethod && {
               authMethod: currentTokens.authMethod,
             }),
+            // Carry over the clock drift persisted by the tab that refreshed,
+            // so the skew-corrected expiry check stays correct in this tab too.
+            ...(currentTokens.clockDriftMs !== undefined && {
+              clockDriftMs: currentTokens.clockDriftMs,
+            }),
           };
 
           if (tokensCb) {

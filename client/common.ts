@@ -417,6 +417,9 @@ export const signOut = (props?: {
           ),
           storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.userData`),
           storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
+          storage.removeItem(
+            `${amplifyKeyPrefix}.${tokens.username}.clockDriftMs`
+          ),
           storage.removeItem(`${customKeyPrefix}.${tokens.username}.expireAt`),
           storage.removeItem(
             `Passwordless.${clientId}.${tokens.username}.refreshingTokens`

@@ -21,6 +21,7 @@ Object.assign(globalThis, {
 
 import { configure } from "../client/config.js";
 import { storeTokens, retrieveTokens } from "../client/storage.js";
+import { signOut } from "../client/common.js";
 import { computeClockDriftMs } from "../client/util.js";
 
 const HOUR = 3600_000;
@@ -149,6 +150,34 @@ describe("client clock-skew tolerance", () => {
       const retrieved = await retrieveTokens();
       expect(retrieved).toBeDefined();
       expect(retrieved?.clockDriftMs).toBe(0);
+    });
+  });
+
+  describe("sign-out cleanup", () => {
+    test("removes the persisted clockDriftMs key on sign-out", async () => {
+      const now = Date.now();
+      await storeTokens({
+        accessToken: createJWT({
+          sub: "u",
+          username: "souser",
+          iat: Math.floor(now / 1000),
+          exp: Math.floor((now + HOUR) / 1000),
+        }),
+        refreshToken: "r",
+        username: "souser",
+        expireAt: new Date(now + HOUR),
+        clockDriftMs: 2 * HOUR,
+      });
+
+      const { storage } = configure();
+      const driftKey =
+        "CognitoIdentityServiceProvider.testClient.souser.clockDriftMs";
+      expect(await storage.getItem(driftKey)).not.toBeNull();
+
+      const { signedOut } = signOut({ skipTokenRevocation: true });
+      await signedOut;
+
+      expect(await storage.getItem(driftKey)).toBeNull();
     });
   });
 });
