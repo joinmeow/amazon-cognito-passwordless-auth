@@ -29,14 +29,19 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Node.js
-        # Node >= 22.14 is required for npm Trusted Publishing (OIDC)
+        # Node >= 22.14 is required for npm Trusted Publishing (OIDC).
+        # No registry-url on purpose: with it, setup-node writes an empty
+        # `_authToken=` line to .npmrc (NODE_AUTH_TOKEN is unset), which npm
+        # treats as "auth configured" and skips the OIDC exchange. Publishing to
+        # the default registry (registry.npmjs.org) lets OIDC handle auth.
         uses: actions/setup-node@v4
         with:
           node-version: "22.x"
-          registry-url: https://registry.npmjs.org/
       - name: Upgrade npm for Trusted Publishing
-        # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 still ships npm 10.x
-        run: npm install -g npm@latest
+        # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 still ships npm 10.x.
+        # Pinned (not @latest) to avoid a mutable dependency on the privileged
+        # publish path.
+        run: npm install -g npm@11.5.1
       - name: Configure Git
         run: |
           git config --local user.email "action@github.com"
