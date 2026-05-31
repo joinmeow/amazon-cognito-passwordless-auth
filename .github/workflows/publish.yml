@@ -77,21 +77,35 @@ jobs:
       # Provenance attestations are generated automatically.
       - run: npm publish
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.new_version }}
-          name: v${{ steps.version.outputs.new_version }}
-          body: |
-            ## What's Changed
-            ${{ github.event.inputs.release_notes || 'Version ' }}${{ steps.version.outputs.new_version }} (${{ github.event.inputs.version_bump }} release)
-
-            ### Changes since v${{ steps.version.outputs.current_version }}
-
-            To install this version:
-            ```bash
-            npm install @joinmeow/cognito-passwordless-auth@${{ steps.version.outputs.new_version }}
-            ```
-          draft: false
-          prerelease: false
-          generate_release_notes: ${{ github.event.inputs.release_notes == '' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # Use the pre-installed gh CLI rather than a third-party action: the
+        # repo's Actions allowlist (allowed_actions=selected) blocks
+        # softprops/action-gh-release, which fails the run at startup. Inputs
+        # are passed via env to avoid shell injection from release_notes.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
+          VERSION_BUMP: ${{ github.event.inputs.version_bump }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          {
+            echo "## What's Changed"
+            echo
+            if [ -n "$RELEASE_NOTES" ]; then
+              echo "$RELEASE_NOTES"
+            else
+              echo "Version $NEW_VERSION ($VERSION_BUMP release)"
+            fi
+            echo
+            echo "### Changes since v$CURRENT_VERSION"
+            echo
+            echo "To install this version:"
+            echo '```bash'
+            echo "npm install @joinmeow/cognito-passwordless-auth@$NEW_VERSION"
+            echo '```'
+          } > release_notes.md
+          if [ -z "$RELEASE_NOTES" ]; then
+            gh release create "v$NEW_VERSION" --title "v$NEW_VERSION" --notes-file release_notes.md --generate-notes
+          else
+            gh release create "v$NEW_VERSION" --title "v$NEW_VERSION" --notes-file release_notes.md
+          fi
