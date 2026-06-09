@@ -2092,6 +2092,10 @@ export function useAwaitableState<T>(state: T) {
 
   // Cleanup on unmount
   useEffect(() => {
+    // Mark as mounted (again) — under React StrictMode the effect cleanup
+    // below runs on the simulated unmount, but refs survive the remount,
+    // so we must reset the flag or resolve/reject become permanent no-ops
+    isMounted.current = true;
     return () => {
       isMounted.current = false;
       // Clear references to prevent memory leaks
