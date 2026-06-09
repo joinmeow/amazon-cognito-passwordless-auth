@@ -1,3 +1,23 @@
+// Use the REAL setTimeoutWallClock implementation (client/__tests__/setup.ts
+// mocks it with a plain setTimeout, which would defeat the purpose of these
+// tests). Keep the atob-based parseJwtPayload mock from setup.ts, because the
+// real one relies on TextDecoder which is not available in jsdom.
+jest.mock("../client/util.js", () => {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const actualUtil = jest.requireActual("../client/util.js");
+  return {
+    ...(actualUtil as object),
+    parseJwtPayload: (token: string) => {
+      const [, payload] = token.split(".");
+      if (!payload) {
+        throw new Error("Invalid token format");
+      }
+      const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(base64)) as Record<string, unknown>;
+    },
+  };
+});
+
 import { configure } from "../client/config.js";
 import { scheduleRefresh, cleanupRefreshSystem } from "../client/refresh.js";
 import { storeTokens } from "../client/storage.js";
@@ -16,7 +36,10 @@ const createJWT = (claims: Record<string, unknown>) => {
   return `${header}.${payload}.signature`;
 };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Capture the real setTimeout before MockTimerEnvironment replaces it, so
+// `sleep` waits real time (letting promises/microtasks settle)
+const realSetTimeout = setTimeout;
+const sleep = (ms: number) => new Promise((r) => realSetTimeout(r, ms));
 
 // Mock timer implementation that supports device sleep simulation
 class MockTimerEnvironment {
@@ -319,7 +342,7 @@ describe("Device Sleep/Wake Scenarios", () => {
   });
 
   describe("Timer Reliability", () => {
-    test.skip("should fire refresh timer after device wake if overdue", async () => {
+    test("should fire refresh timer after device wake if overdue", async () => {
       const now = timerEnv.getCurrentTime();
       const expiresIn10Min = new Date(now + 10 * 60 * 1000);
 
@@ -378,6 +401,16 @@ describe("Device Sleep/Wake Scenarios", () => {
       // Wake up - timer is now overdue
       timerEnv.simulateDeviceWake();
       await sleep(200);
+
+      // The refresh timer fires right after wake (this is what's under test),
+      // but the first attempt backs off via the cross-tab coordination check
+      // (the expired tokens are dropped by retrieveTokens) and schedules a
+      // forced retry in 30s. Advance mock time in steps, letting promises
+      // settle in between, so the internal waits and the retry can fire.
+      for (let i = 0; i < 8; i++) {
+        timerEnv.advanceTime(5 * 1000);
+        await sleep(50);
+      }
 
       // Timer should fire and trigger refresh
       expect(fetchMock).toHaveBeenCalled();

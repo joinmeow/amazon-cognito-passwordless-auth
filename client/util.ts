@@ -78,64 +78,68 @@ export function computeClockDriftMs(accessToken?: string): number {
 }
 
 /**
+ * Maximum length of each setTimeout chunk used by setTimeoutWallClock.
+ * Browsers don't reliably credit setTimeout time spent in system sleep,
+ * so we never trust a single setTimeout for more than this long, and
+ * re-check the wall clock on every chunk boundary.
+ */
+const WALL_CLOCK_TIMEOUT_CHUNK_MS = 30 * 1000;
+
+/**
+ * Poll interval used once the remaining time until the deadline is at most
+ * WALL_CLOCK_TIMEOUT_CHUNK_MS. In this final stretch the wall clock is
+ * re-checked every second (mirroring the 1-second polling this util has
+ * always used near the deadline), so that sleeping through the deadline
+ * delays the callback by at most ~1 second after wake, instead of by the
+ * full remainder of one uncredited setTimeout
+ */
+const WALL_CLOCK_FINAL_POLL_MS = 1000;
+
+/**
  * Schedule a callback once, like setTimeout, but count
- * time spent sleeping also as time spent. This way, if the browser tab
- * where this is happening is activated again after sleeping,
- * the callback is run immediately (more precise: within 1 second)
+ * time spent sleeping also as time spent. This is done by tracking a
+ * wall-clock deadline and chaining short setTimeouts (at most 30 seconds
+ * each, at most 1 second each during the final 30 seconds) that re-check
+ * the wall clock upon every wake, and only run the callback when the
+ * wall-clock deadline has truly passed. This way, if the device sleeps past
+ * the deadline, the callback runs within one chunk (at most 30 seconds,
+ * typically much sooner) after waking, instead of waiting out the
+ * remainder of one long setTimeout
  */
 export function setTimeoutWallClock<T>(cb: () => T, ms: number) {
   const executeAt = Date.now() + ms;
-
-  // For short delays (< 30 seconds), use the original approach
-  if (ms < 30000) {
-    const i = setInterval(() => {
-      if (Date.now() >= executeAt) {
-        clearInterval(i);
-        cb();
-      }
-    }, 1000);
-
-    // unref the interval if we can, so that e.g. when running in Node.js
-    // this interval would not block program exit:
-    if (typeof i.unref === "function") i.unref();
-
-    return () => clearInterval(i);
-  }
-
-  // For long delays, use a hybrid approach:
-  // 1. Use setTimeout for most of the delay
-  // 2. Switch to interval checking only in the final 30 seconds
-  const initialDelay = ms - 30000; // All but the last 30 seconds
-  // eslint-disable-next-line prefer-const
-  let timeoutId: ReturnType<typeof setTimeout>;
-  let intervalId: ReturnType<typeof setInterval>;
+  let timer: ReturnType<typeof setTimeout>;
   let cancelled = false;
 
-  const cleanup = () => {
-    cancelled = true;
-    if (timeoutId) clearTimeout(timeoutId);
-    if (intervalId) clearInterval(intervalId);
-  };
-
-  // First phase: use setTimeout for the bulk of the delay
-  timeoutId = setTimeout(() => {
-    if (cancelled) return;
-
-    // Second phase: use interval for the final 30 seconds to handle sleep/wake
-    intervalId = setInterval(() => {
+  const scheduleNextCheck = () => {
+    const remaining = executeAt - Date.now();
+    // Cap every setTimeout: long remainders are chunked at 30 seconds, and
+    // the final stretch is polled at 1 second, so device sleep is always
+    // detected at the next chunk boundary. Delays shorter than the poll
+    // interval are scheduled as-is (e.g. 500 ms fires after 500 ms)
+    const delay =
+      remaining > WALL_CLOCK_TIMEOUT_CHUNK_MS
+        ? WALL_CLOCK_TIMEOUT_CHUNK_MS
+        : Math.min(Math.max(remaining, 0), WALL_CLOCK_FINAL_POLL_MS);
+    timer = setTimeout(() => {
       if (cancelled) return;
       if (Date.now() >= executeAt) {
-        clearInterval(intervalId);
         cb();
+      } else {
+        scheduleNextCheck();
       }
-    }, 1000);
+    }, delay);
 
-    if (typeof intervalId.unref === "function") intervalId.unref();
-  }, initialDelay);
+    // unref the timer if we can, so that e.g. when running in Node.js
+    // this timer would not block program exit:
+    if (typeof timer.unref === "function") timer.unref();
+  };
+  scheduleNextCheck();
 
-  if (typeof timeoutId.unref === "function") timeoutId.unref();
-
-  return cleanup;
+  return () => {
+    cancelled = true;
+    clearTimeout(timer);
+  };
 }
 
 export function currentBrowserLocationWithoutFragmentIdentifier() {
