@@ -257,6 +257,136 @@ describe("OAuth Integration with processTokens", () => {
       expect(result).toEqual(processedTokens);
     });
 
+    it("should surface IdP errors delivered in the URL fragment (implicit flow)", async () => {
+      // Per RFC 6749 §4.2.2.1, implicit-flow error responses are delivered in
+      // the fragment component of the redirect URI, not the query string
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.hash =
+        "#error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "User is not authorized"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+
+      // Verify cleanup of OAuth state
+      expect(mockStorage.removeItem).toHaveBeenCalledWith(
+        "cognito_oauth_state"
+      );
+      expect(mockStorage.removeItem).toHaveBeenCalledWith(
+        "cognito_oauth_in_progress"
+      );
+    });
+
+    it("should surface fragment error code when no error_description is present", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=server_error&state=test-state";
+      mockLocation.hash = "#error=server_error&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "server_error"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should fail with state mismatch (not the fragment text) for fragment errors with a bad state", async () => {
+      // A crafted redirect to the registered sign-in URI must not be able to
+      // surface attacker-chosen error text: state is validated first
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.hash =
+        "#error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should fail with state mismatch (not the fragment text) for fragment errors with no state", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.hash =
+        "#error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should fail with state mismatch (not the query text) for query errors with a bad state", async () => {
+      // The code-flow (query string) error path must apply the same ordering
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.hash = "";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should surface IdP errors delivered in the query string when state is valid (code flow)", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.hash = "";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "User is not authorized"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
     it("should return null when no OAuth flow is in progress", async () => {
       mockStorage.getItem.mockResolvedValue("false");
 

@@ -190,24 +190,23 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   debug?.("URL matches expected redirect URL, continuing OAuth flow");
 
-  const error = url.searchParams.get("error");
-  if (error) {
-    const errorDesc = url.searchParams.get("error_description") ?? error;
-    debug?.(`OAuth error received: ${error}, description: ${errorDesc}`);
-    await clear();
-    throw new Error(errorDesc);
-  }
+  // Per RFC 6749, response parameters (state, error, error_description) are
+  // delivered in the query string for the code flow (§4.1.2.1) but in the
+  // URL FRAGMENT for the implicit flow (§4.2.2.1), so check both.
+  const hashParams = new URLSearchParams(url.hash.substring(1));
 
   // For code flow, state is in search params. For implicit flow, it's in hash
   let returnedState = url.searchParams.get("state");
   if (!returnedState && responseType === "token") {
     // Check hash for implicit flow
-    const hashParams = new URLSearchParams(url.hash.substring(1));
     returnedState = hashParams.get("state");
   }
   debug?.(`Returned state parameter: ${returnedState?.substring(0, 10)}...`);
 
-  // Wrap OAuth state validation in a lock
+  // Wrap OAuth state validation in a lock. State MUST be validated before
+  // anything else from the response (notably error/error_description) is
+  // acted upon, so that a crafted redirect to the sign-in URI can't surface
+  // attacker-chosen text (RFC 6749 §10.12).
   const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
 
   try {
@@ -232,6 +231,19 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
   }
 
   debug?.("OAuth state validation successful");
+
+  // State is validated, so error/error_description genuinely originate from
+  // the OAuth provider's response to OUR request - safe to surface them now
+  const error = url.searchParams.get("error") ?? hashParams.get("error");
+  if (error) {
+    const errorDesc =
+      url.searchParams.get("error_description") ??
+      hashParams.get("error_description") ??
+      error;
+    debug?.(`OAuth error received: ${error}, description: ${errorDesc}`);
+    await clear();
+    throw new Error(errorDesc);
+  }
 
   let tokens: TokensFromSignIn;
 

@@ -19,6 +19,18 @@ interface Headers {
   [key: string]: string;
 }
 
+/**
+ * The OAuth2 implicit grant ("token" response type).
+ *
+ * @deprecated The implicit flow is unsafe and may be removed in a future
+ * release: tokens are delivered in the URL fragment (so they can leak via
+ * browser history and logs), this client does not generate an OIDC nonce to
+ * bind the ID token to the session, and tokens received via the fragment are
+ * accepted without signature, issuer, audience or nonce validation. Use the
+ * default authorization-code flow with PKCE (responseType "code") instead.
+ */
+export type DeprecatedImplicitResponseType = "token";
+
 export interface Config {
   /**
    * The Amazon Cognito IDP endpoint.
@@ -162,8 +174,14 @@ export interface Config {
     redirectSignIn: string;
     /** OAuth2 scopes requested. Defaults to ['openid','email','profile'] */
     scopes?: string[];
-    /** Use authorization-code or implicit flow. Defaults to 'code'. */
-    responseType?: "code" | "token";
+    /**
+     * Use authorization-code or implicit flow. Defaults to 'code'.
+     *
+     * The implicit flow ("token") is deprecated, see
+     * {@link DeprecatedImplicitResponseType}. Prefer the default
+     * authorization-code flow with PKCE ("code").
+     */
+    responseType?: "code" | DeprecatedImplicitResponseType;
   };
   /** Whether to use the new GetTokensFromRefreshToken API. Default: true */
   useGetTokensFromRefreshToken?: boolean;
@@ -177,6 +195,7 @@ export type ConfigWithDefaults = Config &
 type ConfigInput = Omit<Config, "cognitoIdpEndpoint"> &
   Partial<Pick<Config, "cognitoIdpEndpoint">>;
 let config_: ConfigWithDefaults | undefined = undefined;
+let implicitFlowDeprecationWarned = false;
 export function configure(config?: ConfigInput) {
   if (config) {
     let cognitoIdpEndpoint =
@@ -234,6 +253,18 @@ export function configure(config?: ConfigInput) {
         responseType: config.hostedUi.responseType ?? "code",
         ...(config.hostedUi.domain && { domain: config.hostedUi.domain }),
       };
+      if (
+        config_.hostedUi.responseType === "token" &&
+        !implicitFlowDeprecationWarned
+      ) {
+        implicitFlowDeprecationWarned = true;
+        const implicitFlowWarning =
+          'Cognito Hosted UI is configured with the deprecated OAuth2 implicit flow (responseType "token"). ' +
+          "Tokens are exposed in the URL fragment and accepted without nonce, signature, issuer or audience validation. " +
+          'Use the default authorization-code flow with PKCE (responseType "code") instead.';
+        config_.debug?.(implicitFlowWarning);
+        console.warn(implicitFlowWarning);
+      }
       config_.debug?.(
         "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
       );
