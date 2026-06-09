@@ -185,7 +185,9 @@ async function calculateSrpSignature({
 
   // ---- 4. HKDF ----
   const ikmHex = padHex(s.toString(16));
-  const saltHkdfHex = padHex(arrayBufferToHex(uBuf));
+  // The salt must be derived from u interpreted as a big integer (leading
+  // zero bytes stripped), to match the encoding Cognito's server uses.
+  const saltHkdfHex = padHex(arrayBufferToBigInt(uBuf).toString(16));
 
   const infoBits = new Uint8Array([
     ..."Caldera Derived Key".split("").map((c) => c.charCodeAt(0)),
