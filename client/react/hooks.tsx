@@ -389,12 +389,19 @@ function passwordlessReducer(
       return { ...state, nowTick: action.payload };
 
     case "SIGN_OUT":
+      // Reset all per-user state (tokens, deviceKey, TOTP MFA status, etc.)
+      // so nothing leaks into the next user's session. Keep the signing
+      // status (it is driven by the sign-out flow's status callback) and
+      // device capabilities, and use fresh activity timestamps (the ones in
+      // initialPasswordlessState were captured at module load)
       return {
         ...initialPasswordlessState,
-        signingInStatus: "SIGNED_OUT",
+        signingInStatus: state.signingInStatus,
         initiallyRetrievingTokensFromStorage: false,
         userVerifyingPlatformAuthenticatorAvailable:
           state.userVerifyingPlatformAuthenticatorAvailable,
+        lastActivityAt: Date.now(),
+        nowTick: Date.now(),
       };
 
     default:
@@ -1422,6 +1429,10 @@ function _usePasswordless() {
           _setTokens(undefined);
           parseAndSetTokens(undefined);
           dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+          // Reset remaining per-user state (deviceKey, TOTP MFA status,
+          // mfaStatusReady, activity timestamps) so it cannot leak into
+          // the next user's session
+          dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,
         skipTokenRevocation: options?.skipTokenRevocation,
