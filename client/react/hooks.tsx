@@ -70,6 +70,7 @@ import React, {
 } from "react";
 import {
   signInWithRedirect as hostedSignInWithRedirect,
+  signOutWithRedirect as hostedSignOutWithRedirect,
   handleCognitoOAuthCallback,
 } from "../hosted-oauth.js";
 
@@ -1844,6 +1845,33 @@ function _usePasswordless() {
           });
         }
       );
+    },
+    /** Sign out locally and from the Cognito Hosted UI (redirect to the /logout endpoint) */
+    signOutWithRedirect: (options?: { skipTokenRevocation?: boolean }) => {
+      const { debug } = configure();
+      debug?.("Starting sign-out via Hosted UI redirect");
+      dispatch({ type: "SET_ERROR", payload: undefined });
+      hostedSignOutWithRedirect({
+        statusCb: setSigninInStatus,
+        tokensRemovedLocallyCb: () => {
+          _setTokens(undefined);
+          parseAndSetTokens(undefined);
+          // Clear authMethod only once tokens are actually removed from
+          // storage, so React state stays consistent with storage if
+          // hostedSignOutWithRedirect rejects earlier (e.g. on missing
+          // hostedUi / redirectSignOut configuration)
+          dispatch({ type: "SET_AUTH_METHOD", payload: undefined });
+          dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+        },
+        currentStatus: signingInStatus,
+        skipTokenRevocation: options?.skipTokenRevocation,
+      }).catch((err: unknown) => {
+        debug?.("Failed to initiate redirect sign-out:", err);
+        dispatch({
+          type: "SET_ERROR",
+          payload: err instanceof Error ? err : new Error(String(err)),
+        });
+      });
     },
     /** The current authentication method used for these tokens */
     authMethod,

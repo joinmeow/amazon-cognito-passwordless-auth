@@ -22,7 +22,11 @@ import {
 } from "../react/hooks.js";
 import { configure } from "../config.js";
 import { retrieveTokens } from "../storage.js";
-import { handleCognitoOAuthCallback } from "../hosted-oauth.js";
+import {
+  handleCognitoOAuthCallback,
+  signInWithRedirect as signInWithRedirectCore,
+  signOutWithRedirect as signOutWithRedirectCore,
+} from "../hosted-oauth.js";
 import {
   prepareFido2SignIn as prepareFido2SignInCore,
   authenticateWithFido2 as authenticateWithFido2Core,
@@ -58,6 +62,12 @@ const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
 >;
 const mockHandleOAuth = handleCognitoOAuthCallback as jest.MockedFunction<
   typeof handleCognitoOAuthCallback
+>;
+const mockSignInWithRedirect = signInWithRedirectCore as jest.MockedFunction<
+  typeof signInWithRedirectCore
+>;
+const mockSignOutWithRedirect = signOutWithRedirectCore as jest.MockedFunction<
+  typeof signOutWithRedirectCore
 >;
 const mockPrepareFido2SignIn = prepareFido2SignInCore as jest.MockedFunction<
   typeof prepareFido2SignInCore
@@ -245,6 +255,92 @@ describe("React hooks coverage for hooks.tsx branches", () => {
       mediation: undefined,
       signal: undefined,
     });
+  });
+
+  it("keeps authMethod and tokens when signOutWithRedirect fails before local sign-out", async () => {
+    const future = new Date(Date.now() + 60_000);
+    mockRetrieveTokens.mockResolvedValue({
+      accessToken: "mock-access-token",
+      idToken: undefined,
+      refreshToken: "mock-refresh-token",
+      expireAt: future,
+      username: "test-user",
+      authMethod: "REDIRECT",
+    });
+    mockSignInWithRedirect.mockResolvedValue(undefined);
+    // Reject before the local sign-out runs (e.g. missing hostedUi /
+    // redirectSignOut configuration), so tokensRemovedLocallyCb never fires
+    mockSignOutWithRedirect.mockRejectedValue(
+      new Error("hostedUi configuration missing")
+    );
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.tokens?.accessToken).toBe("mock-access-token");
+
+    // Establish authMethod in React state (as a redirect sign-in would)
+    act(() => {
+      result.current.signInWithRedirect();
+    });
+    expect(result.current.authMethod).toBe("REDIRECT");
+
+    await act(async () => {
+      result.current.signOutWithRedirect();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(mockSignOutWithRedirect).toHaveBeenCalled();
+    // Tokens were never removed from storage, so React state must still
+    // reflect the signed-in user: authMethod and tokens stay intact
+    expect(result.current.authMethod).toBe("REDIRECT");
+    expect(result.current.tokens?.accessToken).toBe("mock-access-token");
+    expect(result.current.lastError?.message).toBe(
+      "hostedUi configuration missing"
+    );
+  });
+
+  it("clears authMethod once tokens are removed locally during signOutWithRedirect", async () => {
+    const future = new Date(Date.now() + 60_000);
+    mockRetrieveTokens.mockResolvedValue({
+      accessToken: "mock-access-token",
+      idToken: undefined,
+      refreshToken: "mock-refresh-token",
+      expireAt: future,
+      username: "test-user",
+      authMethod: "REDIRECT",
+    });
+    mockSignInWithRedirect.mockResolvedValue(undefined);
+    // Simulate a successful local sign-out: the helper invokes
+    // tokensRemovedLocallyCb after removing tokens from storage
+    mockSignOutWithRedirect.mockImplementation(async (props) => {
+      props?.tokensRemovedLocallyCb?.();
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.tokens?.accessToken).toBe("mock-access-token");
+
+    // Establish authMethod in React state (as a redirect sign-in would)
+    act(() => {
+      result.current.signInWithRedirect();
+    });
+    expect(result.current.authMethod).toBe("REDIRECT");
+
+    await act(async () => {
+      result.current.signOutWithRedirect();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(result.current.authMethod).toBeUndefined();
+    expect(result.current.tokens).toBeUndefined();
   });
 
   it("forwards prepared bundle to authenticateWithFido2", async () => {

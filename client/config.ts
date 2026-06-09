@@ -160,6 +160,12 @@ export interface Config {
     domain?: string;
     /** Redirect URI registered in the user-pool app client */
     redirectSignIn: string;
+    /**
+     * (Optional) Redirect URI to return to after signing out via the Hosted UI
+     * /logout endpoint (see signOutWithRedirect). Must be registered as an
+     * allowed sign-out URL in the user-pool app client.
+     */
+    redirectSignOut?: string;
     /** OAuth2 scopes requested. Defaults to ['openid','email','profile'] */
     scopes?: string[];
     /** Use authorization-code or implicit flow. Defaults to 'code'. */
@@ -233,6 +239,9 @@ export function configure(config?: ConfigInput) {
         scopes: config.hostedUi.scopes ?? ["openid", "email", "profile"],
         responseType: config.hostedUi.responseType ?? "code",
         ...(config.hostedUi.domain && { domain: config.hostedUi.domain }),
+        ...(config.hostedUi.redirectSignOut && {
+          redirectSignOut: config.hostedUi.redirectSignOut,
+        }),
       };
       config_.debug?.(
         "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
@@ -260,6 +269,16 @@ export function getAuthorizeEndpoint(): string {
   const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
   const base = normalizeEndpoint(domainBase);
   return `${base}/oauth2/authorize`;
+}
+
+/**
+ * Get the full Hosted UI logout endpoint URL with protocol
+ */
+export function getLogoutEndpoint(): string {
+  const { cognitoIdpEndpoint, hostedUi } = configure();
+  const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
+  const base = normalizeEndpoint(domainBase);
+  return `${base}/logout`;
 }
 
 /**
