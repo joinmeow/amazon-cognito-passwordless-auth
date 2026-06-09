@@ -27,7 +27,7 @@ import {
   IdleState,
   busyState,
 } from "./model.js";
-import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
+import { scheduleRefresh, cleanupUserRefreshState } from "./refresh.js";
 import { computeClockDriftMs } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
@@ -386,8 +386,11 @@ export const signOut = (props?: {
             activeRefreshSchedules.delete(userIdentifier);
           }
 
-          // Clean up all refresh system resources (timers, listeners)
-          cleanupRefreshSystem(userIdentifier);
+          // Clean up this user's refresh state (timers, in-memory state).
+          // Deliberately NOT cleanupRefreshSystem: that would tear down the
+          // global visibilitychange/watchdog listeners for the rest of the
+          // page lifetime, breaking refresh for the next user that signs in.
+          cleanupUserRefreshState(userIdentifier);
         }
 
         const tokens = await retrieveTokens();

@@ -1016,8 +1016,41 @@ if (isBrowserEnvironment()) {
 }
 
 /**
+ * Clean up refresh state for a specific user (timers and in-memory state).
+ * Call this on sign-out: it does NOT remove the global visibilitychange,
+ * watchdog and unload listeners, so token refresh keeps working when
+ * another user signs in afterwards.
+ * @param username - Optional username to clean up specific user state
+ */
+export function cleanupUserRefreshState(username?: string): void {
+  logDebug("Cleaning up user refresh state");
+
+  // Get the appropriate refresh state
+  const state = getRefreshState(username);
+
+  // Clean up any active refresh timer
+  if (state.refreshTimer) {
+    state.refreshTimer();
+    state.refreshTimer = undefined;
+    state.nextRefreshTime = undefined;
+  }
+
+  // Reset refresh state
+  state.isRefreshing = false;
+  state.lastRefreshTime = undefined;
+
+  // Clear user-specific state from the map
+  if (username) {
+    clearRefreshState(username);
+  }
+}
+
+/**
  * Clean up all refresh-related timers and event listeners.
- * Call this when unmounting the application or switching users.
+ * Call this when unmounting the application (e.g. on page unload).
+ * Note: this removes the GLOBAL visibilitychange, watchdog and unload
+ * listeners for the rest of the page lifetime — for user sign-out use
+ * cleanupUserRefreshState instead.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupRefreshSystem(username?: string): void {
@@ -1043,22 +1076,6 @@ export function cleanupRefreshSystem(username?: string): void {
     autoCleanupHandler = undefined;
   }
 
-  // Get the appropriate refresh state
-  const state = getRefreshState(username);
-
-  // Clean up any active refresh timer
-  if (state.refreshTimer) {
-    state.refreshTimer();
-    state.refreshTimer = undefined;
-    state.nextRefreshTime = undefined;
-  }
-
-  // Reset refresh state
-  state.isRefreshing = false;
-  state.lastRefreshTime = undefined;
-
-  // Clear user-specific state from the map
-  if (username) {
-    clearRefreshState(username);
-  }
+  // Clean up per-user refresh state
+  cleanupUserRefreshState(username);
 }
