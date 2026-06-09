@@ -24,6 +24,7 @@ import {
 import {
   setupWebAuthnMock,
   setupNoConditionalMediationMock,
+  setupConditionalMediationUnavailableMock,
   setupNoBrowserSupportMock,
   createMockAbortController,
 } from "./__utils__/webauthn-mocks.js";
@@ -77,6 +78,67 @@ describe("Mediation Integration Tests", () => {
 
       expect(debugSpy).toHaveBeenCalledWith(
         expect.stringContaining("Cannot verify conditional mediation support")
+      );
+    });
+
+    it("throws Fido2ConfigError when conditional mediation is reported as unsupported", async () => {
+      cleanup = setupConditionalMediationUnavailableMock();
+
+      await expect(
+        fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+          mediation: "conditional",
+        })
+      ).rejects.toThrow(Fido2ConfigError);
+
+      // The credential request must not be attempted on unsupported browsers
+      expect(
+        (global as any).navigator.credentials.get as jest.Mock
+      ).not.toHaveBeenCalled();
+    });
+
+    it("proceeds when conditional mediation support check itself throws", async () => {
+      const debugSpy = jest.fn();
+      mockConfigure.mockReturnValue({
+        debug: debugSpy,
+        fido2: {
+          rp: { id: TEST_RP.id, name: TEST_RP.name },
+        },
+      } as any);
+
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+
+      (global as any).PublicKeyCredential = {
+        isConditionalMediationAvailable: jest
+          .fn()
+          .mockRejectedValue(new Error("capability check failed")),
+      };
+
+      // Use Object.defineProperty for jsdom compatibility
+      Object.defineProperty((global as any).navigator, "credentials", {
+        value: {
+          get: getSpy,
+        },
+        configurable: true,
+        writable: true,
+      });
+
+      const result = await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "conditional",
+      });
+
+      expect(result).toBeDefined();
+      expect(getSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mediation: "conditional",
+        })
+      );
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Cannot verify conditional mediation support - proceeding with conditional mediation anyway"
+        ),
+        expect.any(Error)
       );
     });
 
