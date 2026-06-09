@@ -32,6 +32,7 @@ import {
   storeDeviceKey,
   getRememberedDevice,
   setRememberedDevice,
+  onTokensStored,
   TokensFromStorage,
 } from "../storage.js";
 import {
@@ -800,9 +801,20 @@ function _usePasswordless() {
       globalThis.addEventListener("storage", handleStorageChange);
     }
 
+    // The "storage" event above only fires in *other* documents, never in the
+    // document that performed the write. Background token refreshes write the
+    // refreshed tokens to storage from THIS document, so subscribe to
+    // same-context token stores too — otherwise React state would keep the
+    // stale (expiring) tokens in the active tab.
+    const unsubscribeTokensStored = onTokensStored(() => {
+      debug?.("Tokens stored in this context, reloading tokens from storage");
+      void loadTokens();
+    });
+
     // Cleanup function
     return () => {
       abortController.abort();
+      unsubscribeTokensStored();
       if (typeof globalThis !== "undefined" && globalThis.removeEventListener) {
         globalThis.removeEventListener("storage", handleStorageChange);
       }
