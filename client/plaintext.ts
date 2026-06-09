@@ -22,6 +22,8 @@ import {
 import { processTokens } from "./common.js";
 import { retrieveDeviceKey } from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
+import { parseJwtPayload } from "./util.js";
+import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
 export function authenticateWithPlaintextPassword({
   username,
@@ -77,19 +79,46 @@ export function authenticateWithPlaintextPassword({
       });
       debug?.(`Response from initiateAuth:`, authResponse);
 
-      // Now that we have initiated authentication, we can look up device key
-      // using the confirmed username for this session
-      const actualDeviceKey =
-        deviceKey ?? (username ? await retrieveDeviceKey(username) : undefined);
+      // Resolve the canonical user id, so device records are keyed
+      // consistently with the SRP flow (the username as entered may be an
+      // alias, e.g. e-mail or phone number)
+      let canonicalUserId: string | undefined;
+      if (isAuthenticatedResponse(authResponse)) {
+        try {
+          canonicalUserId = parseJwtPayload<CognitoAccessTokenPayload>(
+            authResponse.AuthenticationResult.AccessToken
+          ).username;
+        } catch (err) {
+          debug?.(`Failed to determine username from access token:`, err);
+        }
+      } else {
+        canonicalUserId = authResponse.ChallengeParameters?.USER_ID_FOR_SRP;
+      }
 
-      // Pre-create device SRP handler if we have a device key
-      const deviceHandler = actualDeviceKey
-        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
-        : undefined;
+      // Look up the device key under the canonical user id first, falling
+      // back to the username as entered (legacy behavior) so device records
+      // stored by previous versions keep working
+      const usernamesToTry = [...new Set([canonicalUserId, username])].filter(
+        (u): u is string => !!u
+      );
+      let deviceHandler:
+        | Awaited<ReturnType<typeof createDeviceSrpAuthHandler>>
+        | undefined;
+      for (const usernameToTry of usernamesToTry) {
+        const actualDeviceKey =
+          deviceKey ?? (await retrieveDeviceKey(usernameToTry));
+        if (!actualDeviceKey) continue;
+        // Pre-create device SRP handler if we have a device key
+        deviceHandler = await createDeviceSrpAuthHandler(
+          usernameToTry,
+          actualDeviceKey
+        );
+        if (deviceHandler) break;
+      }
 
       const tokens = await handleAuthResponse({
         authResponse,
-        username,
+        username: canonicalUserId ?? username,
         smsMfaCode,
         otpMfaCode,
         newPassword,
