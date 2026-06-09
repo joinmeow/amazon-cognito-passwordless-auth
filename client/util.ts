@@ -188,7 +188,19 @@ const _bufferFromBase64 = function (characters: string, padChar = "") {
       (acc, char, index) => Object.assign(acc, { [char.charCodeAt(0)]: index }),
       {} as { [key: number]: number }
     );
+  // eslint-disable-next-line security/detect-non-literal-regexp
+  const validBase64 = new RegExp(
+    `^[${characters.replace(/[-\\\]]/g, "\\$&")}]+${
+      padChar ? `${padChar}{0,2}` : ""
+    }$`
+  );
   return function (base64: string) {
+    if (!base64.length) {
+      return new Uint8Array(0);
+    }
+    if (!validBase64.test(base64)) {
+      throw new Error("Invalid base64 encoded string");
+    }
     const paddingLength = padChar
       ? // eslint-disable-next-line security/detect-non-literal-regexp
         base64.match(new RegExp(`^.+?(${padChar}?${padChar}?)$`))![1].length
