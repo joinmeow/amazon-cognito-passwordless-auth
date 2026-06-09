@@ -41,13 +41,14 @@ const REFRESH_DEDUPLICATION_WINDOW_MS = 300000; // 5 minutes
 const FRESH_LOGIN_REFRESH_DELAY_MS = 120000; // 2 minutes
 
 // Track active refresh schedules to prevent duplicate scheduling
-// Key: username, Value: { scheduledAt: timestamp, abortController: AbortController, refreshToken: string }
+// Key: username, Value: { scheduledAt: timestamp, abortController: AbortController, refreshToken: string, accessToken: string }
 const activeRefreshSchedules = new Map<
   string,
   {
     scheduledAt: number;
     abortController: AbortController;
     refreshToken: string;
+    accessToken: string;
   }
 >();
 
@@ -205,8 +206,16 @@ async function processTokensInternal(
     const now = Date.now();
 
     // Skip if we already scheduled for this user recently (within 5 minutes)
+    // for the SAME access token. New tokens (e.g. just obtained by a refresh)
+    // must always get their own schedule: with short-lived access tokens
+    // (Cognito allows lifetimes as low as 5 minutes) each refresh completes
+    // within the deduplication window, and the previous schedule entry is
+    // only cleared after this function returns, so deduplicating on
+    // wall-clock age alone would silently prevent the next refresh from
+    // ever being scheduled.
     if (
       existingSchedule &&
+      existingSchedule.accessToken === normalizedTokens.accessToken &&
       now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS
     ) {
       debug?.(
@@ -215,9 +224,21 @@ async function processTokensInternal(
       return normalizedTokens;
     }
 
-    // Clear any existing schedule for this user
+    // Clear any existing schedule for this user. Skip the abort when the
+    // tracked controller is the very one driving THIS call: during an
+    // active refresh, refreshTokens passes the schedule's own abort
+    // signal back into processTokens, so aborting it here would be a
+    // self-abort of the in-flight refresh chain. That fires the old
+    // schedule's abort listeners ("Refresh scheduling aborted", which can
+    // cancel a pending timer) and leaves the signal permanently aborted,
+    // so every later abort-check on that chain (scheduleRefresh's early
+    // return, lock acquisition, retry backoff) bails out — and the new
+    // tokens can end up without a next refresh. The replacement schedule
+    // below is also wired to this same signal, so it must stay live.
     if (existingSchedule?.abortController) {
-      existingSchedule.abortController.abort();
+      if (existingSchedule.abortController.signal !== abort) {
+        existingSchedule.abortController.abort();
+      }
       activeRefreshSchedules.delete(normalizedTokens.username);
     }
 
@@ -243,6 +264,7 @@ async function processTokensInternal(
       scheduledAt: now,
       abortController: scheduleAbort,
       refreshToken: normalizedTokens.refreshToken,
+      accessToken: normalizedTokens.accessToken,
     });
 
     const scheduleFn = () => {
