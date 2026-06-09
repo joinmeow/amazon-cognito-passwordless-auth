@@ -16,7 +16,7 @@
 import { handleCognitoOAuthCallback } from "../hosted-oauth.js";
 import { configure } from "../config.js";
 import { processTokens } from "../common.js";
-import { withStorageLock } from "../lock.js";
+import { withStorageLock, LockTimeoutError } from "../lock.js";
 import type { ConfigWithDefaults } from "../config.js";
 
 // Mock dependencies
@@ -52,10 +52,10 @@ describe("OAuth Integration with processTokens", () => {
   let mockConfig: Partial<ConfigWithDefaults> & {
     storage: MockStorage;
     location: MockLocation;
-    history: { pushState: jest.Mock };
+    history: { pushState: jest.Mock; replaceState: jest.Mock };
   };
   let mockLocation: MockLocation;
-  let mockHistory: { pushState: jest.Mock };
+  let mockHistory: { pushState: jest.Mock; replaceState: jest.Mock };
   let mockStorage: MockStorage;
   let mockFetch: jest.Mock;
 
@@ -73,6 +73,7 @@ describe("OAuth Integration with processTokens", () => {
 
     mockHistory = {
       pushState: jest.fn(),
+      replaceState: jest.fn(),
     };
 
     mockStorage = {
@@ -299,6 +300,233 @@ describe("OAuth Integration with processTokens", () => {
         "invalid_grant"
       );
       expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("OAuth callback URL cleanup", () => {
+    const setupCodeFlowState = () => {
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        if (key === "cognito_oauth_pkce")
+          return Promise.resolve("test-verifier");
+        return Promise.resolve(null);
+      });
+    };
+
+    const setupSuccessfulExchange = () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "mock-access-token",
+          id_token: "mock-id-token",
+          refresh_token: "mock-refresh-token",
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+      });
+      mockProcessTokens.mockResolvedValue({
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "mock-refresh-token",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      });
+    };
+
+    it("should scrub code and state via replaceState (not pushState) on success", async () => {
+      setupCodeFlowState();
+      setupSuccessfulExchange();
+
+      await handleCognitoOAuthCallback();
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+      expect(mockHistory.pushState).not.toHaveBeenCalled();
+    });
+
+    it("should preserve unrelated query parameters when scrubbing", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?foo=bar&code=test-code&state=test-state";
+      mockLocation.search = "?foo=bar&code=test-code&state=test-state";
+      setupCodeFlowState();
+      setupSuccessfulExchange();
+
+      await handleCognitoOAuthCallback();
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect?foo=bar"
+      );
+    });
+
+    it("should scrub code and state from the URL on state mismatch", async () => {
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state")
+          return Promise.resolve("different-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+    });
+
+    it("should scrub code and state from the URL when state validation hits a lock timeout", async () => {
+      setupCodeFlowState();
+      mockWithStorageLock.mockRejectedValueOnce(
+        new LockTimeoutError("test-lock-key", 15000)
+      );
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth operation in progress. Please try again."
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should scrub tokens from the URL hash when processTokens fails in the implicit flow", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.hash =
+        "#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+      mockProcessTokens.mockRejectedValue(
+        new Error("token processing failed")
+      );
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "token processing failed"
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+    });
+
+    it("should scrub the code from the URL when the authorization code is missing", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?state=test-state";
+      mockLocation.search = "?state=test-state";
+      setupCodeFlowState();
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "Authorization code missing"
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+    });
+
+    it("should scrub the code from the URL when the token exchange fails", async () => {
+      setupCodeFlowState();
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "invalid_grant" }),
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "invalid_grant"
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+    });
+
+    it("should scrub the code from the URL on token exchange network errors", async () => {
+      setupCodeFlowState();
+      mockFetch.mockRejectedValue(new Error("network down"));
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "network down"
+      );
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+    });
+
+    it("should scrub tokens from the URL hash in the implicit flow", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.hash =
+        "#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+      mockProcessTokens.mockResolvedValue({
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      });
+
+      await handleCognitoOAuthCallback();
+
+      expect(mockHistory.replaceState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
+      expect(mockHistory.pushState).not.toHaveBeenCalled();
+    });
+
+    it("should fall back to pushState when replaceState is not provided", async () => {
+      // Custom MinimalHistory implementations may not implement replaceState
+      const pushOnlyHistory = { pushState: jest.fn() };
+      mockConfig.history = pushOnlyHistory as unknown as typeof mockHistory;
+      setupCodeFlowState();
+      setupSuccessfulExchange();
+
+      await handleCognitoOAuthCallback();
+
+      expect(pushOnlyHistory.pushState).toHaveBeenCalledWith(
+        null,
+        "",
+        "https://app.example.com/signin-redirect"
+      );
     });
   });
 

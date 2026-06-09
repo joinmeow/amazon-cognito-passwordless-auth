@@ -424,6 +424,12 @@ export type MinimalFetch = (
 
 export interface MinimalHistory {
   pushState(data: unknown, unused: string, url?: string | URL | null): void;
+  /**
+   * Used to scrub OAuth parameters (authorization code, tokens) from the URL
+   * without leaving them reachable in session history. Optional for backwards
+   * compatibility: falls back to pushState when not provided.
+   */
+  replaceState?(data: unknown, unused: string, url?: string | URL | null): void;
 }
 
 export interface MinimalCrypto {
