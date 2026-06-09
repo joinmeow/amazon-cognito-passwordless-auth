@@ -152,6 +152,13 @@ export const PasswordlessContextProvider = (props: {
 }) => {
   const passwordlessValue = _usePasswordless();
 
+  // The activity-tracking flag can change via configure(); the memo below
+  // must depend on it so that, on the next render after a change, consumers
+  // get a context whose closures (getTimeSinceLastActivityMs, markUserActive,
+  // the activity getters) honor the new setting instead of the old one
+  const useActivityTracking =
+    configure().tokenRefresh?.useActivityTracking ?? false;
+
   // Memoize the context value to prevent unnecessary re-renders
   const memoizedValue = useMemo(
     () => passwordlessValue,
@@ -171,11 +178,21 @@ export const PasswordlessContextProvider = (props: {
       passwordlessValue.deviceKey,
       passwordlessValue.totpMfaStatus,
       passwordlessValue.mfaStatusReady,
-      passwordlessValue.timeSinceLastActivityMs,
-      passwordlessValue.timeSinceLastActivitySeconds,
       passwordlessValue.authMethod,
-      // Functions are already memoized with useCallback, so they're stable
-      // We don't need to include them in dependencies
+      // Configuration that the activity-tracking closures capture
+      useActivityTracking,
+      // Note: the API methods in passwordlessValue are fresh closures on
+      // every render (they are NOT individually memoized with useCallback).
+      // Omitting them from the deps is only safe because every piece of
+      // state those closures read is itself listed above, so this memo is
+      // recomputed (and fresh closures are picked up) whenever any of that
+      // state changes — the closures can therefore never observe stale state.
+      // Note: timeSinceLastActivityMs / timeSinceLastActivitySeconds are
+      // deliberately NOT deps: they are live getter properties computed from
+      // a ref on each property access (so they stay fresh on any consumer
+      // re-render even though the context identity is stable); including
+      // them would churn the context value (and re-render every consumer)
+      // on each activity tick.
     ]
   );
 
@@ -259,8 +276,6 @@ interface PasswordlessState {
   };
   /** True once we have a reliable MFA status from Cognito (via getUser) */
   mfaStatusReady: boolean;
-  lastActivityAt: number;
-  nowTick: number;
 }
 
 // Define action types
@@ -287,8 +302,6 @@ type PasswordlessAction =
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
   | { type: "SET_MFA_STATUS_READY"; payload: boolean }
-  | { type: "SET_LAST_ACTIVITY"; payload: number }
-  | { type: "SET_NOW_TICK"; payload: number }
   | { type: "SIGN_OUT" };
 
 // Initial state
@@ -304,8 +317,6 @@ const initialPasswordlessState: PasswordlessState = {
     availableMfaTypes: [],
   },
   mfaStatusReady: false,
-  lastActivityAt: Date.now(),
-  nowTick: Date.now(),
 };
 
 // Reducer function
@@ -382,12 +393,6 @@ function passwordlessReducer(
     case "SET_MFA_STATUS_READY":
       return { ...state, mfaStatusReady: action.payload };
 
-    case "SET_LAST_ACTIVITY":
-      return { ...state, lastActivityAt: action.payload };
-
-    case "SET_NOW_TICK":
-      return { ...state, nowTick: action.payload };
-
     case "SIGN_OUT":
       return {
         ...initialPasswordlessState,
@@ -425,8 +430,6 @@ function _usePasswordless() {
     authMethod,
     totpMfaStatus,
     mfaStatusReady,
-    lastActivityAt,
-    nowTick,
   } = state;
 
   // Helper functions for common dispatch actions
@@ -491,6 +494,11 @@ function _usePasswordless() {
   const { tokenRefresh } = configure();
   const useActivityTracking = tokenRefresh?.useActivityTracking ?? false;
 
+  // Timestamp of the last user activity. Kept in a ref (not state) on purpose:
+  // activity happens very frequently (mousemove etc.) and must not trigger
+  // re-renders or invalidate the memoized context value
+  const lastActivityAtRef = useRef(Date.now());
+
   // 1️⃣  Attach lightweight listeners to detect user activity (only if activity tracking is enabled)
   useEffect(() => {
     if (
@@ -498,8 +506,9 @@ function _usePasswordless() {
       typeof globalThis.addEventListener === "undefined"
     )
       return;
-    const activityHandler = () =>
-      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
+    const activityHandler = () => {
+      lastActivityAtRef.current = Date.now();
+    };
     const events: (keyof WindowEventMap)[] = [
       "mousemove",
       "mousedown",
@@ -516,21 +525,15 @@ function _usePasswordless() {
       );
   }, [useActivityTracking]);
 
-  // 2️⃣  Keep an internal clock running so React renders every second and derived
-  //      inactivity duration stays fresh. Only run if activity tracking is enabled.
-  useEffect(() => {
-    if (!useActivityTracking) return;
-    const id = setInterval(
-      () => dispatch({ type: "SET_NOW_TICK", payload: Date.now() }),
-      1000
-    );
-    return () => clearInterval(id);
-  }, [useActivityTracking]);
-
-  /** Helper function for consumers – milliseconds since last activity */
-  const timeSinceLastActivityMs = useActivityTracking
-    ? nowTick - lastActivityAt
-    : 0;
+  /**
+   * Stable getter for consumers – milliseconds since last activity, computed
+   * on demand from a ref so reading a fresh value never requires a re-render
+   * (and the provider no longer needs a per-second clock tick)
+   */
+  const getTimeSinceLastActivityMs = useCallback(
+    () => (useActivityTracking ? Date.now() - lastActivityAtRef.current : 0),
+    [useActivityTracking]
+  );
 
   // At component mount, check sign-in status
   useEffect(() => {
@@ -1221,7 +1224,7 @@ function _usePasswordless() {
         debug?.("markUserActive called but activity tracking is disabled");
         return;
       }
-      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
+      lastActivityAtRef.current = Date.now();
       // Schedule a refresh if tokens exist but only if we're not currently refreshing
       if (tokens && !isRefreshingTokens) {
         // Using void to properly handle the promise
@@ -1805,14 +1808,36 @@ function _usePasswordless() {
         dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       }
     },
-    /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
-    timeSinceLastActivityMs: useActivityTracking
-      ? timeSinceLastActivityMs
-      : null,
-    /** Seconds (rounded) since the last user activity */
-    timeSinceLastActivitySeconds: useActivityTracking
-      ? Math.round(timeSinceLastActivityMs / 1000)
-      : null,
+    /**
+     * Milliseconds since the last user activity (mousemove, keydown, scroll, touch).
+     * Computed on demand (getter property backed by a ref), so every read —
+     * e.g. during any consumer re-render, or after markUserActive() — returns
+     * an up-to-date value reflecting the latest activity, without the context
+     * value (and thus every usePasswordless() consumer) churning once per
+     * second. NOTE: this value advancing does not by itself trigger a
+     * re-render; poll it (or call getTimeSinceLastActivityMs()) if you need
+     * a self-updating idle timer.
+     */
+    get timeSinceLastActivityMs(): number | null {
+      return useActivityTracking
+        ? Date.now() - lastActivityAtRef.current
+        : null;
+    },
+    /**
+     * Seconds (rounded) since the last user activity.
+     * Live getter semantics — see timeSinceLastActivityMs.
+     */
+    get timeSinceLastActivitySeconds(): number | null {
+      return useActivityTracking
+        ? Math.round((Date.now() - lastActivityAtRef.current) / 1000)
+        : null;
+    },
+    /**
+     * Returns the milliseconds since the last user activity, computed on demand.
+     * Stable function identity (safe to use in effect deps); returns 0 when
+     * activity tracking is disabled.
+     */
+    getTimeSinceLastActivityMs,
     /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
     signInWithRedirect: ({
       provider = "Google",
