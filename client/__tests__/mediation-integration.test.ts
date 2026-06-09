@@ -101,7 +101,7 @@ describe("Mediation Integration Tests", () => {
       const result = await fido2getCredential({
         challenge: TEST_CHALLENGES.basic,
         mediation: "conditional",
-        userVerification: "required", // Should be overridden
+        userVerification: "required", // Should be passed through unchanged
         timeout: knownTimeout, // Should be removed
       });
 
@@ -109,8 +109,39 @@ describe("Mediation Integration Tests", () => {
       expect(getSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           publicKey: expect.objectContaining({
-            userVerification: "preferred", // Overridden per spec
+            userVerification: "required", // Requested value respected
             timeout: undefined, // Removed per spec
+          }),
+          mediation: "conditional",
+        })
+      );
+    });
+
+    it("defaults userVerification to preferred for conditional mediation when not specified", async () => {
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+
+      (global as any).PublicKeyCredential = {
+        isConditionalMediationAvailable: jest.fn().mockResolvedValue(true),
+      };
+
+      // Use Object.defineProperty for jsdom compatibility
+      Object.defineProperty((global as any).navigator, "credentials", {
+        value: {
+          get: getSpy,
+        },
+        configurable: true,
+        writable: true,
+      });
+
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "conditional",
+      });
+
+      expect(getSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          publicKey: expect.objectContaining({
+            userVerification: "preferred", // Default when nothing requested
           }),
           mediation: "conditional",
         })
@@ -151,12 +182,15 @@ describe("Mediation Integration Tests", () => {
       });
 
       expect(debugSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'WebAuthn spec requires userVerification="preferred"'
-        )
-      );
-      expect(debugSpy).toHaveBeenCalledWith(
         expect.stringContaining("WebAuthn spec recommends removing timeout")
+      );
+      // Requested userVerification must NOT be overridden
+      expect(getSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          publicKey: expect.objectContaining({
+            userVerification: "required",
+          }),
+        })
       );
     });
   });
