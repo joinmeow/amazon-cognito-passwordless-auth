@@ -134,6 +134,15 @@ async function calculateSrpSignature({
   creds: UserCreds | DeviceCreds;
 }) {
   const { crypto } = configure();
+  const { g, N, k } = await getConstants();
+
+  // ---- 0. SRP-6a safety check on B ----
+  // RFC 5054 (section 2.5.3) mandates that the client MUST abort the
+  // handshake if B mod N = 0
+  const srpB = BigInt(`0x${srpBHex}`);
+  if (modulo(srpB, N) === BigInt(0)) {
+    throw new Error("B cannot be zero");
+  }
 
   // ---- 1. scramble parameter (u) ----
   const aPlusBHex = padHex(largeAHex) + padHex(srpBHex);
@@ -141,6 +150,11 @@ async function calculateSrpSignature({
     "SHA-256",
     hexToArrayBuffer(aPlusBHex)
   );
+  // The SRP-6a design (srp.stanford.edu/design.html) requires the client
+  // to abort if the scramble parameter u = 0
+  if (arrayBufferToBigInt(uBuf) === BigInt(0)) {
+    throw new Error("U cannot be zero");
+  }
 
   // ---- 2. credential-specific hash (x) ----
   let identityHash: ArrayBuffer;
@@ -174,9 +188,8 @@ async function calculateSrpSignature({
   );
 
   // ---- 3. shared secret (S) ----
-  const { g, N, k } = await getConstants();
   const gModPowXN = modPow(g, arrayBufferToBigInt(xBuf), N);
-  const int = BigInt(`0x${srpBHex}`) - k * gModPowXN;
+  const int = srpB - k * gModPowXN;
   const s = modPow(
     int,
     smallA + arrayBufferToBigInt(uBuf) * arrayBufferToBigInt(xBuf),
@@ -258,6 +271,11 @@ async function calculateSrpSignature({
 function hexToArrayBuffer(hexStr: string) {
   if (hexStr.length % 2 !== 0) {
     throw new Error("hex string should have even number of characters");
+  }
+  if (!hexStr.length || !/^[0-9a-f]+$/i.test(hexStr)) {
+    throw new Error(
+      "hex string should be non-empty and contain only hex characters"
+    );
   }
   const octets = hexStr.match(/.{2}/gi)!.map((m) => parseInt(m, 16));
   return new Uint8Array(octets);
