@@ -12,7 +12,11 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { parseJwtPayload } from "./util.js";
+import {
+  parseJwtPayload,
+  redactSecret,
+  redactTokensFromObject,
+} from "./util.js";
 import { configure } from "./config.js";
 import {
   CognitoIdTokenPayload,
@@ -116,7 +120,7 @@ export async function retrieveClockDriftMs(username: string): Promise<number> {
 
 export async function storeTokens(tokens: TokensToStore) {
   const { clientId, storage, debug } = configure();
-  debug?.("[storeTokens] tokens to store:", tokens);
+  debug?.("[storeTokens] tokens to store:", redactTokensFromObject(tokens));
 
   // --------- 1. Derive username ---------
   let username = tokens.username;
@@ -406,7 +410,9 @@ export async function setRememberedDevice(
 ) {
   const { clientId, storage, debug } = configure();
   const key = buildDeviceStorageKey(clientId, username);
-  debug?.(`Saving remembered device for user ${username}: ${record.deviceKey}`);
+  debug?.(
+    `Saving remembered device for user ${username}: ${redactSecret(record.deviceKey)}`
+  );
   await storage.setItem(key, JSON.stringify(record));
 }
 
@@ -449,7 +455,7 @@ export async function clearRememberedDevice(username: string) {
 export async function storeDeviceKey(username: string, deviceKey: string) {
   if (!username || !deviceKey) return;
   const { debug } = configure();
-  debug?.(`Storing device key for ${username}: ${deviceKey}`);
+  debug?.(`Storing device key for ${username}: ${redactSecret(deviceKey)}`);
 
   // Check if we already have a record for this user
   const existingRecord = await getRememberedDevice(username);

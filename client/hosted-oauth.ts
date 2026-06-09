@@ -18,6 +18,8 @@ import {
   parseJwtPayload,
   bufferFromBase64Url,
   bufferToBase64Url,
+  redactSecret,
+  redactTokensFromObject,
 } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
@@ -115,7 +117,15 @@ export async function signInWithRedirect({
     query.code_challenge_method = method;
   }
 
-  debug?.(`Initiating OAuth redirect with params: ${JSON.stringify(query)}`);
+  debug?.(
+    `Initiating OAuth redirect with params: ${JSON.stringify({
+      ...query,
+      state: redactSecret(state),
+      ...(query.code_challenge && {
+        code_challenge: redactSecret(query.code_challenge),
+      }),
+    })}`
+  );
   const qs = new URLSearchParams(query).toString();
 
   const oauthUrl = `${authorizeEndpoint}?${qs}`;
@@ -243,9 +253,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
   // `-<base64url(customState)>` (see signInWithRedirect). The random part is
   // hex only, so the first "-" (if any) marks the start of the customState
   let customState: string | undefined;
-  const customStateMatch = returnedState?.match(
-    /^[0-9a-f]+-([A-Za-z0-9_-]+)$/
-  );
+  const customStateMatch = returnedState?.match(/^[0-9a-f]+-([A-Za-z0-9_-]+)$/);
   if (customStateMatch) {
     try {
       customState = new TextDecoder().decode(
@@ -276,7 +284,11 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     debug?.("Using implicit flow, extracting tokens from URL hash");
     const hash = url.hash.substring(1);
     const params = new URLSearchParams(hash);
-    debug?.(`Hash parameters: ${JSON.stringify(Object.fromEntries(params))}`);
+    debug?.(
+      `Hash parameters: ${JSON.stringify(
+        redactTokensFromObject(Object.fromEntries(params))
+      )}`
+    );
 
     const access_token = params.get("access_token");
     const id_token = params.get("id_token");

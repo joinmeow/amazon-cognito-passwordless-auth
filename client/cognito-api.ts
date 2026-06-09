@@ -12,7 +12,13 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { parseJwtPayload, throwIfNot2xx, bufferToBase64 } from "./util.js";
+import {
+  parseJwtPayload,
+  throwIfNot2xx,
+  bufferToBase64,
+  redactSecret,
+  redactTokensFromObject,
+} from "./util.js";
 import { configure, MinimalResponse } from "./config.js";
 import { retrieveTokens } from "./storage.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
@@ -278,7 +284,9 @@ export async function initiateAuth<
       authflow === "USER_SRP_AUTH" ||
       authflow === "CUSTOM_AUTH")
   ) {
-    debug?.(`Including device key ${deviceKey} in ${authflow} flow`);
+    debug?.(
+      `Including device key ${redactSecret(deviceKey)} in ${authflow} flow`
+    );
     authParameters.DEVICE_KEY = deviceKey;
   }
 
@@ -530,7 +538,9 @@ export async function getTokensFromRefreshToken({
 
   // Add optional parameters if provided
   if (deviceKey) {
-    debug?.(`Including device key in refresh token request: ${deviceKey}`);
+    debug?.(
+      `Including device key in refresh token request: ${redactSecret(deviceKey)}`
+    );
     requestBody.DeviceKey = deviceKey;
   }
 
@@ -1063,11 +1073,17 @@ export async function handleAuthResponse({
       if (authResponse.AuthenticationResult.NewDeviceMetadata?.DeviceKey) {
         deviceKey =
           authResponse.AuthenticationResult.NewDeviceMetadata.DeviceKey;
-        debug?.("Device key obtained from authentication result:", deviceKey);
+        debug?.(
+          "Device key obtained from authentication result:",
+          redactSecret(deviceKey)
+        );
       } else if (currentDeviceHandler?.deviceKey) {
         // If we're using a device key for authentication, keep track of it
         deviceKey = currentDeviceHandler.deviceKey;
-        debug?.("Using device key from device handler:", deviceKey);
+        debug?.(
+          "Using device key from device handler:",
+          redactSecret(deviceKey)
+        );
       }
 
       return {
@@ -1138,7 +1154,9 @@ export async function handleAuthResponse({
 
       debug?.("Handling DEVICE_PASSWORD_VERIFIER challenge");
       debug?.("DEVICE_PASSWORD_VERIFIER parameters:", {
-        ChallengeParameters: authResponse.ChallengeParameters,
+        ChallengeParameters: redactTokensFromObject(
+          authResponse.ChallengeParameters
+        ),
       });
 
       // Ensure we have a handler (might have been established in previous step)
@@ -1177,7 +1195,10 @@ export async function handleAuthResponse({
       session: authResponse.Session,
       abort,
     });
-    debug?.(`Response from respondToAuthChallenge:`, nextAuthResult);
+    debug?.(
+      `Response from respondToAuthChallenge:`,
+      redactTokensFromObject(nextAuthResult)
+    );
     authResponse = nextAuthResult;
   }
 }
@@ -1724,14 +1745,14 @@ export async function confirmDevice({
   const { fetch, cognitoIdpEndpoint, proxyApiHeaders, debug } = configure();
 
   debug?.("📱 [Confirm Device] Initiating device confirmation API call");
-  debug?.("📱 [Confirm Device] Device key:", deviceKey);
+  debug?.("📱 [Confirm Device] Device key:", redactSecret(deviceKey));
   debug?.("📱 [Confirm Device] Device name:", deviceName || "Not provided");
 
   // Validate device key format before making the API call
   if (!deviceKey.includes("_")) {
     debug?.(
       "❌ [Confirm Device] Invalid device key format (missing underscore):",
-      deviceKey
+      redactSecret(deviceKey)
     );
     throw new Error("Invalid device key format: missing region_uuid format");
   }
@@ -1750,7 +1771,7 @@ export async function confirmDevice({
   ) {
     debug?.(
       "❌ [Confirm Device] Device key contains invalid UUID format:",
-      uuid
+      redactSecret(uuid)
     );
     throw new Error("Invalid device key: UUID part has invalid format");
   }
@@ -1785,7 +1806,7 @@ export async function confirmDevice({
       JSON.stringify({
         hasAccessToken: !!accessToken,
         accessTokenLength: accessToken.length,
-        deviceKey,
+        deviceKey: redactSecret(deviceKey),
         hasDeviceName: !!deviceName,
         verifierLength: deviceSecretVerifierConfig.passwordVerifier.length,
         saltLength: deviceSecretVerifierConfig.salt.length,
@@ -1815,7 +1836,10 @@ export async function confirmDevice({
     assertIsNotErrorResponse(json);
 
     debug?.("✅ [Confirm Device] Device confirmation API call successful");
-    debug?.("📱 [Confirm Device] Response:", JSON.stringify(json));
+    debug?.(
+      "📱 [Confirm Device] Response:",
+      JSON.stringify(redactTokensFromObject(json))
+    );
 
     return json as { UserConfirmationNecessary?: boolean };
   } catch (error) {

@@ -22,7 +22,12 @@ import {
   handleAuthResponse,
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
-import { bufferFromBase64, bufferToBase64 } from "./util.js";
+import {
+  bufferFromBase64,
+  bufferToBase64,
+  redactSecret,
+  redactTokensFromObject,
+} from "./util.js";
 import { retrieveDeviceKey } from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
 
@@ -350,7 +355,7 @@ export function authenticateWithSRP({
         clientMetadata,
         abort: abort.signal,
       });
-      debug?.(`Response from initiateAuth:`, challenge);
+      debug?.(`Response from initiateAuth:`, redactTokensFromObject(challenge));
       assertIsChallengeResponse(challenge);
       const {
         SALT: saltHex,
@@ -401,7 +406,9 @@ export function authenticateWithSRP({
       // Include the device key if it's available, regardless of remembered status
       // AWS documentation indicates the device key should be provided if available
       if (actualDeviceKey) {
-        debug?.(`Including device key in authentication: ${actualDeviceKey}`);
+        debug?.(
+          `Including device key in authentication: ${redactSecret(actualDeviceKey)}`
+        );
         challengeResponses.DEVICE_KEY = actualDeviceKey;
       }
 
@@ -412,7 +419,10 @@ export function authenticateWithSRP({
         session: challenge.Session,
         abort: abort.signal,
       });
-      debug?.(`Response from respondToAuthChallenge:`, authResult);
+      debug?.(
+        `Response from respondToAuthChallenge:`,
+        redactTokensFromObject(authResult)
+      );
 
       // Handle any authentication challenges
       // Pass userIdForSrp instead of original username to fix device confirmation
