@@ -23,6 +23,7 @@ import {
   Fido2NetworkError,
   isFido2Error,
   isFido2AbortError,
+  isFido2NotAllowedError,
   fromDOMException,
 } from "../errors.js";
 
@@ -80,6 +81,20 @@ describe("Fido2Error classes", () => {
       expect(error.code).toBe("CREDENTIAL_ERROR");
       expect(error.name).toBe("Fido2CredentialError");
       expect(error.cause).toBe(cause);
+    });
+
+    it("should accept a custom code while defaulting to CREDENTIAL_ERROR", () => {
+      const defaultError = new Fido2CredentialError("No credential found");
+      expect(defaultError.code).toBe("CREDENTIAL_ERROR");
+
+      const customError = new Fido2CredentialError(
+        "Not allowed",
+        undefined,
+        undefined,
+        "CREDENTIAL_NOT_ALLOWED"
+      );
+      expect(customError.code).toBe("CREDENTIAL_NOT_ALLOWED");
+      expect(customError.name).toBe("Fido2CredentialError");
     });
   });
 
@@ -175,6 +190,40 @@ describe("Type guards", () => {
       expect(isFido2AbortError(null)).toBe(false);
     });
   });
+
+  describe("isFido2NotAllowedError", () => {
+    it("should return true for errors mapped from DOMException NotAllowedError", () => {
+      const domError = new DOMException("Not allowed", "NotAllowedError");
+      expect(isFido2NotAllowedError(fromDOMException(domError))).toBe(true);
+    });
+
+    it("should return false for other credential error codes", () => {
+      const invalidState = fromDOMException(
+        new DOMException("Invalid state", "InvalidStateError")
+      );
+      const pending = fromDOMException(
+        new DOMException("A request is already pending", "OperationError")
+      );
+
+      expect(isFido2NotAllowedError(invalidState)).toBe(false);
+      expect(isFido2NotAllowedError(pending)).toBe(false);
+      expect(isFido2NotAllowedError(new Fido2CredentialError("test"))).toBe(
+        false
+      );
+    });
+
+    it("should return false for non-credential errors", () => {
+      expect(isFido2NotAllowedError(new Fido2AbortError())).toBe(false);
+      expect(isFido2NotAllowedError(new Error("test"))).toBe(false);
+      expect(
+        isFido2NotAllowedError(
+          new DOMException("Not allowed", "NotAllowedError")
+        )
+      ).toBe(false);
+      expect(isFido2NotAllowedError(null)).toBe(false);
+      expect(isFido2NotAllowedError(undefined)).toBe(false);
+    });
+  });
 });
 
 describe("fromDOMException", () => {
@@ -188,23 +237,53 @@ describe("fromDOMException", () => {
       expect(error.code).toBe("WEBAUTHN_ABORTED");
     });
 
-    it("should convert NotAllowedError to Fido2CredentialError", () => {
+    it("should convert NotAllowedError to Fido2CredentialError with CREDENTIAL_NOT_ALLOWED code", () => {
       const domError = new DOMException("Not allowed", "NotAllowedError");
       const error = fromDOMException(domError);
 
       expect(error).toBeInstanceOf(Fido2CredentialError);
       expect(error.message).toContain("not allowed");
-      expect(error.code).toBe("CREDENTIAL_ERROR");
+      expect(error.code).toBe("CREDENTIAL_NOT_ALLOWED");
       expect(error.cause).toBe(domError);
     });
 
-    it("should convert InvalidStateError to Fido2CredentialError", () => {
+    it("should convert InvalidStateError to Fido2CredentialError with CREDENTIAL_INVALID_STATE code", () => {
       const domError = new DOMException("Invalid state", "InvalidStateError");
       const error = fromDOMException(domError);
 
       expect(error).toBeInstanceOf(Fido2CredentialError);
       expect(error.message).toContain("invalid state");
-      expect(error.code).toBe("CREDENTIAL_ERROR");
+      expect(error.code).toBe("CREDENTIAL_INVALID_STATE");
+      expect(error.cause).toBe(domError);
+    });
+
+    it("should convert OperationError to Fido2CredentialError with CREDENTIAL_REQUEST_PENDING code", () => {
+      // Chrome throws OperationError when another WebAuthn request is pending
+      const domError = new DOMException(
+        "A request is already pending",
+        "OperationError"
+      );
+      const error = fromDOMException(domError);
+
+      expect(error).toBeInstanceOf(Fido2CredentialError);
+      expect(error.message).toContain("already pending");
+      expect(error.code).toBe("CREDENTIAL_REQUEST_PENDING");
+      expect(error.cause).toBe(domError);
+    });
+
+    it("should convert OperationError without a pending-request message to generic Fido2Error", () => {
+      // Browsers can also surface OperationError for transient/authenticator
+      // failures - those must not be reported as a pending request
+      const domError = new DOMException(
+        "The operation failed for an unknown transient reason.",
+        "OperationError"
+      );
+      const error = fromDOMException(domError);
+
+      expect(error).toBeInstanceOf(Fido2Error);
+      expect(error).not.toBeInstanceOf(Fido2CredentialError);
+      expect(error.message).toContain("WebAuthn operation failed");
+      expect(error.code).toBe("WEBAUTHN_ERROR");
       expect(error.cause).toBe(domError);
     });
 
