@@ -84,7 +84,9 @@ const TAB_ID =
 async function shouldAttemptRefresh(): Promise<boolean> {
   try {
     const { storage, clientId } = configure();
-    const tokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: the access token may already be expired,
+    // which is precisely when a refresh attempt matters most
+    const tokens = await retrieveTokensForRefresh();
     if (!tokens?.username) return false;
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
@@ -147,7 +149,9 @@ async function shouldAttemptRefresh(): Promise<boolean> {
 async function clearRefreshAttemptLock(): Promise<void> {
   try {
     const { storage, clientId } = configure();
-    const tokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: this runs on failure paths where the
+    // access token may be expired, but the lock must still be cleared
+    const tokens = await retrieveTokensForRefresh();
     if (!tokens?.username) return;
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
@@ -169,7 +173,7 @@ async function markRefreshCompleted(): Promise<void> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { storage, clientId } = configure();
-      const tokens = await retrieveTokens();
+      const tokens = await retrieveTokensForRefresh();
       if (!tokens?.username) return;
 
       const completedKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshCompleted`;
@@ -591,7 +595,9 @@ export async function refreshTokens({
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
   if (!userIdentifier) {
-    const storedTokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: the access token may already be expired
+    // (e.g. device woke from sleep), but the refresh token can still be valid
+    const storedTokens = await retrieveTokensForRefresh();
     userIdentifier = storedTokens?.username;
   }
   if (!userIdentifier) {
@@ -619,7 +625,8 @@ export async function refreshTokens({
       isRefreshingCb?.(true);
 
       if (!tokens) {
-        tokens = await retrieveTokens();
+        // Use retrieveTokensForRefresh to include expired tokens
+        tokens = await retrieveTokensForRefresh();
       }
 
       const refreshToken = tokens?.refreshToken;
@@ -697,7 +704,7 @@ export async function refreshTokens({
                   debug?.(
                     "Refresh token reuse detected; retrying with latest stored refresh token"
                   );
-                  const latestStored = await retrieveTokens();
+                  const latestStored = await retrieveTokensForRefresh();
                   const latestToken = latestStored?.refreshToken;
                   if (latestToken && latestToken !== currentRefreshToken) {
                     currentRefreshToken = latestToken;
@@ -929,8 +936,9 @@ export async function forceRefreshTokens(
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
-  // Get username to clear the right timer
-  const tokens = await retrieveTokens();
+  // Get username to clear the right timer (include expired tokens, since
+  // forcing a refresh is most relevant when the access token already expired)
+  const tokens = await retrieveTokensForRefresh();
   const username = tokens?.username;
   const state = getRefreshState(username);
 
