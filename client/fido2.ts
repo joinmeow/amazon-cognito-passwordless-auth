@@ -37,6 +37,7 @@ import {
   Fido2ValidationError,
   Fido2AuthError,
   fromDOMException,
+  isFido2AbortError,
 } from "./errors.js";
 
 // Enhanced type definitions for mediation support
@@ -1292,7 +1293,16 @@ export function authenticateWithFido2({
       statusCb?.("SIGNED_IN_WITH_FIDO2");
       return processedTokens;
     } catch (err) {
-      statusCb?.("FIDO2_SIGNIN_FAILED");
+      if (
+        isFido2AbortError(err) ||
+        (err instanceof Error && err.name === "AbortError")
+      ) {
+        // Deliberate cancellation (e.g. the caller invoked abort()) is not a
+        // sign-in failure: revert to the idle state the flow started from
+        statusCb?.("SIGNED_OUT");
+      } else {
+        statusCb?.("FIDO2_SIGNIN_FAILED");
+      }
       throw err;
     }
   })();
