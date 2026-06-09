@@ -60,9 +60,11 @@ export function authenticateWithPlaintextPassword({
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
 
-      // We'll add device key later after we have username context
-      // Do initial authentication without device parameters
-      debug?.(`Invoking initiateAuth with username and password only...`);
+      // Look up the device key for this user (if not passed in), so Cognito
+      // can recognize a remembered device and skip MFA where applicable
+      const actualDeviceKey = deviceKey ?? (await retrieveDeviceKey(username));
+
+      debug?.(`Invoking initiateAuth with username and password ...`);
 
       const authParameters: Record<string, string> = {
         USERNAME: username,
@@ -72,15 +74,11 @@ export function authenticateWithPlaintextPassword({
       const authResponse = await initiateAuth({
         authflow: "USER_PASSWORD_AUTH",
         authParameters,
+        deviceKey: actualDeviceKey,
         clientMetadata,
         abort: abort.signal,
       });
       debug?.(`Response from initiateAuth:`, authResponse);
-
-      // Now that we have initiated authentication, we can look up device key
-      // using the confirmed username for this session
-      const actualDeviceKey =
-        deviceKey ?? (username ? await retrieveDeviceKey(username) : undefined);
 
       // Pre-create device SRP handler if we have a device key
       const deviceHandler = actualDeviceKey
