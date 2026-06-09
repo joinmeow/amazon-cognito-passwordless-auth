@@ -255,6 +255,27 @@ function isAuthenticatorAssertionResponseLike(
   );
 }
 
+/**
+ * Encode the server-provided user handle (user.id) as UTF-8 bytes.
+ *
+ * Sign-in decodes the userHandle returned by the authenticator with
+ * TextDecoder (UTF-8), so registration must use the symmetric encoding —
+ * otherwise non-ASCII usernames are corrupted at registration and
+ * usernameless sign-in permanently fails for that credential.
+ */
+function encodeUserHandle(id: string) {
+  const userHandle = new TextEncoder().encode(id);
+  // WebAuthn caps user handles at 64 bytes — fail loudly instead of
+  // letting the authenticator truncate or reject opaquely
+  if (userHandle.byteLength > 64) {
+    throw new Fido2ValidationError(
+      `User handle must not exceed 64 bytes (got ${userHandle.byteLength} bytes)`,
+      id
+    );
+  }
+  return userHandle;
+}
+
 export async function fido2CreateCredential({
   friendlyName,
 }: {
@@ -276,7 +297,7 @@ export async function fido2CreateCredential({
     challenge: bufferFromBase64Url(publicKeyOptions.challenge),
     user: {
       ...publicKeyOptions.user,
-      id: Uint8Array.from(publicKeyOptions.user.id, (c) => c.charCodeAt(0)),
+      id: encodeUserHandle(publicKeyOptions.user.id),
     },
     excludeCredentials: publicKeyOptions.excludeCredentials.map(
       (credential) => ({

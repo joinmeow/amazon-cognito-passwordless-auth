@@ -15,6 +15,7 @@
 
 import {
   fido2getCredential,
+  fido2CreateCredential,
   prepareFido2SignIn,
   authenticateWithFido2,
 } from "../fido2.js";
@@ -34,14 +35,23 @@ import {
   assertTransformedCredentialMatches,
 } from "./__utils__/webauthn-mocks.js";
 import { initiateAuth } from "../cognito-api.js";
-import { retrieveDeviceKey } from "../storage.js";
+import { retrieveDeviceKey, retrieveTokens } from "../storage.js";
 import { bufferToBase64Url } from "../util.js";
-import { TextDecoder as NodeTextDecoder } from "util";
+import {
+  TextDecoder as NodeTextDecoder,
+  TextEncoder as NodeTextEncoder,
+} from "util";
 
 if (typeof globalThis.TextDecoder === "undefined") {
   (
     globalThis as unknown as { TextDecoder: typeof NodeTextDecoder }
   ).TextDecoder = NodeTextDecoder;
+}
+
+if (typeof globalThis.TextEncoder === "undefined") {
+  (
+    globalThis as unknown as { TextEncoder: typeof NodeTextEncoder }
+  ).TextEncoder = NodeTextEncoder;
 }
 
 // Mock dependencies
@@ -55,6 +65,9 @@ const mockInitiateAuth = initiateAuth as jest.MockedFunction<
 >;
 const mockRetrieveDeviceKey = retrieveDeviceKey as jest.MockedFunction<
   typeof retrieveDeviceKey
+>;
+const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
+  typeof retrieveTokens
 >;
 
 describe("FIDO2 Core Functionality", () => {
@@ -312,6 +325,89 @@ describe("FIDO2 Core Functionality", () => {
     // Note: Full integration tests for credential creation are complex
     // as they require mocking multiple API calls. These are covered by
     // the existing fido2-errors.test.ts file.
+
+    describe("user handle (user.id) encoding", () => {
+      const startCreateResponse = (userId: string) => ({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: TEST_RP.name, id: TEST_RP.id },
+          user: { id: userId, name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      const captureUserHandle = async (userId: string) => {
+        mockRetrieveTokens.mockResolvedValue({
+          username: "testuser",
+          idToken: "test-token",
+        } as Awaited<ReturnType<typeof retrieveTokens>>);
+        (baseConfig.fetch as jest.Mock).mockResolvedValue(
+          startCreateResponse(userId)
+        );
+        // Return null from create() so fido2CreateCredential throws after
+        // we have captured the assembled publicKey options
+        const mockCreate = jest.fn().mockResolvedValue(null);
+        Object.defineProperty(global.navigator, "credentials", {
+          value: { create: mockCreate },
+          configurable: true,
+        });
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow(Fido2CredentialError);
+        const { publicKey } = mockCreate.mock.calls[0][0] as {
+          publicKey: { user: { id: Uint8Array } };
+        };
+        return publicKey.user.id;
+      };
+
+      it("round-trips non-ASCII user handles through the sign-in decoder", async () => {
+        const userId = "u|Ünïcødé用户";
+        const userHandle = await captureUserHandle(userId);
+        // Sign-in decodes the userHandle with TextDecoder (UTF-8), so the
+        // registered bytes must decode back to the exact same string
+        expect(new TextDecoder().decode(userHandle)).toBe(userId);
+        // The old Latin-1 byte-stuffing encoding corrupted these bytes
+        expect(Array.from(userHandle)).not.toEqual(
+          Array.from(userId, (c) => c.charCodeAt(0))
+        );
+      });
+
+      it("encodes ASCII user handles identically to the previous encoding", async () => {
+        const userId = "u|user-123";
+        const userHandle = await captureUserHandle(userId);
+        expect(Array.from(userHandle)).toEqual(
+          Array.from(userId, (c) => c.charCodeAt(0))
+        );
+        expect(new TextDecoder().decode(userHandle)).toBe(userId);
+      });
+
+      it("throws a clear error when the user handle exceeds 64 bytes", async () => {
+        const userId = `u|${"用".repeat(22)}`; // 2 + 22 * 3 = 68 bytes UTF-8
+        mockRetrieveTokens.mockResolvedValue({
+          username: "testuser",
+          idToken: "test-token",
+        } as Awaited<ReturnType<typeof retrieveTokens>>);
+        (baseConfig.fetch as jest.Mock).mockResolvedValue(
+          startCreateResponse(userId)
+        );
+        const mockCreate = jest.fn();
+        Object.defineProperty(global.navigator, "credentials", {
+          value: { create: mockCreate },
+          configurable: true,
+        });
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow(Fido2ValidationError);
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow("User handle must not exceed 64 bytes");
+        expect(mockCreate).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe("Error Handling", () => {
