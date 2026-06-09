@@ -17,9 +17,14 @@ import {
   fido2getCredential,
   prepareFido2SignIn,
   authenticateWithFido2,
+  COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS,
 } from "../fido2.js";
 import { configure } from "../config.js";
-import { Fido2CredentialError, Fido2ValidationError } from "../errors.js";
+import {
+  Fido2AbortError,
+  Fido2CredentialError,
+  Fido2ValidationError,
+} from "../errors.js";
 import {
   MOCK_ASSERTION_CREDENTIAL,
   EXPECTED_TRANSFORMED_CREDENTIAL,
@@ -540,6 +545,167 @@ describe("FIDO2 Core Functionality", () => {
       await expect(prepareFido2SignIn({ credentialGetter })).rejects.toThrow(
         "Username is required for initiating sign-in"
       );
+    });
+
+    describe("conditional mediation session renewal", () => {
+      const parsedAssertion = {
+        credentialIdB64: "cred-renewal",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "signature",
+        userHandleB64: null,
+      };
+
+      const challengeResponse = (n: number) =>
+        ({
+          ChallengeParameters: {
+            fido2options: JSON.stringify({
+              challenge: `server-challenge-${n}`,
+              relyingPartyId: "server-rp",
+            }),
+          },
+          Session: `session-${n}`,
+        }) as any;
+
+      // A conditional credentials.get() that stays pending until aborted,
+      // mimicking the browser's autofill behavior
+      const pendingUntilAborted = ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<never>((_, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new Fido2AbortError())
+          );
+        });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it("renews the Cognito session with a fresh challenge when the conditional request outlives the renewal interval", async () => {
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1))
+          .mockResolvedValueOnce(challengeResponse(2));
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        await expect(prepared).resolves.toEqual({
+          username: "alice",
+          credential: parsedAssertion,
+          session: "session-2",
+          existingDeviceKey: undefined,
+        });
+
+        // The whole CUSTOM_AUTH flow restarted: new session, new challenge
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+        expect(credentialGetter).toHaveBeenCalledTimes(2);
+        expect(credentialGetter.mock.calls[0][0].challenge).toBe(
+          "server-challenge-1"
+        );
+        expect(credentialGetter.mock.calls[1][0].challenge).toBe(
+          "server-challenge-2"
+        );
+      });
+
+      it("renews repeatedly while the conditional request stays pending", async () => {
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1))
+          .mockResolvedValueOnce(challengeResponse(2))
+          .mockResolvedValueOnce(challengeResponse(3));
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        await expect(prepared).resolves.toEqual(
+          expect.objectContaining({ session: "session-3" })
+        );
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(3);
+        expect(credentialGetter).toHaveBeenCalledTimes(3);
+      });
+
+      it("does not renew when the credential resolves before the renewal interval", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+
+        const result = await prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        expect(result.session).toBe("session-1");
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("propagates caller aborts instead of renewing", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted);
+        const abortController = new AbortController();
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+          signal: abortController.signal,
+        });
+
+        // Let the flow reach the pending credential request, then abort
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        abortController.abort();
+
+        await expect(prepared).rejects.toThrow(Fido2AbortError);
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes the caller signal straight through for non-conditional mediation", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+        const abortController = new AbortController();
+
+        await prepareFido2SignIn({
+          username: "alice",
+          mediation: "immediate",
+          credentialGetter,
+          signal: abortController.signal,
+        });
+
+        expect(credentialGetter.mock.calls[0][0].signal).toBe(
+          abortController.signal
+        );
+      });
     });
 
     it("rejects authenticateWithFido2 when provided username mismatches prepared bundle", async () => {
