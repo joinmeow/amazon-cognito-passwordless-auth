@@ -46,19 +46,20 @@ export function createFetchWithRetry(
   ): Promise<MinimalResponse> => {
     // Helper to wait with abort support
     const wait = (ms: number): Promise<void> => {
-      if (init?.signal?.aborted) {
+      const signal = init?.signal;
+      if (signal?.aborted) {
         return Promise.reject(new DOMException("Aborted", "AbortError"));
       }
       return new Promise((resolve, reject) => {
-        const id = setTimeout(resolve, ms);
-        init?.signal?.addEventListener(
-          "abort",
-          () => {
-            clearTimeout(id);
-            reject(new DOMException("Aborted", "AbortError"));
-          },
-          { once: true }
-        );
+        const onAbort = () => {
+          clearTimeout(id);
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        const id = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, ms);
+        signal?.addEventListener("abort", onAbort, { once: true });
       });
     };
 
