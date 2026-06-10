@@ -817,7 +817,9 @@ function _usePasswordless() {
     // Cleanup function
     return () => {
       abortController.abort();
-      unsubscribeTokensStored();
+      if (typeof unsubscribeTokensStored === "function") {
+        unsubscribeTokensStored();
+      }
       if (typeof globalThis !== "undefined" && globalThis.removeEventListener) {
         globalThis.removeEventListener("storage", handleStorageChange);
       }
