@@ -22,7 +22,7 @@ import {
 import { processTokens } from "./common.js";
 import { retrieveDeviceKey } from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
-import { parseJwtPayload } from "./util.js";
+import { parseJwtPayload, redactTokensFromObject } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
 export function authenticateWithPlaintextPassword({
@@ -77,7 +77,10 @@ export function authenticateWithPlaintextPassword({
         clientMetadata,
         abort: abort.signal,
       });
-      debug?.(`Response from initiateAuth:`, authResponse);
+      debug?.(
+        `Response from initiateAuth:`,
+        redactTokensFromObject(authResponse)
+      );
 
       // Resolve the canonical user id, so device records are keyed
       // consistently with the SRP flow (the username as entered may be an
