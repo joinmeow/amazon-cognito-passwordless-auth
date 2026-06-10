@@ -26,7 +26,7 @@ import {
   usePasswordless,
 } from "../react/hooks.js";
 import { configure } from "../config.js";
-import { retrieveTokens } from "../storage.js";
+import { retrieveTokens, onTokensStored } from "../storage.js";
 
 // Mocks
 jest.mock("../config");
@@ -35,6 +35,9 @@ jest.mock("../storage");
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
 const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
   typeof retrieveTokens
+>;
+const mockOnTokensStored = onTokensStored as jest.MockedFunction<
+  typeof onTokensStored
 >;
 
 describe("PasswordlessContext stability with activity tracking enabled", () => {
@@ -57,6 +60,10 @@ describe("PasswordlessContext stability with activity tracking enabled", () => {
 
     // No cached tokens
     mockRetrieveTokens.mockResolvedValue(undefined);
+
+    // The hook's mount effect subscribes via onTokensStored and calls the
+    // returned unsubscribe function in its cleanup
+    mockOnTokensStored.mockReturnValue(() => {});
   });
 
   afterEach(() => {
