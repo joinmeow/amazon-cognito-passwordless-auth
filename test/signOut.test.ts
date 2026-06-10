@@ -71,6 +71,71 @@ describe("SignOut Lock", () => {
     // signOut should eventually complete when lock is released
     await expect(signedOut).resolves.toBeUndefined();
   }, 20000); // Increase timeout for lock wait
+
+  test("should remove all per-user Passwordless keys from storage", async () => {
+    // Use an enumerable in-memory storage so we can assert on leftover keys
+    const backing = new Map<string, string>();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage: {
+        getItem: (key: string) => backing.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          backing.set(key, value);
+        },
+        removeItem: (key: string) => {
+          backing.delete(key);
+        },
+      },
+    });
+    const { storage } = configure();
+
+    // Populate everything the library writes for a signed-in user
+    const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
+    const customKeyPrefix = `Passwordless.testClient`;
+    await storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, "testuser");
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.accessToken`,
+      createValidJWT()
+    );
+    await storage.setItem(`${amplifyKeyPrefix}.testuser.idToken`, "id-token");
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.refreshToken`,
+      "test-refresh-token"
+    );
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.tokenScopesString`,
+      "openid"
+    );
+    await storage.setItem(`${amplifyKeyPrefix}.testuser.userData`, "{}");
+    await storage.setItem(`${amplifyKeyPrefix}.testuser.clockDriftMs`, "0");
+    await storage.setItem(`${customKeyPrefix}.testuser.authMethod`, "SRP");
+    await storage.setItem(
+      `${customKeyPrefix}.testuser.lastRefreshAttempt`,
+      `${Date.now()}:some-tab-id`
+    );
+    await storage.setItem(
+      `${customKeyPrefix}.testuser.lastRefreshCompleted`,
+      Date.now().toString()
+    );
+    // Device key uses a different shape and must survive sign-out
+    const deviceKey = `${customKeyPrefix}.device.testuser`;
+    await storage.setItem(deviceKey, JSON.stringify({ deviceKey: "dev-123" }));
+
+    const { signedOut } = signOut({ skipTokenRevocation: true });
+    await signedOut;
+
+    const leftoverUserKeys = [...backing.keys()].filter((key) =>
+      key.startsWith(`${customKeyPrefix}.testuser.`)
+    );
+    expect(leftoverUserKeys).toEqual([]);
+    const leftoverAmplifyKeys = [...backing.keys()].filter((key) =>
+      key.startsWith(amplifyKeyPrefix)
+    );
+    expect(leftoverAmplifyKeys).toEqual([]);
+    // Device key is intentionally preserved between sessions
+    expect(backing.has(deviceKey)).toBe(true);
+  }, 20000);
 });
 
 describe("SignOut with expired access token", () => {
@@ -120,9 +185,9 @@ describe("SignOut with expired access token", () => {
     const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
 
     // Sanity check: the session is in storage before sign-out.
-    expect(
-      await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`)
-    ).toBe(username);
+    expect(await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`)).toBe(
+      username
+    );
     expect(
       await storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`)
     ).toBe(refreshToken);
@@ -142,8 +207,8 @@ describe("SignOut with expired access token", () => {
     }
 
     // The still-valid refresh token must have been revoked server-side.
-    const revokeCall = fetchMock.mock.calls.find(
-      ([, init]) => init?.headers?.["x-amz-target"]?.endsWith("RevokeToken")
+    const revokeCall = fetchMock.mock.calls.find(([, init]) =>
+      init?.headers?.["x-amz-target"]?.endsWith("RevokeToken")
     );
     expect(revokeCall).toBeDefined();
     expect(JSON.parse(revokeCall[1].body)).toEqual(
@@ -213,8 +278,8 @@ describe("SignOut with expired access token", () => {
       }
 
       // Nothing to revoke - no RevokeToken call should be made.
-      const revokeCall = fetchMock.mock.calls.find(
-        ([, init]) => init?.headers?.["x-amz-target"]?.endsWith("RevokeToken")
+      const revokeCall = fetchMock.mock.calls.find(([, init]) =>
+        init?.headers?.["x-amz-target"]?.endsWith("RevokeToken")
       );
       expect(revokeCall).toBeUndefined();
     }

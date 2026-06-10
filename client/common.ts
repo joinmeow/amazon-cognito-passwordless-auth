@@ -439,6 +439,15 @@ export const signOut = (props?: {
           storage.removeItem(`${amplifyKeyPrefix}.${username}.userData`),
           storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
           storage.removeItem(`${amplifyKeyPrefix}.${username}.clockDriftMs`),
+          storage.removeItem(`${customKeyPrefix}.${username}.authMethod`),
+          storage.removeItem(
+            `${customKeyPrefix}.${username}.lastRefreshAttempt`
+          ),
+          storage.removeItem(
+            `${customKeyPrefix}.${username}.lastRefreshCompleted`
+          ),
+          // Legacy keys no longer written by current versions, removed for
+          // migration hygiene
           storage.removeItem(`${customKeyPrefix}.${username}.expireAt`),
           storage.removeItem(`${customKeyPrefix}.${username}.refreshingTokens`),
           // Note: We do NOT remove deviceKey - it should persist between sessions
