@@ -21,7 +21,7 @@ import {
 } from "../react/hooks.js";
 import { signInWithRedirect } from "../hosted-oauth.js";
 import { configure } from "../config.js";
-import { retrieveTokens } from "../storage.js";
+import { retrieveTokens, onTokensStored } from "../storage.js";
 import type { ConfigWithDefaults } from "../config.js";
 
 // Mock dependencies
@@ -35,6 +35,9 @@ const mockSignInWithRedirect = signInWithRedirect as jest.MockedFunction<
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
 const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
   typeof retrieveTokens
+>;
+const mockOnTokensStored = onTokensStored as jest.MockedFunction<
+  typeof onTokensStored
 >;
 
 describe("React OAuth Integration - Simple", () => {
@@ -56,6 +59,7 @@ describe("React OAuth Integration - Simple", () => {
     mockConfigure.mockReturnValue(mockConfig as ConfigWithDefaults);
     mockSignInWithRedirect.mockResolvedValue(undefined);
     mockRetrieveTokens.mockResolvedValue(undefined); // No tokens initially
+    mockOnTokensStored.mockReturnValue(() => {}); // Returns unsubscribe function
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (

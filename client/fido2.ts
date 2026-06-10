@@ -26,6 +26,7 @@ import {
   throwIfNot2xx,
   bufferFromBase64Url,
   bufferToBase64Url,
+  redactTokensFromObject,
 } from "./util.js";
 import { configure } from "./config.js";
 import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
@@ -37,6 +38,7 @@ import {
   Fido2ValidationError,
   Fido2AuthError,
   fromDOMException,
+  isFido2AbortError,
 } from "./errors.js";
 
 // Enhanced type definitions for mediation support
@@ -206,10 +208,28 @@ export interface ParsedFido2Assertion {
 
 export interface PreparedFido2SignIn {
   username: string;
+  /**
+   * Cognito session for the CUSTOM_AUTH challenge. Note: Cognito invalidates
+   * this session after `AuthSessionValidity` minutes (3 by default), so pass
+   * the prepared bundle to authenticateWithFido2() promptly after it resolves.
+   */
   session: string;
   credential: ParsedFido2Assertion;
   existingDeviceKey?: string;
 }
+
+/**
+ * How long to let a conditional-mediation (autofill) credential request stay
+ * pending on a single Cognito CUSTOM_AUTH session before renewing the session.
+ *
+ * Cognito invalidates a challenge session after `AuthSessionValidity` minutes
+ * (3 by default, configurable 3-15), whereas a conditional
+ * navigator.credentials.get() may stay pending indefinitely, until the user
+ * picks an autofill suggestion. Renewing slightly below the minimum session
+ * validity ensures the assertion is always signed over a challenge whose
+ * Cognito session is still valid.
+ */
+export const COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS = 150_000; // 2.5 minutes
 
 type AuthenticatorAttestationResponseWithOptionalMembers =
   AuthenticatorAttestationResponse & {
@@ -589,9 +609,13 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
   }
 
   // Required: challenge
-  if (!("challenge" in o) || typeof o.challenge !== "string") {
+  if (
+    !("challenge" in o) ||
+    typeof o.challenge !== "string" ||
+    !o.challenge.length
+  ) {
     throw new Fido2ValidationError(
-      "Fido2 options must have a challenge string",
+      "Fido2 options must have a non-empty challenge string",
       o
     );
   }
@@ -624,9 +648,9 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
 
       const cred = credential as Record<string, unknown>;
 
-      if (!("id" in cred) || typeof cred.id !== "string") {
+      if (!("id" in cred) || typeof cred.id !== "string" || !cred.id.length) {
         throw new Fido2ValidationError(
-          "Each credential must have an id string",
+          "Each credential must have a non-empty id string",
           o
         );
       }
@@ -879,6 +903,14 @@ async function requestUsernamelessSignInChallenge() {
  *
  * Password managers typically store usernames, so username-based flow is recommended.
  *
+ * **Session validity**: Cognito invalidates a challenge session after
+ * `AuthSessionValidity` minutes (3 by default). For the username-based flow with
+ * conditional mediation, this function transparently renews the session (and its
+ * FIDO2 challenge) while the autofill request is pending, so users can pick a
+ * passkey from autofill long after page load. Once the returned promise resolves
+ * though, the contained session is subject to expiry: pass the prepared bundle
+ * to authenticateWithFido2() promptly.
+ *
  * @example
  * ```typescript
  * // ✅ Recommended: Fast path with username
@@ -948,47 +980,124 @@ export async function prepareFido2SignIn({
       mediation,
     });
 
+    const usernameForAuth = resolvedUsername;
     existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
-    const initAuthResponse = await initiateAuth({
-      authflow: "CUSTOM_AUTH",
-      authParameters: {
-        USERNAME: resolvedUsername,
-        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
-      },
-      abort: signal,
-    });
+    const deviceKeyForAuth = existingDeviceKey;
 
-    assertIsChallengeResponse(initAuthResponse);
-    if (!initAuthResponse.ChallengeParameters.fido2options) {
-      throw new Error("Server did not send a FIDO2 challenge");
+    const initiateFido2Challenge = async () => {
+      const initAuthResponse = await initiateAuth({
+        authflow: "CUSTOM_AUTH",
+        authParameters: {
+          USERNAME: usernameForAuth,
+          ...(deviceKeyForAuth ? { DEVICE_KEY: deviceKeyForAuth } : {}),
+        },
+        abort: signal,
+      });
+
+      assertIsChallengeResponse(initAuthResponse);
+      if (!initAuthResponse.ChallengeParameters.fido2options) {
+        throw new Error("Server did not send a FIDO2 challenge");
+      }
+
+      const fido2options: unknown = JSON.parse(
+        initAuthResponse.ChallengeParameters.fido2options
+      );
+      assertIsFido2Options(fido2options);
+      debug?.("FIDO2 challenge received from Cognito");
+      return { fido2options, session: initAuthResponse.Session };
+    };
+
+    const getCredentialForChallenge = (
+      fido2options: Fido2Options,
+      credentialSignal?: AbortSignal
+    ) =>
+      credentialGetter({
+        ...fido2options,
+        relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
+        timeout: fido2.timeout ?? fido2options.timeout,
+        userVerification:
+          fido2.authenticatorSelection?.userVerification ??
+          fido2options.userVerification,
+        credentials: (fido2options.credentials ?? []).concat(
+          credentials?.filter(
+            (cred) =>
+              !fido2options.credentials?.find(
+                (optionsCred) => cred.id === optionsCred.id
+              )
+          ) ?? []
+        ),
+        mediation,
+        signal: credentialSignal,
+      });
+
+    if (mediation === "conditional") {
+      // Conditional mediation is "set and forget": the pending
+      // navigator.credentials.get() only resolves when the user eventually
+      // picks an autofill suggestion, which can easily take longer than the
+      // Cognito auth session stays valid (AuthSessionValidity, 3 minutes by
+      // default). Proactively renew the session (and the FIDO2 challenge that
+      // comes with it) before it expires, by aborting the pending conditional
+      // request and restarting it with the fresh challenge. Pending
+      // conditional requests show no UI, so renewal is invisible to the user.
+      const RENEW_SESSION = Symbol("renew-session");
+      for (;;) {
+        const challenge = await initiateFido2Challenge();
+        const renewalAbort = new AbortController();
+        const forwardAbort = () => renewalAbort.abort();
+        if (signal?.aborted) {
+          renewalAbort.abort();
+        } else {
+          signal?.addEventListener("abort", forwardAbort, { once: true });
+        }
+        let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+        const credentialPromise = getCredentialForChallenge(
+          challenge.fido2options,
+          renewalAbort.signal
+        );
+        try {
+          const raceOutcome = await Promise.race([
+            credentialPromise,
+            new Promise<typeof RENEW_SESSION>((resolve) => {
+              renewalTimer = setTimeout(
+                () => resolve(RENEW_SESSION),
+                COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+              );
+            }),
+          ]);
+          if (raceOutcome !== RENEW_SESSION) {
+            assertion = raceOutcome;
+            session = challenge.session;
+            break;
+          }
+          debug?.(
+            "🔄 Cognito auth session nearing expiry while conditional request pending - renewing challenge"
+          );
+          renewalAbort.abort();
+          try {
+            // The user may have picked a credential just as the renewal timer
+            // fired - if so, the current session is still valid, use it
+            assertion = await credentialPromise;
+            session = challenge.session;
+            break;
+          } catch (err) {
+            if (!isFido2AbortError(err) || signal?.aborted) {
+              throw err;
+            }
+            // Aborted by us for renewal - loop around for a fresh challenge
+          }
+        } finally {
+          clearTimeout(renewalTimer);
+          signal?.removeEventListener("abort", forwardAbort);
+        }
+      }
+    } else {
+      const challenge = await initiateFido2Challenge();
+      assertion = await getCredentialForChallenge(
+        challenge.fido2options,
+        signal
+      );
+      session = challenge.session;
     }
-
-    const fido2options: unknown = JSON.parse(
-      initAuthResponse.ChallengeParameters.fido2options
-    );
-    assertIsFido2Options(fido2options);
-    debug?.("FIDO2 challenge received from Cognito");
-
-    assertion = await credentialGetter({
-      ...fido2options,
-      relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-      timeout: fido2.timeout ?? fido2options.timeout,
-      userVerification:
-        fido2.authenticatorSelection?.userVerification ??
-        fido2options.userVerification,
-      credentials: (fido2options.credentials ?? []).concat(
-        credentials?.filter(
-          (cred) =>
-            !fido2options.credentials?.find(
-              (optionsCred) => cred.id === optionsCred.id
-            )
-        ) ?? []
-      ),
-      mediation,
-      signal,
-    });
-
-    session = initAuthResponse.Session;
   }
   // ⚠️ Flow 2: Usernameless - SLOWER but works when username unknown
   // Only use this when password manager doesn't have username stored
@@ -1163,6 +1272,8 @@ export function authenticateWithFido2({
    * Optional pre-fetched WebAuthn assertion bundle returned by prepareFido2SignIn().
    * When provided, authenticateWithFido2() will skip navigator.credentials.get()
    * and directly complete the Cognito challenge using this data.
+   * Note: the bundle's Cognito session expires after `AuthSessionValidity`
+   * minutes (3 by default), so use it promptly after preparation.
    */
   prepared?: PreparedFido2SignIn;
 }) {
@@ -1252,7 +1363,10 @@ export function authenticateWithFido2({
 
       let tokens;
       if (isAuthenticatedResponse(authResult)) {
-        debug?.(`Response from respondToAuthChallenge (tokens):`, authResult);
+        debug?.(
+          `Response from respondToAuthChallenge (tokens):`,
+          redactTokensFromObject(authResult)
+        );
         tokens = {
           accessToken: authResult.AuthenticationResult.AccessToken,
           idToken: authResult.AuthenticationResult.IdToken,
@@ -1313,7 +1427,16 @@ export function authenticateWithFido2({
       statusCb?.("SIGNED_IN_WITH_FIDO2");
       return processedTokens;
     } catch (err) {
-      statusCb?.("FIDO2_SIGNIN_FAILED");
+      if (
+        isFido2AbortError(err) ||
+        (err instanceof Error && err.name === "AbortError")
+      ) {
+        // Deliberate cancellation (e.g. the caller invoked abort()) is not a
+        // sign-in failure: revert to the idle state the flow started from
+        statusCb?.("SIGNED_OUT");
+      } else {
+        statusCb?.("FIDO2_SIGNIN_FAILED");
+      }
       throw err;
     }
   })();
