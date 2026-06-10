@@ -19,7 +19,11 @@ import {
   authenticateWithFido2,
 } from "../fido2.js";
 import { configure } from "../config.js";
-import { Fido2CredentialError, Fido2ValidationError } from "../errors.js";
+import {
+  Fido2AbortError,
+  Fido2CredentialError,
+  Fido2ValidationError,
+} from "../errors.js";
 import {
   MOCK_ASSERTION_CREDENTIAL,
   EXPECTED_TRANSFORMED_CREDENTIAL,
@@ -33,7 +37,7 @@ import {
   createWebAuthnError,
   assertTransformedCredentialMatches,
 } from "./__utils__/webauthn-mocks.js";
-import { initiateAuth } from "../cognito-api.js";
+import { initiateAuth, respondToAuthChallenge } from "../cognito-api.js";
 import { retrieveDeviceKey } from "../storage.js";
 import { bufferToBase64Url } from "../util.js";
 import { TextDecoder as NodeTextDecoder } from "util";
@@ -55,6 +59,9 @@ const mockInitiateAuth = initiateAuth as jest.MockedFunction<
 >;
 const mockRetrieveDeviceKey = retrieveDeviceKey as jest.MockedFunction<
   typeof retrieveDeviceKey
+>;
+const mockRespondToAuthChallenge = respondToAuthChallenge as jest.MockedFunction<
+  typeof respondToAuthChallenge
 >;
 
 describe("FIDO2 Core Functionality", () => {
@@ -565,6 +572,74 @@ describe("FIDO2 Core Functionality", () => {
       await expect(result.signedIn).rejects.toThrow(
         /Prepared credentials belong to username/
       );
+    });
+  });
+
+  describe("authenticateWithFido2 status on cancellation", () => {
+    const prepared = {
+      username: "bundle-user",
+      session: "mock-session",
+      credential: {
+        credentialIdB64: "cred-id",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "sig",
+        userHandleB64: null,
+      },
+    };
+
+    it("does not report FIDO2_SIGNIN_FAILED when the caller aborts a pending sign-in", async () => {
+      mockRespondToAuthChallenge.mockImplementationOnce(
+        ({ abort: signal }) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () =>
+              reject(
+                new DOMException("The operation was aborted.", "AbortError")
+              )
+            );
+          })
+      );
+
+      const statusCb = jest.fn();
+      const { signedIn, abort } = authenticateWithFido2({
+        prepared,
+        statusCb,
+      });
+      // Let the flow reach respondToAuthChallenge before cancelling
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      abort();
+
+      await expect(signedIn).rejects.toThrow("aborted");
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses).not.toContain("FIDO2_SIGNIN_FAILED");
+      expect(statuses[statuses.length - 1]).toBe("SIGNED_OUT");
+    });
+
+    it("does not report FIDO2_SIGNIN_FAILED when WebAuthn is cancelled (Fido2AbortError)", async () => {
+      mockRespondToAuthChallenge.mockRejectedValueOnce(new Fido2AbortError());
+
+      const statusCb = jest.fn();
+      const { signedIn } = authenticateWithFido2({ prepared, statusCb });
+
+      await expect(signedIn).rejects.toThrow(Fido2AbortError);
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses).not.toContain("FIDO2_SIGNIN_FAILED");
+      expect(statuses[statuses.length - 1]).toBe("SIGNED_OUT");
+    });
+
+    it("still reports FIDO2_SIGNIN_FAILED for genuine failures", async () => {
+      mockRespondToAuthChallenge.mockRejectedValueOnce(
+        new Error("Incorrect username or password.")
+      );
+
+      const statusCb = jest.fn();
+      const { signedIn } = authenticateWithFido2({ prepared, statusCb });
+
+      await expect(signedIn).rejects.toThrow(
+        "Incorrect username or password."
+      );
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses[statuses.length - 1]).toBe("FIDO2_SIGNIN_FAILED");
     });
   });
 });
