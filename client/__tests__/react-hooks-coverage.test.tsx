@@ -21,7 +21,7 @@ import {
   usePasswordless,
 } from "../react/hooks.js";
 import { configure } from "../config.js";
-import { retrieveTokens } from "../storage.js";
+import { retrieveTokens, onTokensStored } from "../storage.js";
 import { handleCognitoOAuthCallback } from "../hosted-oauth.js";
 import {
   prepareFido2SignIn as prepareFido2SignInCore,
@@ -55,6 +55,9 @@ jest.mock("../fido2", () => {
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
 const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
   typeof retrieveTokens
+>;
+const mockOnTokensStored = onTokensStored as jest.MockedFunction<
+  typeof onTokensStored
 >;
 const mockHandleOAuth = handleCognitoOAuthCallback as jest.MockedFunction<
   typeof handleCognitoOAuthCallback
@@ -94,6 +97,9 @@ describe("React hooks coverage for hooks.tsx branches", () => {
 
     // By default, no cached tokens
     mockRetrieveTokens.mockResolvedValue(undefined);
+
+    // onTokensStored returns an unsubscribe function
+    mockOnTokensStored.mockReturnValue(() => {});
   });
 
   it("synthesizes idToken for REDIRECT tokens missing idToken", async () => {
