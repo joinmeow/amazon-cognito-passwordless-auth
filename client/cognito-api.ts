@@ -18,7 +18,37 @@ import { retrieveTokens } from "./storage.js";
 import { CognitoSecurityProvider } from "./cognito-security.js";
 import { createDeviceSrpAuthHandler, DeviceSrpAuthResult } from "./device.js";
 
-const AWS_REGION_REGEXP = /^[a-z]{2}-[a-z]+-\d$/;
+// Matches AWS regions across partitions, incl. multi-segment ones such as
+// us-gov-west-1 (GovCloud) and eusc-de-east-1 (European Sovereign Cloud).
+// Written as 2 alternatives (instead of a nested quantifier) to keep the
+// security/detect-unsafe-regex lint rule happy.
+const AWS_REGION_REGEXP = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
+
+/**
+ * Returns the DNS suffix of the AWS partition the given region belongs to:
+ * - eusc-* (European Sovereign Cloud) --> amazonaws.eu
+ * - cn-* (China) --> amazonaws.com.cn
+ * - everything else (aws, GovCloud) --> amazonaws.com
+ */
+function awsDnsSuffix(region: string) {
+  if (region.startsWith("eusc-")) {
+    return "amazonaws.eu";
+  }
+  if (region.startsWith("cn-")) {
+    return "amazonaws.com.cn";
+  }
+  return "amazonaws.com";
+}
+
+/** Builds the Cognito User Pools (cognito-idp) endpoint URL for an AWS region */
+function cognitoIdpUrl(region: string) {
+  return `https://cognito-idp.${region}.${awsDnsSuffix(region)}/`;
+}
+
+/** Builds the Cognito Identity (cognito-identity) endpoint URL for an AWS region */
+function cognitoIdentityUrl(region: string) {
+  return `https://cognito-identity.${region}.${awsDnsSuffix(region)}/`;
+}
 
 interface ErrorResponse {
   __type: string;
@@ -254,7 +284,7 @@ export async function initiateAuth<
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       signal: abort,
@@ -332,7 +362,7 @@ export async function respondToAuthChallenge({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -407,7 +437,7 @@ export async function confirmSignUp({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -444,7 +474,7 @@ export async function revokeToken({
   const { fetch, cognitoIdpEndpoint, proxyApiHeaders, clientId } = configure();
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -532,7 +562,7 @@ export async function getTokensFromRefreshToken({
   try {
     const response = await fetch(
       cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-        ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+        ? cognitoIdpUrl(cognitoIdpEndpoint)
         : cognitoIdpEndpoint,
       {
         signal: abort,
@@ -657,7 +687,7 @@ export async function getId({
   }
   const iss = new URL(parseJwtPayload(idToken)["iss"]);
   return fetch(
-    `https://cognito-identity.${identityPoolRegion}.amazonaws.com/`,
+    cognitoIdentityUrl(identityPoolRegion),
     {
       signal: abort,
       headers: {
@@ -694,7 +724,7 @@ export async function getUser({
   const token = accessToken ?? (await retrieveTokens())?.accessToken;
   return await fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -728,7 +758,7 @@ export async function getCredentialsForIdentity({
   }
   const iss = new URL(parseJwtPayload(idToken)["iss"]);
   return fetch(
-    `https://cognito-identity.${identityPoolRegion}.amazonaws.com/`,
+    cognitoIdentityUrl(identityPoolRegion),
     {
       signal: abort,
       headers: {
@@ -799,7 +829,7 @@ export async function signUp({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -850,7 +880,7 @@ export async function updateUserAttributes({
   const token = accessToken ?? (await retrieveTokens())?.accessToken;
   await fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -888,7 +918,7 @@ export async function getUserAttributeVerificationCode({
   const token = accessToken ?? (await retrieveTokens())?.accessToken;
   await fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -923,7 +953,7 @@ export async function verifyUserAttribute({
   const token = accessToken ?? (await retrieveTokens())?.accessToken;
   await fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -957,7 +987,7 @@ export async function setUserMFAPreference({
   const token = accessToken ?? (await retrieveTokens())?.accessToken;
   await fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1255,7 +1285,7 @@ export async function resendConfirmationCode({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1322,7 +1352,7 @@ export async function forgotPassword({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1394,7 +1424,7 @@ export async function confirmForgotPassword({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1446,7 +1476,7 @@ export async function changePassword({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1527,7 +1557,7 @@ export async function associateSoftwareToken({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1581,7 +1611,7 @@ export async function verifySoftwareToken({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1764,7 +1794,7 @@ export async function confirmDevice({
 
     const response = await fetch(
       cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-        ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+        ? cognitoIdpUrl(cognitoIdpEndpoint)
         : cognitoIdpEndpoint,
       {
         headers: {
@@ -1825,7 +1855,7 @@ export async function updateDeviceStatus({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1869,7 +1899,7 @@ export async function listDevices({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1912,7 +1942,7 @@ export async function getDevice({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
@@ -1954,7 +1984,7 @@ export async function forgetDevice({
 
   return fetch(
     cognitoIdpEndpoint.match(AWS_REGION_REGEXP)
-      ? `https://cognito-idp.${cognitoIdpEndpoint}.amazonaws.com/`
+      ? cognitoIdpUrl(cognitoIdpEndpoint)
       : cognitoIdpEndpoint,
     {
       headers: {
