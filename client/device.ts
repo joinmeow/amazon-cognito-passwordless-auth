@@ -19,7 +19,6 @@ import {
   modPow,
   getConstants,
   hexToArrayBuffer,
-  arrayBufferToHex,
   arrayBufferToBigInt,
   padHex,
   generateSmallA,
@@ -76,8 +75,10 @@ async function generateDevicePassword(): Promise<string> {
 /**
  * Calculate SRP verification values for device confirmation
  * This follows the same pattern as the Python example
+ *
+ * Exported for testing purposes only.
  */
-async function calculateDeviceVerifier(
+export async function calculateDeviceVerifier(
   _username: string,
   deviceKey: string,
   deviceGroupKey: string,
@@ -91,9 +92,15 @@ async function calculateDeviceVerifier(
   // Generate salt
   const saltBuffer = new Uint8Array(16);
   crypto.getRandomValues(saltBuffer);
-  // Ensure first bit is not set (making it positive)
-  saltBuffer[0] = saltBuffer[0] & 0x7f;
-  const salt = bufferToBase64(saltBuffer);
+  // Canonicalize the salt as a big integer (like amazon-cognito-identity-js
+  // does): Cognito stores and echoes the salt back as a big integer, which
+  // strips any leading zero bytes (and padHex re-adds a "00" prefix when the
+  // top bit is set, to keep it positive). Hash x over, and upload, that same
+  // canonical encoding, so the salt hashed here is always identical to the
+  // SALT echoed back in later DEVICE_PASSWORD_VERIFIER challenges.
+  const saltHex = padHex(arrayBufferToBigInt(saltBuffer.buffer).toString(16));
+  const saltBytes = hexToArrayBuffer(saltHex);
+  const salt = bufferToBase64(saltBytes);
 
   // Create FULL_PASSWORD = SHA256_HASH(DeviceGroupKey + deviceKey + ":" + DEVICE_PASSWORD)
   const fullPasswordString = `${deviceGroupKey}${deviceKey}:${devicePassword}`;
@@ -103,9 +110,8 @@ async function calculateDeviceVerifier(
   );
 
   // Create x = SHA256_HASH(salt + FULL_PASSWORD)
-  const saltHex = arrayBufferToHex(saltBuffer);
   const saltAndPassword = await new Blob([
-    hexToArrayBuffer(padHex(saltHex)),
+    saltBytes,
     fullPasswordHash,
   ]).arrayBuffer();
 
