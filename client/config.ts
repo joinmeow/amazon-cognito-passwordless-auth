@@ -153,9 +153,16 @@ export interface Config {
    */
   hostedUi?: {
     /**
-     * (Optional) Custom domain for your Cognito Hosted UI. Example: auth.example.com
-     * If provided, all authorize / token endpoints are built from this domain.
-     * If omitted, we fall back to cognitoIdpEndpoint.
+     * The domain of your Cognito Hosted UI (the user pool domain), e.g.
+     * "example.auth.eu-west-1.amazoncognito.com" or a custom domain such as
+     * "auth.example.com". Amazon Cognito serves the OAuth2 endpoints
+     * (/oauth2/authorize, /oauth2/token) only on this domain — not on the
+     * cognito-idp API endpoint.
+     *
+     * Required, unless cognitoIdpEndpoint is a full https:// URL (e.g. a
+     * proxy you control that also serves the OAuth2 endpoints), in which case
+     * it may be omitted and cognitoIdpEndpoint is used as the OAuth2 base.
+     * Plaintext http:// URLs are not accepted as the OAuth2 base.
      */
     domain?: string;
     /** Redirect URI registered in the user-pool app client */
@@ -176,6 +183,39 @@ export type ConfigWithDefaults = Config &
 
 type ConfigInput = Omit<Config, "cognitoIdpEndpoint"> &
   Partial<Pick<Config, "cognitoIdpEndpoint">>;
+
+/**
+ * Matches a bare AWS region identifier across partitions, incl. multi-segment
+ * ones such as us-gov-west-1 (GovCloud) and eusc-de-east-1 (European
+ * Sovereign Cloud). Written as 2 alternatives (instead of a nested
+ * quantifier) to keep the security/detect-unsafe-regex lint rule happy.
+ */
+const awsRegionRegex = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
+
+/**
+ * Determine if the configured cognitoIdpEndpoint is a genuine custom https://
+ * URL (e.g. a proxy you control) that can serve as the base for the OAuth2
+ * endpoints. A bare AWS region — with or without an https:// scheme, e.g.
+ * "eu-west-1" or "https://eu-west-1" — is just shorthand for the regional
+ * cognito-idp API endpoint, which does not serve the OAuth2 endpoints.
+ * Plaintext http:// is never accepted, because OAuth2 authorization codes
+ * and tokens travel to that origin
+ */
+function isCustomOAuthBase(endpoint: string): boolean {
+  if (!endpoint.startsWith("https://")) {
+    return false;
+  }
+  let hostname: string;
+  try {
+    hostname = new URL(endpoint).hostname;
+  } catch {
+    return false;
+  }
+  // A usable OAuth2 origin has a real hostname: a bare AWS region (e.g.
+  // "eu-west-1") or any other dotless host is not one
+  return hostname.includes(".") && !awsRegionRegex.test(hostname);
+}
+
 let config_: ConfigWithDefaults | undefined = undefined;
 export function configure(config?: ConfigInput) {
   if (config) {
@@ -188,12 +228,23 @@ export function configure(config?: ConfigInput) {
     }
 
     // If endpoint lacks protocol and is not an AWS region, prefix with https://
-    const regionRegex = /^[a-z]{2}-[a-z]+-\d$/;
     if (
       !cognitoIdpEndpoint.startsWith("http") &&
-      !regionRegex.test(cognitoIdpEndpoint)
+      !awsRegionRegex.test(cognitoIdpEndpoint)
     ) {
       cognitoIdpEndpoint = `https://${cognitoIdpEndpoint}`;
+    }
+
+    // Validate before assigning config_, so that a failed configure() is
+    // atomic and leaves any previously loaded configuration unchanged
+    if (
+      config.hostedUi &&
+      !config.hostedUi.domain &&
+      !isCustomOAuthBase(cognitoIdpEndpoint)
+    ) {
+      throw new Error(
+        "Invalid configuration: hostedUi.domain is required. Amazon Cognito serves the OAuth2 endpoints (/oauth2/authorize, /oauth2/token) only on your user pool domain, e.g. example.auth.eu-west-1.amazoncognito.com or a custom domain. It may only be omitted if cognitoIdpEndpoint is a full https:// URL (e.g. a proxy you control) that also serves the OAuth2 endpoints — an AWS region (e.g. eu-west-1) is not such a URL, and plaintext http:// is not allowed because OAuth2 authorization codes and tokens travel to that origin"
+      );
     }
 
     // Wrap the user-provided or default fetch in retry logic (pass debug callback)
@@ -235,10 +286,20 @@ export function configure(config?: ConfigInput) {
         ...(config.hostedUi.domain && { domain: config.hostedUi.domain }),
       };
       config_.debug?.(
-        "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
+        config.hostedUi.domain
+          ? "Cognito Hosted UI configured, will use hostedUi.domain for OAuth domain"
+          : "Cognito Hosted UI configured without domain, will use cognitoIdpEndpoint (custom URL) for OAuth domain"
       );
     }
-    config_.debug?.("Configuration loaded:", config);
+    // Note: don't log the client secret (only that one is configured).
+    // (Inlined rather than using util.js redaction helpers, to avoid a
+    // circular import: util.js imports configure from this module.)
+    config_.debug?.("Configuration loaded:", {
+      ...config,
+      ...(config.clientSecret && {
+        clientSecret: `[redacted, ${config.clientSecret.length} chars]`,
+      }),
+    });
   } else {
     if (!config_) {
       throw new Error("Call configure(config) first");
@@ -255,21 +316,38 @@ function normalizeEndpoint(endpoint: string): string {
   return withProtocol.replace(/\/+$/, ""); // trim trailing slashes
 }
 
-export function getAuthorizeEndpoint(): string {
+/**
+ * Get the base URL on which the OAuth2 endpoints are served: the Hosted UI
+ * (user pool) domain, or cognitoIdpEndpoint if that is a genuine custom
+ * https:// URL (e.g. a proxy you control). Throws if neither is usable,
+ * because Amazon Cognito does not serve the OAuth2 endpoints on the
+ * cognito-idp API endpoint — and a bare AWS region (even with an https://
+ * scheme) is just shorthand for that API endpoint. Plaintext http:// is
+ * never used as the OAuth2 base, because authorization codes and tokens
+ * travel to that origin
+ */
+function getOAuthBase(): string {
   const { cognitoIdpEndpoint, hostedUi } = configure();
-  const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
-  const base = normalizeEndpoint(domainBase);
-  return `${base}/oauth2/authorize`;
+  if (hostedUi?.domain) {
+    return normalizeEndpoint(hostedUi.domain);
+  }
+  if (isCustomOAuthBase(cognitoIdpEndpoint)) {
+    return normalizeEndpoint(cognitoIdpEndpoint);
+  }
+  throw new Error(
+    "Cannot determine OAuth2 endpoint: configure hostedUi.domain with your user pool domain, e.g. example.auth.eu-west-1.amazoncognito.com or a custom domain. Amazon Cognito serves the OAuth2 endpoints only on that domain. A custom cognitoIdpEndpoint is only used as the OAuth2 base if it is a full https:// URL — an AWS region (e.g. eu-west-1) is not such a URL"
+  );
+}
+
+export function getAuthorizeEndpoint(): string {
+  return `${getOAuthBase()}/oauth2/authorize`;
 }
 
 /**
  * Get the full OAuth token endpoint URL with protocol
  */
 export function getTokenEndpoint(): string {
-  const { cognitoIdpEndpoint, hostedUi } = configure();
-  const domainBase = hostedUi?.domain ?? cognitoIdpEndpoint;
-  const base = normalizeEndpoint(domainBase);
-  return `${base}/oauth2/token`;
+  return `${getOAuthBase()}/oauth2/token`;
 }
 
 /**

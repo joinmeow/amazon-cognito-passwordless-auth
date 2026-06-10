@@ -35,8 +35,10 @@ import {
 export interface WebAuthnMockConfig {
   /** Whether PublicKeyCredential API is available */
   available?: boolean;
-  /** Whether conditional UI is supported */
+  /** Whether isConditionalMediationAvailable() exists on PublicKeyCredential */
   conditionalMediationSupported?: boolean;
+  /** Value resolved by isConditionalMediationAvailable() */
+  conditionalMediationAvailable?: boolean;
   /** Mock credential to return from get() */
   credential?: PublicKeyCredential | null;
   /** Mock credential to return from create() */
@@ -128,6 +130,7 @@ export function setupWebAuthnMock(config: WebAuthnMockConfig = {}): () => void {
   const {
     available = true,
     conditionalMediationSupported = true,
+    conditionalMediationAvailable = true,
     credential = MOCK_ASSERTION_CREDENTIAL,
     createCredential = MOCK_ATTESTATION_CREDENTIAL,
     getError = null,
@@ -164,7 +167,7 @@ export function setupWebAuthnMock(config: WebAuthnMockConfig = {}): () => void {
       .mockResolvedValue(true),
 
     isConditionalMediationAvailable: conditionalMediationSupported
-      ? jest.fn().mockResolvedValue(true)
+      ? jest.fn().mockResolvedValue(conditionalMediationAvailable)
       : undefined,
 
     getClientCapabilities: jest.fn().mockResolvedValue(capabilities),
@@ -257,6 +260,19 @@ export function setupAbortedWebAuthnMock(): () => void {
 export function setupNoConditionalMediationMock(): () => void {
   return setupWebAuthnMock({
     conditionalMediationSupported: false,
+    capabilities: {
+      ...TEST_CAPABILITIES,
+      conditionalGet: false,
+    },
+  });
+}
+
+/**
+ * Setup WebAuthn mock where isConditionalMediationAvailable() resolves false
+ */
+export function setupConditionalMediationUnavailableMock(): () => void {
+  return setupWebAuthnMock({
+    conditionalMediationAvailable: false,
     capabilities: {
       ...TEST_CAPABILITIES,
       conditionalGet: false,

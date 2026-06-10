@@ -40,6 +40,11 @@ export interface TokensFromSignIn {
    * Used to evaluate token expiry against a skew-corrected clock.
    */
   clockDriftMs?: number;
+  /**
+   * The customState that was passed to signInWithRedirect, recovered from
+   * the OAuth state parameter on the redirect callback (REDIRECT flow only)
+   */
+  customState?: string;
 }
 export interface TokensFromRefresh {
   accessToken: string;

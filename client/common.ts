@@ -16,6 +16,7 @@ import { revokeToken } from "./cognito-api.js";
 import { configure } from "./config.js";
 import {
   retrieveTokens,
+  retrieveTokensForRefresh,
   storeTokens,
   storeDeviceKey,
   getRememberedDevice,
@@ -27,8 +28,8 @@ import {
   IdleState,
   busyState,
 } from "./model.js";
-import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
-import { computeClockDriftMs } from "./util.js";
+import { scheduleRefresh, cleanupUserRefreshState } from "./refresh.js";
+import { computeClockDriftMs, redactSecret } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
@@ -41,13 +42,14 @@ const REFRESH_DEDUPLICATION_WINDOW_MS = 300000; // 5 minutes
 const FRESH_LOGIN_REFRESH_DELAY_MS = 120000; // 2 minutes
 
 // Track active refresh schedules to prevent duplicate scheduling
-// Key: username, Value: { scheduledAt: timestamp, abortController: AbortController, refreshToken: string }
+// Key: username, Value: { scheduledAt: timestamp, abortController: AbortController, refreshToken: string, accessToken: string }
 const activeRefreshSchedules = new Map<
   string,
   {
     scheduledAt: number;
     abortController: AbortController;
     refreshToken: string;
+    accessToken: string;
   }
 >();
 
@@ -100,7 +102,7 @@ async function processTokensInternal(
   ) {
     debug?.(
       "🔄 [Process Tokens] Detected new device metadata with device key:",
-      normalizedTokens.newDeviceMetadata.deviceKey
+      redactSecret(normalizedTokens.newDeviceMetadata.deviceKey)
     );
 
     // Complete device confirmation if this is a sign-in (has accessToken)
@@ -145,7 +147,7 @@ async function processTokensInternal(
     const record = await getRememberedDevice(normalizedTokens.username);
     const remembered = record?.remembered ?? false;
     debug?.(
-      `🔄 [Process Tokens] Using existing device key ${normalizedTokens.deviceKey}, remembered: ${remembered}`
+      `🔄 [Process Tokens] Using existing device key ${redactSecret(normalizedTokens.deviceKey)}, remembered: ${remembered}`
     );
   } else {
     debug?.("🔄 [Process Tokens] No device key available in tokens");
@@ -205,8 +207,16 @@ async function processTokensInternal(
     const now = Date.now();
 
     // Skip if we already scheduled for this user recently (within 5 minutes)
+    // for the SAME access token. New tokens (e.g. just obtained by a refresh)
+    // must always get their own schedule: with short-lived access tokens
+    // (Cognito allows lifetimes as low as 5 minutes) each refresh completes
+    // within the deduplication window, and the previous schedule entry is
+    // only cleared after this function returns, so deduplicating on
+    // wall-clock age alone would silently prevent the next refresh from
+    // ever being scheduled.
     if (
       existingSchedule &&
+      existingSchedule.accessToken === normalizedTokens.accessToken &&
       now - existingSchedule.scheduledAt < REFRESH_DEDUPLICATION_WINDOW_MS
     ) {
       debug?.(
@@ -215,9 +225,21 @@ async function processTokensInternal(
       return normalizedTokens;
     }
 
-    // Clear any existing schedule for this user
+    // Clear any existing schedule for this user. Skip the abort when the
+    // tracked controller is the very one driving THIS call: during an
+    // active refresh, refreshTokens passes the schedule's own abort
+    // signal back into processTokens, so aborting it here would be a
+    // self-abort of the in-flight refresh chain. That fires the old
+    // schedule's abort listeners ("Refresh scheduling aborted", which can
+    // cancel a pending timer) and leaves the signal permanently aborted,
+    // so every later abort-check on that chain (scheduleRefresh's early
+    // return, lock acquisition, retry backoff) bails out — and the new
+    // tokens can end up without a next refresh. The replacement schedule
+    // below is also wired to this same signal, so it must stay live.
     if (existingSchedule?.abortController) {
-      existingSchedule.abortController.abort();
+      if (existingSchedule.abortController.signal !== abort) {
+        existingSchedule.abortController.abort();
+      }
       activeRefreshSchedules.delete(normalizedTokens.username);
     }
 
@@ -243,6 +265,7 @@ async function processTokensInternal(
       scheduledAt: now,
       abortController: scheduleAbort,
       refreshToken: normalizedTokens.refreshToken,
+      accessToken: normalizedTokens.accessToken,
     });
 
     const scheduleFn = () => {
@@ -364,13 +387,38 @@ export const signOut = (props?: {
 
   const tokenRevocationTracker = new Set<string>();
 
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+  const customKeyPrefix = `Passwordless.${clientId}`;
+
+  // Resolve the session to tear down. Prefer retrieveTokensForRefresh so a
+  // session whose access token has already expired (but is still refreshable)
+  // is signed out: retrieveTokens drops expired tokens as a safety net, but the
+  // refresh system reads via retrieveTokensForRefresh and would otherwise
+  // silently resurrect a session we believe we signed out of. Fall back to
+  // retrieveTokens for valid access-only sessions (e.g. OAuth implicit flow)
+  // that have no refresh token, and finally to LastAuthUser so an access-only
+  // session whose access token has also expired is still cleared. A refresh
+  // token, when present, is always surfaced by retrieveTokensForRefresh, so the
+  // revocation below still fires whenever there is something to revoke.
+  const resolveSignOutSession = async (): Promise<
+    { username: string; refreshToken?: string } | undefined
+  > => {
+    const tokens =
+      (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
+    if (tokens?.username) {
+      return { username: tokens.username, refreshToken: tokens.refreshToken };
+    }
+    const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
+    return username ? { username } : undefined;
+  };
+
   // Wrap sign-out in per-user storage lock
   const signedOut = (async () => {
     // Determine lock key per user
-    const tokens0 = await retrieveTokens();
-    const userIdentifier = tokens0?.username;
+    const session0 = await resolveSignOutSession();
+    const userIdentifier = session0?.username;
     const lockKey = userIdentifier
-      ? `Passwordless.${clientId}.${userIdentifier}.refreshLock`
+      ? `${customKeyPrefix}.${userIdentifier}.refreshLock`
       : undefined;
     // Run sign-out logic under lock if we have a user
     const doSignOut = async () => {
@@ -386,58 +434,61 @@ export const signOut = (props?: {
             activeRefreshSchedules.delete(userIdentifier);
           }
 
-          // Clean up all refresh system resources (timers, listeners)
-          cleanupRefreshSystem(userIdentifier);
+          // Clean up this user's refresh state (timers, in-memory state).
+          // Deliberately NOT cleanupRefreshSystem: that would tear down the
+          // global visibilitychange/watchdog listeners for the rest of the
+          // page lifetime, breaking refresh for the next user that signs in.
+          cleanupUserRefreshState(userIdentifier);
         }
 
-        const tokens = await retrieveTokens();
+        const session = await resolveSignOutSession();
         if (abort.signal.aborted) {
           debug?.("Aborting sign-out");
           currentStatus && statusCb?.(currentStatus);
           return;
         }
-        if (!tokens) {
-          debug?.("No tokens in storage to delete");
+        if (!session) {
+          debug?.("No session in storage to delete");
           props?.tokensRemovedLocallyCb?.();
           statusCb?.("SIGNED_OUT");
           return;
         }
-        const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-        const customKeyPrefix = `Passwordless.${clientId}`;
+        const { username, refreshToken } = session;
         await Promise.all([
-          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.idToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.idToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.accessToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
           storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.accessToken`
+            `${amplifyKeyPrefix}.${username}.tokenScopesString`
           ),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.refreshToken`
-          ),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.tokenScopesString`
-          ),
-          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.userData`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.userData`),
           storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.clockDriftMs`),
+          storage.removeItem(`${customKeyPrefix}.${username}.authMethod`),
           storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.clockDriftMs`
+            `${customKeyPrefix}.${username}.lastRefreshAttempt`
           ),
-          storage.removeItem(`${customKeyPrefix}.${tokens.username}.expireAt`),
           storage.removeItem(
-            `Passwordless.${clientId}.${tokens.username}.refreshingTokens`
+            `${customKeyPrefix}.${username}.lastRefreshCompleted`
           ),
+          // Legacy keys no longer written by current versions, removed for
+          // migration hygiene
+          storage.removeItem(`${customKeyPrefix}.${username}.expireAt`),
+          storage.removeItem(`${customKeyPrefix}.${username}.refreshingTokens`),
           // Note: We do NOT remove deviceKey - it should persist between sessions
         ]);
         props?.tokensRemovedLocallyCb?.();
 
         if (
-          tokens.refreshToken &&
-          !tokenRevocationTracker.has(tokens.refreshToken) &&
+          refreshToken &&
+          !tokenRevocationTracker.has(refreshToken) &&
           !skipTokenRevocation
         ) {
           try {
-            tokenRevocationTracker.add(tokens.refreshToken);
+            tokenRevocationTracker.add(refreshToken);
             await revokeToken({
               abort: undefined,
-              refreshToken: tokens.refreshToken,
+              refreshToken: refreshToken,
             });
             debug?.("Successfully revoked refresh token");
           } catch (revokeError) {

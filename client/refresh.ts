@@ -84,7 +84,9 @@ const TAB_ID =
 async function shouldAttemptRefresh(): Promise<boolean> {
   try {
     const { storage, clientId } = configure();
-    const tokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: the access token may already be expired,
+    // which is precisely when a refresh attempt matters most
+    const tokens = await retrieveTokensForRefresh();
     if (!tokens?.username) return false;
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
@@ -147,7 +149,9 @@ async function shouldAttemptRefresh(): Promise<boolean> {
 async function clearRefreshAttemptLock(): Promise<void> {
   try {
     const { storage, clientId } = configure();
-    const tokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: this runs on failure paths where the
+    // access token may be expired, but the lock must still be cleared
+    const tokens = await retrieveTokensForRefresh();
     if (!tokens?.username) return;
 
     const attemptKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshAttempt`;
@@ -169,7 +173,7 @@ async function markRefreshCompleted(): Promise<void> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { storage, clientId } = configure();
-      const tokens = await retrieveTokens();
+      const tokens = await retrieveTokensForRefresh();
       if (!tokens?.username) return;
 
       const completedKey = `Passwordless.${clientId}.${tokens.username}.lastRefreshCompleted`;
@@ -440,7 +444,12 @@ export async function scheduleRefresh(
   args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
 ): Promise<void> {
   const { clientId, debug } = configure();
-  const tokens0 = await retrieveTokens();
+  // Use retrieveTokensForRefresh first: the access token may already be
+  // expired while a refresh token still exists, and the per-user lock must
+  // still be honored then — e.g. signOut holds it during teardown, and the
+  // global watchdog/visibilitychange handlers must not schedule a refresh
+  // for a session that is being torn down
+  const tokens0 = (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
   const userIdentifier = tokens0?.username;
   if (!userIdentifier) {
     debug?.("scheduleRefresh: no user, running unlocked");
@@ -591,7 +600,9 @@ export async function refreshTokens({
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
   if (!userIdentifier) {
-    const storedTokens = await retrieveTokens();
+    // Use retrieveTokensForRefresh: the access token may already be expired
+    // (e.g. device woke from sleep), but the refresh token can still be valid
+    const storedTokens = await retrieveTokensForRefresh();
     userIdentifier = storedTokens?.username;
   }
   if (!userIdentifier) {
@@ -619,7 +630,8 @@ export async function refreshTokens({
       isRefreshingCb?.(true);
 
       if (!tokens) {
-        tokens = await retrieveTokens();
+        // Use retrieveTokensForRefresh to include expired tokens
+        tokens = await retrieveTokensForRefresh();
       }
 
       const refreshToken = tokens?.refreshToken;
@@ -697,7 +709,7 @@ export async function refreshTokens({
                   debug?.(
                     "Refresh token reuse detected; retrying with latest stored refresh token"
                   );
-                  const latestStored = await retrieveTokens();
+                  const latestStored = await retrieveTokensForRefresh();
                   const latestToken = latestStored?.refreshToken;
                   if (latestToken && latestToken !== currentRefreshToken) {
                     currentRefreshToken = latestToken;
@@ -929,8 +941,9 @@ export async function forceRefreshTokens(
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
-  // Get username to clear the right timer
-  const tokens = await retrieveTokens();
+  // Get username to clear the right timer (include expired tokens, since
+  // forcing a refresh is most relevant when the access token already expired)
+  const tokens = await retrieveTokensForRefresh();
   const username = tokens?.username;
   const state = getRefreshState(username);
 
@@ -1016,8 +1029,41 @@ if (isBrowserEnvironment()) {
 }
 
 /**
+ * Clean up refresh state for a specific user (timers and in-memory state).
+ * Call this on sign-out: it does NOT remove the global visibilitychange,
+ * watchdog and unload listeners, so token refresh keeps working when
+ * another user signs in afterwards.
+ * @param username - Optional username to clean up specific user state
+ */
+export function cleanupUserRefreshState(username?: string): void {
+  logDebug("Cleaning up user refresh state");
+
+  // Get the appropriate refresh state
+  const state = getRefreshState(username);
+
+  // Clean up any active refresh timer
+  if (state.refreshTimer) {
+    state.refreshTimer();
+    state.refreshTimer = undefined;
+    state.nextRefreshTime = undefined;
+  }
+
+  // Reset refresh state
+  state.isRefreshing = false;
+  state.lastRefreshTime = undefined;
+
+  // Clear user-specific state from the map
+  if (username) {
+    clearRefreshState(username);
+  }
+}
+
+/**
  * Clean up all refresh-related timers and event listeners.
- * Call this when unmounting the application or switching users.
+ * Call this when unmounting the application (e.g. on page unload).
+ * Note: this removes the GLOBAL visibilitychange, watchdog and unload
+ * listeners for the rest of the page lifetime — for user sign-out use
+ * cleanupUserRefreshState instead.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupRefreshSystem(username?: string): void {
@@ -1043,22 +1089,6 @@ export function cleanupRefreshSystem(username?: string): void {
     autoCleanupHandler = undefined;
   }
 
-  // Get the appropriate refresh state
-  const state = getRefreshState(username);
-
-  // Clean up any active refresh timer
-  if (state.refreshTimer) {
-    state.refreshTimer();
-    state.refreshTimer = undefined;
-    state.nextRefreshTime = undefined;
-  }
-
-  // Reset refresh state
-  state.isRefreshing = false;
-  state.lastRefreshTime = undefined;
-
-  // Clear user-specific state from the map
-  if (username) {
-    clearRefreshState(username);
-  }
+  // Clean up per-user refresh state
+  cleanupUserRefreshState(username);
 }

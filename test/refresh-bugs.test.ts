@@ -1,7 +1,18 @@
 import { configure } from "../client/config.js";
-import { scheduleRefresh } from "../client/refresh.js";
+import { scheduleRefresh, cleanupRefreshSystem } from "../client/refresh.js";
 import { storeTokens, retrieveTokens } from "../client/storage.js";
 import { processTokens } from "../client/common.js";
+
+// Poll until the predicate is true (used to await fire-and-forget chains)
+const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
 
 // Helper to create JWT tokens
 const createJWT = (claims: Record<string, unknown>) => {
@@ -282,5 +293,135 @@ describe("Refresh System Bug Hunt", () => {
     );
 
     expect(dedupLogs.length).toBeGreaterThan(0);
+  });
+
+  test("REGRESSION: short-lived tokens get their next refresh scheduled after a refresh", async () => {
+    const now = Date.now();
+    const username = "shortlived-user";
+    // Initial tokens with a 5-minute lifetime (Cognito's minimum access
+    // token lifetime). The computed refresh delay is ~3.5 minutes, so the
+    // refresh completes well within the 5-minute deduplication window.
+    const initialTokens = {
+      accessToken: createJWT({
+        sub: "user456",
+        username,
+        exp: Math.floor((now + 300000) / 1000),
+        iat: Math.floor(now / 1000),
+      }),
+      refreshToken: "short-lived-refresh-token",
+      username,
+      expireAt: new Date(now + 300000),
+    };
+
+    // First processTokens schedules the refresh and records the schedule
+    await processTokens(initialTokens);
+
+    // Simulate the refresh completing: processTokens runs for the NEW
+    // tokens while the previous schedule entry is still tracked (refresh.ts
+    // only clears it via tokensCb AFTER processTokens returns).
+    const refreshedTokens = {
+      accessToken: createJWT({
+        sub: "user456",
+        username,
+        exp: Math.floor((now + 600000) / 1000),
+        iat: Math.floor((now + 300000) / 1000),
+      }),
+      refreshToken: "short-lived-refresh-token",
+      username,
+      expireAt: new Date(now + 600000),
+    };
+
+    debugLogs = [];
+    await processTokens(refreshedTokens);
+
+    // The new tokens MUST get their own refresh scheduled; deduplication
+    // must not suppress it, otherwise short-lived tokens silently stop
+    // being refreshed after the first refresh.
+    const dedupLog = debugLogs.find((log) =>
+      log.includes("skipping duplicate")
+    );
+    const scheduleLog = debugLogs.find((log) =>
+      log.includes("Scheduling token refresh")
+    );
+    expect(dedupLog).toBeUndefined();
+    expect(scheduleLog).toBeTruthy();
+  });
+
+  test("REGRESSION: refresh-driven processTokens must not abort its own schedule signal", async () => {
+    const now = Date.now();
+    const username = "selfabort-user";
+
+    // Spy on AbortController.prototype.abort: nothing in the happy-path
+    // refresh flow below should cancel anything. Before the fix, the
+    // nested processTokens (running inside the active refresh, with the
+    // schedule's own abort signal passed through by refreshTokens)
+    // aborted that very signal when replacing the tracked schedule,
+    // firing the old schedule's abort listeners and wiring the new
+    // schedule to an already-aborted signal.
+    const abortSpy = jest.spyOn(AbortController.prototype, "abort");
+
+    try {
+      // Token that expires in 30 seconds: scheduleRefresh takes its
+      // immediate-refresh path, so the chain
+      //   processTokens -> scheduleRefresh -> refreshTokens -> processTokens
+      // runs end-to-end without waiting on a refresh timer.
+      const initialTokens = {
+        accessToken: createJWT({
+          sub: "user789",
+          username,
+          exp: Math.floor((now + 30000) / 1000),
+          iat: Math.floor(now / 1000),
+        }),
+        refreshToken: "self-abort-refresh-token",
+        username,
+        expireAt: new Date(now + 30000),
+      };
+
+      // The refresh returns a 5-minute token
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          AuthenticationResult: {
+            AccessToken: createJWT({
+              sub: "user789",
+              username,
+              exp: Math.floor((now + 300000) / 1000),
+              iat: Math.floor(now / 1000),
+            }),
+            IdToken: createJWT({
+              sub: "user789",
+              username,
+              exp: Math.floor((now + 300000) / 1000),
+              iat: Math.floor(now / 1000),
+            }),
+            RefreshToken: "self-abort-refresh-token-2",
+            ExpiresIn: 300,
+            TokenType: "Bearer",
+          },
+        }),
+      });
+
+      debugLogs = [];
+      await processTokens(initialTokens);
+
+      // Wait for the fire-and-forget refresh chain to complete: the
+      // refreshed tokens must end up with a live refresh timer of their
+      // own ("Scheduling token refresh in X minutes" comes from
+      // refresh.ts when it arms the timer for the new token's expiry).
+      await waitFor(() =>
+        debugLogs.some((log) => log.includes("Scheduling token refresh in"))
+      );
+
+      // The nested processTokens replaced the tracked schedule while the
+      // schedule's own abort signal was driving the call. That must not
+      // abort anything:
+      expect(abortSpy).not.toHaveBeenCalled();
+      expect(
+        debugLogs.some((log) => log.includes("Refresh scheduling aborted"))
+      ).toBe(false);
+    } finally {
+      abortSpy.mockRestore();
+      cleanupRefreshSystem(username);
+    }
   });
 });
