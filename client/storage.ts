@@ -60,6 +60,30 @@ export interface TokensFromStorage {
   clockDriftMs?: number;
 }
 
+type TokensStoredListener = (tokens: TokensToStore) => void;
+
+// In-memory registry of same-context subscribers, notified whenever tokens
+// are persisted via storeTokens. Needed because the WHATWG "storage" event
+// only fires in *other* documents, never in the document that performed the
+// write — so without this, a background token refresh in the active tab
+// would update storage without any way for UI state (e.g. the React hook)
+// to find out.
+const tokensStoredListeners = new Set<TokensStoredListener>();
+
+/**
+ * Subscribe to token stores performed in this JavaScript context.
+ * The listener is invoked after the tokens have been persisted to storage.
+ *
+ * @param listener Called with the tokens that were just stored
+ * @returns A function that unsubscribes the listener
+ */
+export function onTokensStored(listener: TokensStoredListener): () => void {
+  tokensStoredListeners.add(listener);
+  return () => {
+    tokensStoredListeners.delete(listener);
+  };
+}
+
 /**
  * Store the authentication method used for the current user
  * This helps refresh token logic determine how to refresh tokens
@@ -254,6 +278,18 @@ export async function storeTokens(tokens: TokensToStore) {
   debug?.(
     `[storeTokens] Completed storage${tokens.refreshToken ? ", refreshToken stored under key " + amplifyKeyPrefix + "." + username + ".refreshToken" : ""}`
   );
+
+  // --------- 7. Notify same-context subscribers ---------
+  // The "storage" event never fires in the document that performed the write,
+  // so subscribers in this context (e.g. the React hook) rely on this callback
+  // to pick up tokens written by background refreshes in the same tab.
+  for (const listener of tokensStoredListeners) {
+    try {
+      listener(tokens);
+    } catch (err) {
+      debug?.("[storeTokens] onTokensStored listener threw:", err);
+    }
+  }
 }
 
 export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
