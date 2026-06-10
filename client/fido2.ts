@@ -1221,7 +1221,12 @@ export async function prepareFido2SignIn({
             session = challenge.session;
             break;
           } catch (err) {
-            if (!isFido2AbortError(err) || signal?.aborted) {
+            if (!isFido2AbortError(err) || signal?.aborted || err.superseded) {
+              // Not our renewal abort: rethrow. In particular, a superseded
+              // abort means a newer credential request (e.g. a modal passkey
+              // sign-in) took over the pending conditional request — the
+              // autofill flow must end here, not restart with a fresh
+              // challenge behind the newer request's back
               throw err;
             }
             // Aborted by us for renewal - loop around for a fresh challenge

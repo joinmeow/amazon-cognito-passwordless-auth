@@ -669,6 +669,54 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(1);
       });
 
+      it("ends the flow instead of renewing when the conditional request was superseded by a newer request", async () => {
+        // Regression: a modal passkey sign-in taking over the pending
+        // conditional request rejects it with a superseded Fido2AbortError.
+        // If that rejection lands at the renewal boundary (after the renewal
+        // timer aborts the pending get()), the renewal loop must NOT treat it
+        // as its own renewal abort and restart the autofill flow behind the
+        // modal request's back.
+        jest.useFakeTimers();
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const supersededWhenAborted = ({
+          signal,
+        }: {
+          signal?: AbortSignal;
+        }) =>
+          new Promise<never>((_, reject) =>
+            signal?.addEventListener("abort", () =>
+              reject(
+                new Fido2AbortError(
+                  "WebAuthn operation was aborted: superseded by a newer credential request",
+                  "Passkey verification was cancelled",
+                  { superseded: true }
+                )
+              )
+            )
+          );
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(supersededWhenAborted);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        expect((err as Fido2AbortError).superseded).toBe(true);
+        // No restart: one challenge, one credentials.get()
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
       it("propagates caller aborts instead of renewing", async () => {
         mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
         const credentialGetter = jest
