@@ -1050,11 +1050,20 @@ function _usePasswordless() {
     lastMfaFetchTimeRef.current = now;
 
     const abortController = new AbortController();
+    // Capture the token this fetch is for: if it is no longer the one we
+    // last fetched for by the time the response lands (sign-out cleared it,
+    // or a newer token's fetch started), the result must be discarded —
+    // the abort check alone can't cover the microtask gap between a
+    // SIGN_OUT dispatch and this effect's cleanup
+    const fetchedForToken = tokens.accessToken;
+    const isStale = () =>
+      abortController.signal.aborted ||
+      lastFetchedMfaTokenRef.current !== fetchedForToken;
 
     // Get MFA settings for the signed-in user
     getUser({ accessToken: tokens.accessToken, abort: abortController.signal })
       .then((user) => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // If we have a valid user object with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
@@ -1095,7 +1104,7 @@ function _usePasswordless() {
         }
       })
       .catch(() => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // On error we keep the previously known MFA status to avoid
         // falsely disabling security-gated UI. Log for debugging.
@@ -1448,6 +1457,10 @@ function _usePasswordless() {
           // mfaStatusReady, activity timestamps) so it cannot leak into
           // the next user's session
           lastActivityAtRef.current = Date.now();
+          // Invalidate any in-flight getUser fetch so a response landing
+          // after sign-out cannot restore the previous user's MFA status
+          // (and a same-token re-sign-in refetches afresh)
+          lastFetchedMfaTokenRef.current = undefined;
           dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,

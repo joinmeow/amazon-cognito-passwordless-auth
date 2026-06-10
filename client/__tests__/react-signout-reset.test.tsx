@@ -168,4 +168,79 @@ describe("signOut resets per-user state", () => {
     expect(result.current.mfaStatusReady).toBe(false);
     expect(result.current.signInStatus).toBe("NOT_SIGNED_IN");
   });
+
+  it("discards an in-flight getUser response that lands after signOut", async () => {
+    // Regression: a getUser response resolving in the microtask gap between
+    // the SIGN_OUT dispatch and React's effect cleanup (which aborts the
+    // fetch) used to re-dispatch the previous user's MFA status while
+    // signed out.
+    type GetUserResult = Awaited<ReturnType<typeof getUser>>;
+    let resolveGetUser: ((user: GetUserResult) => void) | undefined;
+    mockGetUser.mockImplementation(
+      () =>
+        new Promise<GetUserResult>((resolve) => {
+          resolveGetUser = resolve;
+        })
+    );
+
+    const signInTokens: TokensFromSignIn = {
+      accessToken: "mock-access-token",
+      idToken: "mock-id-token",
+      refreshToken: "mock-refresh-token",
+      expireAt: new Date(Date.now() + 3600_000),
+      username: "user-a",
+      authMethod: "FIDO2",
+    };
+    let capturedTokensCb:
+      | ((tokens: TokensFromSignIn) => void | Promise<void>)
+      | undefined;
+    mockAuthenticateWithFido2.mockImplementation((props) => {
+      capturedTokensCb = props?.tokensCb;
+      return {
+        signedIn: Promise.resolve(signInTokens),
+        abort: jest.fn(),
+      };
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Sign in; the MFA fetch starts and stays pending
+    act(() => {
+      result.current.authenticateWithFido2({ username: "user-a" });
+    });
+    await act(async () => {
+      await capturedTokensCb!(signInTokens);
+    });
+    await waitFor(() => {
+      expect(result.current.signInStatus).toBe("SIGNED_IN");
+    });
+    expect(resolveGetUser).toBeDefined();
+    expect(result.current.mfaStatusReady).toBe(false);
+
+    // Sign out, and let the stale getUser response land in the microtask
+    // gap after the SIGN_OUT dispatch but before the effect cleanup aborts
+    await act(async () => {
+      const signingOut = result.current.signOut();
+      resolveGetUser!({
+        Username: "user-a",
+        UserAttributes: [],
+        MFAOptions: [],
+        UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
+        PreferredMfaSetting: "SOFTWARE_TOKEN_MFA",
+      });
+      await signingOut.signedOut;
+    });
+
+    // The stale response must not restore the previous user's MFA status
+    expect(result.current.totpMfaStatus).toEqual({
+      enabled: false,
+      preferred: false,
+      availableMfaTypes: [],
+    });
+    expect(result.current.mfaStatusReady).toBe(false);
+  });
 });
