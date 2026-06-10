@@ -398,16 +398,14 @@ function passwordlessReducer(
       // Reset all per-user state (tokens, deviceKey, TOTP MFA status, etc.)
       // so nothing leaks into the next user's session. Keep the signing
       // status (it is driven by the sign-out flow's status callback) and
-      // device capabilities, and use fresh activity timestamps (the ones in
-      // initialPasswordlessState were captured at module load)
+      // device capabilities. Activity tracking lives in a ref
+      // (lastActivityAtRef) and is reset by the signOut flow itself
       return {
         ...initialPasswordlessState,
         signingInStatus: state.signingInStatus,
         initiallyRetrievingTokensFromStorage: false,
         userVerifyingPlatformAuthenticatorAvailable:
           state.userVerifyingPlatformAuthenticatorAvailable,
-        lastActivityAt: Date.now(),
-        nowTick: Date.now(),
       };
 
     default:
@@ -1449,6 +1447,7 @@ function _usePasswordless() {
           // Reset remaining per-user state (deviceKey, TOTP MFA status,
           // mfaStatusReady, activity timestamps) so it cannot leak into
           // the next user's session
+          lastActivityAtRef.current = Date.now();
           dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,
