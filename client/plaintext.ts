@@ -22,6 +22,7 @@ import {
 import { processTokens } from "./common.js";
 import { retrieveDeviceKey } from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
+import { redactTokensFromObject } from "./util.js";
 
 export function authenticateWithPlaintextPassword({
   username,
@@ -75,7 +76,10 @@ export function authenticateWithPlaintextPassword({
         clientMetadata,
         abort: abort.signal,
       });
-      debug?.(`Response from initiateAuth:`, authResponse);
+      debug?.(
+        `Response from initiateAuth:`,
+        redactTokensFromObject(authResponse)
+      );
 
       // Now that we have initiated authentication, we can look up device key
       // using the confirmed username for this session
