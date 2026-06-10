@@ -278,6 +278,97 @@ describe("OAuth Integration with processTokens", () => {
       expect(mockProcessTokens).not.toHaveBeenCalled();
     });
 
+    it("should not touch the in-progress flag when invoked on a non-callback URL", async () => {
+      // Flow in flight, but current URL is NOT the configured redirect URL
+      // (e.g. another tab loads a page with an unrelated ?code=... param)
+      mockLocation.href = "https://app.example.com/some-other-page?code=COUPON";
+      mockLocation.pathname = "/some-other-page";
+      mockLocation.search = "?code=COUPON";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        if (key === "cognito_oauth_pkce")
+          return Promise.resolve("test-verifier");
+        return Promise.resolve(null);
+      });
+
+      const result = await handleCognitoOAuthCallback();
+
+      expect(result).toBeNull();
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+      // The in-flight flag must NOT be overwritten ("processing") or cleared,
+      // otherwise the real callback would be silently ignored later
+      expect(mockStorage.setItem).not.toHaveBeenCalledWith(
+        "cognito_oauth_in_progress",
+        expect.anything()
+      );
+      expect(mockStorage.removeItem).not.toHaveBeenCalledWith(
+        "cognito_oauth_in_progress"
+      );
+    });
+
+    it("should process the real callback after a non-callback invocation", async () => {
+      const storedItems: Record<string, string> = {
+        cognito_oauth_in_progress: "true",
+        cognito_oauth_state: "test-state",
+        cognito_oauth_pkce: "test-verifier",
+      };
+      mockStorage.getItem.mockImplementation((key: string) =>
+        Promise.resolve(storedItems[key] ?? null)
+      );
+      mockStorage.setItem.mockImplementation((key: string, value: string) => {
+        storedItems[key] = value;
+        return Promise.resolve();
+      });
+      mockStorage.removeItem.mockImplementation((key: string) => {
+        delete storedItems[key];
+        return Promise.resolve();
+      });
+
+      // First invocation: non-callback URL while flow is in flight
+      mockLocation.href = "https://app.example.com/some-other-page?code=COUPON";
+      mockLocation.pathname = "/some-other-page";
+      mockLocation.search = "?code=COUPON";
+
+      expect(await handleCognitoOAuthCallback()).toBeNull();
+      expect(storedItems["cognito_oauth_in_progress"]).toBe("true");
+
+      // Second invocation: the real Cognito redirect arrives
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?code=test-code&state=test-state";
+      mockLocation.pathname = "/signin-redirect";
+      mockLocation.search = "?code=test-code&state=test-state";
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "mock-access-token",
+          id_token: "mock-id-token",
+          refresh_token: "mock-refresh-token",
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+      });
+
+      const processedTokens = {
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "mock-refresh-token",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      };
+      mockProcessTokens.mockResolvedValue(processedTokens);
+
+      const result = await handleCognitoOAuthCallback();
+
+      expect(result).toEqual(processedTokens);
+      expect(mockProcessTokens).toHaveBeenCalledTimes(1);
+      // OAuth state is cleaned up after successful processing
+      expect(storedItems["cognito_oauth_in_progress"]).toBeUndefined();
+    });
+
     it("should throw error on OAuth state mismatch", async () => {
       mockStorage.getItem.mockImplementation((key: string) => {
         if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
