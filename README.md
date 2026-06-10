@@ -873,8 +873,9 @@ totpMfaStatus: {
 }
 
 // Activity tracking (when enabled)
-timeSinceLastActivityMs: number | null     // Milliseconds since last activity
-timeSinceLastActivitySeconds: number | null // Seconds since last activity
+timeSinceLastActivityMs: number | null     // Milliseconds since last activity (live getter; reading it doesn't trigger re-renders)
+timeSinceLastActivitySeconds: number | null // Seconds since last activity (live getter; reading it doesn't trigger re-renders)
+getTimeSinceLastActivityMs() => number     // Live milliseconds since last activity, computed on call
 ```
 
 #### Methods
