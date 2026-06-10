@@ -26,7 +26,8 @@ export class LockTimeoutError extends Error {
 
 const DEFAULT_RETRY_DELAY_MS = 50;
 const DEFAULT_TIMEOUT_MS = 15000; // 15 seconds to accommodate worst-case refresh (9s) + buffer
-const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds
+const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds without a heartbeat renewal
+const LOCK_HEARTBEAT_INTERVAL_MS = 10000; // renew held locks well within the stale timeout
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -118,10 +119,15 @@ export async function withStorageLock<T>(
   // Setup storage event listener for faster lock release detection
   if (isBrowser) {
     onStorage = (e: StorageEvent) => {
-      if (
-        e.key === key &&
-        (!e.newValue || e.newValue !== JSON.stringify(lockData))
-      ) {
+      if (e.key !== key) {
+        return;
+      }
+      // Only treat the event as a release when the key was removed or no
+      // longer holds a valid, fresh lock. Another waiter acquiring the lock
+      // (or a holder renewing its heartbeat) also fires this event and must
+      // not be mistaken for a release.
+      const newLock = parseLockData(e.newValue);
+      if (!newLock || isLockStale(newLock)) {
         debug?.("withStorageLock: storage event detected lock release", key);
         lockReleased = true;
       }
@@ -129,29 +135,78 @@ export async function withStorageLock<T>(
     globalThis.addEventListener("storage", onStorage);
   }
 
+  // Poll until we actually acquired the lock, or timeout
+  let acquired = false;
   try {
-    // Poll until lock is free or timeout
     let pollDelay = DEFAULT_RETRY_DELAY_MS;
     const maxPollDelay = 500;
     let consecutiveChecks = 0;
+    let consecutiveStorageErrors = 0;
+    const maxStorageErrors = 3;
 
-    while (!lockReleased) {
+    while (!acquired) {
       // Check for abort signal
       if (abort?.aborted) {
         throw new DOMException("Operation aborted", "AbortError");
       }
 
-      const currentValue = await storage.getItem(key);
-      const currentLock = parseLockData(currentValue);
+      try {
+        const currentValue = await storage.getItem(key);
+        const currentLock = parseLockData(currentValue);
 
-      // Check if lock is free or stale
-      if (!currentLock || isLockStale(currentLock)) {
-        if (currentLock && isLockStale(currentLock)) {
-          debug?.("withStorageLock: clearing stale lock", key, {
-            lockAge: Date.now() - currentLock.timestamp,
+        // Only attempt acquisition if the lock is free, stale, or already
+        // ours (the wait may have been cut short by a storage event fired
+        // by another waiter acquiring the lock)
+        if (
+          !currentLock ||
+          currentLock.id === lockId ||
+          isLockStale(currentLock)
+        ) {
+          if (currentLock && currentLock.id !== lockId) {
+            debug?.("withStorageLock: clearing stale lock", key, {
+              lockAge: Date.now() - currentLock.timestamp,
+            });
+          }
+          lockData.timestamp = Date.now();
+          await storage.setItem(key, JSON.stringify(lockData));
+
+          // Wait a short randomized jitter before verifying ownership, so
+          // that a competing write landing just after ours is detected
+          await sleep(5 + Math.floor(Math.random() * 20));
+
+          // Verify we own the lock (handles race condition)
+          const verifyValue = await storage.getItem(key);
+          const verifyLock = parseLockData(verifyValue);
+
+          if (verifyLock && verifyLock.id === lockId) {
+            acquired = true;
+            debug?.("withStorageLock: acquired lock", key, {
+              lockId,
+              elapsedMs: Date.now() - start,
+            });
+            break;
+          }
+
+          // Another contender overwrote our lock; go back to waiting
+          debug?.("withStorageLock: lock acquisition race detected", key, {
+            ourId: lockId,
+            actualId: verifyLock?.id,
           });
         }
-        break; // Lock is available
+        consecutiveStorageErrors = 0;
+      } catch (error) {
+        debug?.(
+          "withStorageLock: storage error during lock acquisition",
+          key,
+          error
+        );
+        // Handle storage errors
+        consecutiveStorageErrors++;
+        if (consecutiveStorageErrors >= maxStorageErrors) {
+          throw new Error(
+            `Failed to acquire lock due to storage error: ${String(error)}`
+          );
+        }
       }
 
       // Check timeout
@@ -162,9 +217,14 @@ export async function withStorageLock<T>(
         throw new LockTimeoutError(key, timeoutMs);
       }
 
-      // Adaptive polling: increase delay after several consecutive checks
+      // Adaptive polling: increase delay after several consecutive checks,
+      // but go back to fast polling when a storage event hints at a release
       consecutiveChecks++;
-      if (consecutiveChecks > 3) {
+      if (lockReleased) {
+        lockReleased = false;
+        pollDelay = DEFAULT_RETRY_DELAY_MS;
+        consecutiveChecks = 0;
+      } else if (consecutiveChecks > 3) {
         pollDelay = Math.min(pollDelay * 1.5, maxPollDelay);
       }
 
@@ -176,64 +236,100 @@ export async function withStorageLock<T>(
     }
   }
 
-  // Acquire lock with atomic check
-  let acquired = false;
-  const maxAcquisitionAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAcquisitionAttempts; attempt++) {
+  // Renew the lock's timestamp periodically so that long critical sections
+  // (e.g. token refresh with retries on a slow network) are not declared
+  // stale and taken over by other tabs. If we ever detect that we no longer
+  // (safely) hold the lock, stop renewing for good rather than risk
+  // clobbering another tab's legitimate takeover
+  let released = false;
+  let lockLost = false;
+  let heartbeatInFlight: Promise<void> = Promise.resolve();
+  const renewLock = async () => {
     try {
+      if (released || lockLost) {
+        return;
+      }
+      const currentValue = await storage.getItem(key);
+      const currentLock = parseLockData(currentValue);
+      if (!currentLock || currentLock.id !== lockId) {
+        // The lock vanished or another tab took it over; we no longer hold
+        // it, so stop renewing for good — a renewal write now would clobber
+        // the new holder and break mutual exclusion
+        lockLost = true;
+        clearInterval(heartbeat);
+        debug?.(
+          "withStorageLock: lock lost during critical section, heartbeat stopped",
+          key,
+          { ourId: lockId, actualId: currentLock?.id }
+        );
+        return;
+      }
+      if (isLockStale(currentLock)) {
+        // Our own lock went stale before this renewal could land (e.g. timer
+        // throttling or slow storage). Another tab is entitled to take over
+        // a stale lock at any moment — possibly between the read above and a
+        // write below — and our read may even be a delayed snapshot taken
+        // before such a takeover. Writing now could overwrite the legitimate
+        // new holder, so stand down instead of renewing.
+        lockLost = true;
+        clearInterval(heartbeat);
+        debug?.(
+          "withStorageLock: own lock went stale, heartbeat stopped to avoid clobbering a takeover",
+          key,
+          { ourId: lockId, lockAge: Date.now() - currentLock.timestamp }
+        );
+        return;
+      }
+      lockData.timestamp = Date.now();
+      // The critical section may have finished (and the lock been removed,
+      // possibly even acquired by another tab already) while we awaited the
+      // read above; writing now would resurrect the released lock and block
+      // other tabs until it goes stale. This check must remain immediately
+      // before the write, with no awaits in between.
+      if (released) {
+        return;
+      }
       await storage.setItem(key, JSON.stringify(lockData));
 
-      // Verify we own the lock (handles race condition)
+      // Post-write verify, mirroring acquisition: wait a short randomized
+      // jitter, then re-read to confirm we still own the lock. A contender
+      // that judged our pre-write value stale may have written just after
+      // us and passed its own verify; in that case it is the rightful
+      // holder now and we must stand down (re-writing would clobber it)
+      await sleep(5 + Math.floor(Math.random() * 20));
       const verifyValue = await storage.getItem(key);
       const verifyLock = parseLockData(verifyValue);
-
-      if (verifyLock && verifyLock.id === lockId) {
-        acquired = true;
-        debug?.("withStorageLock: acquired lock", key, {
-          lockId,
-          attempt,
-          elapsedMs: Date.now() - start,
-        });
-        break;
-      } else {
-        debug?.("withStorageLock: lock acquisition race detected", key, {
-          ourId: lockId,
-          actualId: verifyLock?.id,
-          attempt,
-        });
-
-        // Small backoff before retry
-        if (attempt < maxAcquisitionAttempts) {
-          await sleep(DEFAULT_RETRY_DELAY_MS * attempt);
-        }
-      }
-    } catch (error) {
-      debug?.(
-        "withStorageLock: storage error during lock acquisition",
-        key,
-        error
-      );
-      // Handle storage errors
-      if (attempt === maxAcquisitionAttempts) {
-        throw new Error(
-          `Failed to acquire lock due to storage error: ${String(error)}`
+      if (!verifyLock || verifyLock.id !== lockId) {
+        lockLost = true;
+        clearInterval(heartbeat);
+        debug?.(
+          "withStorageLock: lock taken over during heartbeat renewal, heartbeat stopped",
+          key,
+          { ourId: lockId, actualId: verifyLock?.id }
         );
       }
+    } catch (error) {
+      debug?.("withStorageLock: error renewing lock heartbeat", key, error);
     }
-  }
-
-  if (!acquired) {
-    throw new Error(
-      `Failed to acquire lock after ${maxAcquisitionAttempts} attempts: ${key}`
-    );
-  }
+  };
+  const heartbeat = setInterval(() => {
+    // Chain renewals so at most one is in flight at a time, and so release
+    // below can await the pending one (renewLock never throws)
+    heartbeatInFlight = heartbeatInFlight.then(renewLock);
+  }, LOCK_HEARTBEAT_INTERVAL_MS);
 
   try {
     return await fn();
   } finally {
+    // Set before any await so an in-flight heartbeat renewal cannot write
+    // the lock back after we remove it below
+    released = true;
+    clearInterval(heartbeat);
     debug?.("withStorageLock: releasing lock", key);
     try {
+      // Wait for a pending renewal (if any) to settle, so its write cannot
+      // land after our removal
+      await heartbeatInFlight;
       // Only remove our lock
       const currentValue = await storage.getItem(key);
       const currentLock = parseLockData(currentValue);
