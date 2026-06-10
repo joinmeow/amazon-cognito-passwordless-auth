@@ -444,7 +444,12 @@ export async function scheduleRefresh(
   args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
 ): Promise<void> {
   const { clientId, debug } = configure();
-  const tokens0 = await retrieveTokens();
+  // Use retrieveTokensForRefresh first: the access token may already be
+  // expired while a refresh token still exists, and the per-user lock must
+  // still be honored then — e.g. signOut holds it during teardown, and the
+  // global watchdog/visibilitychange handlers must not schedule a refresh
+  // for a session that is being torn down
+  const tokens0 = (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
   const userIdentifier = tokens0?.username;
   if (!userIdentifier) {
     debug?.("scheduleRefresh: no user, running unlocked");
