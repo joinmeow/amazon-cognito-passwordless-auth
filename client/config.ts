@@ -184,8 +184,13 @@ export type ConfigWithDefaults = Config &
 type ConfigInput = Omit<Config, "cognitoIdpEndpoint"> &
   Partial<Pick<Config, "cognitoIdpEndpoint">>;
 
-/** Matches a bare AWS region identifier, e.g. "eu-west-1" */
-const awsRegionRegex = /^[a-z]{2}-[a-z]+-\d$/;
+/**
+ * Matches a bare AWS region identifier across partitions, incl. multi-segment
+ * ones such as us-gov-west-1 (GovCloud) and eusc-de-east-1 (European
+ * Sovereign Cloud). Written as 2 alternatives (instead of a nested
+ * quantifier) to keep the security/detect-unsafe-regex lint rule happy.
+ */
+const awsRegionRegex = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
 
 /**
  * Determine if the configured cognitoIdpEndpoint is a genuine custom https://
@@ -286,7 +291,15 @@ export function configure(config?: ConfigInput) {
           : "Cognito Hosted UI configured without domain, will use cognitoIdpEndpoint (custom URL) for OAuth domain"
       );
     }
-    config_.debug?.("Configuration loaded:", config);
+    // Note: don't log the client secret (only that one is configured).
+    // (Inlined rather than using util.js redaction helpers, to avoid a
+    // circular import: util.js imports configure from this module.)
+    config_.debug?.("Configuration loaded:", {
+      ...config,
+      ...(config.clientSecret && {
+        clientSecret: `[redacted, ${config.clientSecret.length} chars]`,
+      }),
+    });
   } else {
     if (!config_) {
       throw new Error("Call configure(config) first");
