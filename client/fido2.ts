@@ -568,9 +568,13 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
   }
 
   // Required: challenge
-  if (!("challenge" in o) || typeof o.challenge !== "string") {
+  if (
+    !("challenge" in o) ||
+    typeof o.challenge !== "string" ||
+    !o.challenge.length
+  ) {
     throw new Fido2ValidationError(
-      "Fido2 options must have a challenge string",
+      "Fido2 options must have a non-empty challenge string",
       o
     );
   }
@@ -603,9 +607,9 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
 
       const cred = credential as Record<string, unknown>;
 
-      if (!("id" in cred) || typeof cred.id !== "string") {
+      if (!("id" in cred) || typeof cred.id !== "string" || !cred.id.length) {
         throw new Fido2ValidationError(
-          "Each credential must have an id string",
+          "Each credential must have a non-empty id string",
           o
         );
       }
