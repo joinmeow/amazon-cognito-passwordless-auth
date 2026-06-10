@@ -14,7 +14,11 @@
  */
 import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
-import { parseJwtPayload } from "./util.js";
+import {
+  parseJwtPayload,
+  bufferFromBase64Url,
+  bufferToBase64Url,
+} from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { processTokens } from "./common.js";
@@ -66,8 +70,10 @@ export async function signInWithRedirect({
   }
 
   const stateRandom = generateRandomString(32);
+  // Encode customState as base64url of its UTF-8 bytes: btoa throws on
+  // non-Latin1 characters and emits "+", "/" and "=" which aren't URL-safe
   const state = customState
-    ? `${stateRandom}-${btoa(customState)}`
+    ? `${stateRandom}-${bufferToBase64Url(new TextEncoder().encode(customState))}`
     : stateRandom;
 
   const { verifier, challenge, method } = await generatePkcePair();
@@ -233,6 +239,24 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   debug?.("OAuth state validation successful");
 
+  // The state is a random hex string, optionally followed by
+  // `-<base64url(customState)>` (see signInWithRedirect). The random part is
+  // hex only, so the first "-" (if any) marks the start of the customState
+  let customState: string | undefined;
+  const customStateMatch = returnedState?.match(
+    /^[0-9a-f]+-([A-Za-z0-9_-]+)$/
+  );
+  if (customStateMatch) {
+    try {
+      customState = new TextDecoder().decode(
+        bufferFromBase64Url(customStateMatch[1])
+      );
+      debug?.("Recovered customState from OAuth state parameter");
+    } catch (err) {
+      debug?.("Failed to decode customState from OAuth state:", err);
+    }
+  }
+
   let tokens: TokensFromSignIn;
 
   if (responseType === "code") {
@@ -318,6 +342,10 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   await clear();
   debug?.("OAuth flow completed successfully");
+
+  if (customState !== undefined) {
+    tokens = { ...tokens, customState };
+  }
 
   return tokens;
 }
