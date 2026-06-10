@@ -725,16 +725,18 @@ export async function fido2getCredential({
   let effectiveTimeout = timeout;
 
   if (mediation === "conditional") {
-    // Conditional mediation requires "preferred" userVerification and no timeout
-    effectiveUserVerification = "preferred";
-    effectiveTimeout = undefined;
-
-    if (userVerification && userVerification !== "preferred") {
+    // Conditional mediation: default userVerification to "preferred" (per passkeys.dev
+    // UX guidance) only when nothing was requested. A requested value (e.g. "required"
+    // from the server's fido2options) is passed through unchanged, so the authenticator
+    // performs user verification when the backend will verify the UV flag.
+    if (!userVerification) {
+      effectiveUserVerification = "preferred";
       debug?.(
-        `⚠️ WebAuthn spec requires userVerification="preferred" for conditional mediation. ` +
-          `Overriding "${userVerification}" → "preferred"`
+        `userVerification not specified - defaulting to "preferred" for conditional mediation`
       );
     }
+    effectiveTimeout = undefined;
+
     if (timeout) {
       debug?.(
         `⚠️ WebAuthn spec recommends removing timeout for conditional mediation. ` +
@@ -1196,7 +1198,7 @@ export function authenticateWithFido2({
    * **'conditional'** - Autofill UI (Password Manager Integration):
    * - Passkeys appear in browser autofill suggestions
    * - "Set and forget" - only resolves if user selects from autofill
-   * - userVerification automatically set to "preferred"
+   * - userVerification defaults to "preferred" when not specified
    * - timeout removed (per WebAuthn spec)
    * - Requires: HTML input with autocomplete="username webauthn"
    *
