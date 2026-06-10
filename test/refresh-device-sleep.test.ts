@@ -185,6 +185,34 @@ describe("Device Sleep/Wake Scenarios", () => {
   };
   let timerEnv: MockTimerEnvironment;
 
+  // Await a promise while pumping the mocked timers. Production code awaits
+  // setTimeout-based sleeps internally (e.g. the lock's post-write
+  // verification jitter and shouldAttemptRefresh's scheduling jitter), but
+  // MockTimerEnvironment only fires mocked setTimeouts when mock time is
+  // advanced — so a plain `await` would deadlock. Advance mock time in 100ms
+  // steps, letting microtasks settle in between via short real-timer waits,
+  // until the promise settles.
+  const awaitPumpingTimers = async <T>(promise: Promise<T>): Promise<T> => {
+    let settled = false;
+    const guarded = promise.finally(() => {
+      settled = true;
+    });
+    // Prevent unhandled rejection warnings while we keep pumping
+    guarded.catch(() => undefined);
+    // Cap the pumping so a genuine deadlock fails fast instead of hanging
+    const maxSteps = 600; // 60s of mock time
+    for (let step = 0; !settled; step++) {
+      if (step >= maxSteps) {
+        throw new Error(
+          "awaitPumpingTimers: promise did not settle after pumping mock timers"
+        );
+      }
+      timerEnv.advanceTime(100);
+      await sleep(1);
+    }
+    return guarded;
+  };
+
   beforeEach(() => {
     // Create a mock storage
     const storageData = new Map<string, string>();
@@ -251,7 +279,7 @@ describe("Device Sleep/Wake Scenarios", () => {
       await storeTokens(tokens);
 
       // Schedule refresh (starts watchdog)
-      await scheduleRefresh();
+      await awaitPumpingTimers(scheduleRefresh());
 
       // Clear logs
       debugLogs = [];
@@ -317,7 +345,7 @@ describe("Device Sleep/Wake Scenarios", () => {
       } as MinimalResponse);
 
       // Schedule refresh
-      await scheduleRefresh();
+      await awaitPumpingTimers(scheduleRefresh());
 
       // Clear logs
       debugLogs = [];
@@ -378,7 +406,7 @@ describe("Device Sleep/Wake Scenarios", () => {
       } as MinimalResponse);
 
       // Schedule refresh (should be ~8 minutes from now)
-      await scheduleRefresh();
+      await awaitPumpingTimers(scheduleRefresh());
 
       const scheduleLog = debugLogs.find((log) =>
         log.includes("Scheduling token refresh in")
@@ -457,7 +485,7 @@ describe("Device Sleep/Wake Scenarios", () => {
       } as MinimalResponse);
 
       // Schedule refresh
-      await scheduleRefresh();
+      await awaitPumpingTimers(scheduleRefresh());
 
       // Advance time to when refresh should fire (~8 minutes)
       timerEnv.advanceTime(8 * 60 * 1000);
@@ -498,7 +526,7 @@ describe("Device Sleep/Wake Scenarios", () => {
       await storeTokens(tokens);
 
       // Schedule refresh
-      await scheduleRefresh();
+      await awaitPumpingTimers(scheduleRefresh());
 
       // Clear logs
       debugLogs = [];
