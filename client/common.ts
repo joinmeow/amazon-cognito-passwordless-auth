@@ -29,7 +29,7 @@ import {
   busyState,
 } from "./model.js";
 import { scheduleRefresh, cleanupRefreshSystem } from "./refresh.js";
-import { computeClockDriftMs } from "./util.js";
+import { computeClockDriftMs, redactSecret } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
@@ -101,7 +101,7 @@ async function processTokensInternal(
   ) {
     debug?.(
       "🔄 [Process Tokens] Detected new device metadata with device key:",
-      normalizedTokens.newDeviceMetadata.deviceKey
+      redactSecret(normalizedTokens.newDeviceMetadata.deviceKey)
     );
 
     // Complete device confirmation if this is a sign-in (has accessToken)
@@ -146,7 +146,7 @@ async function processTokensInternal(
     const record = await getRememberedDevice(normalizedTokens.username);
     const remembered = record?.remembered ?? false;
     debug?.(
-      `🔄 [Process Tokens] Using existing device key ${normalizedTokens.deviceKey}, remembered: ${remembered}`
+      `🔄 [Process Tokens] Using existing device key ${redactSecret(normalizedTokens.deviceKey)}, remembered: ${remembered}`
     );
   } else {
     debug?.("🔄 [Process Tokens] No device key available in tokens");

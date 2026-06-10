@@ -14,7 +14,7 @@
  */
 import { configure } from "./config.js";
 
-import { bufferToBase64 } from "./util.js";
+import { bufferToBase64, redactSecret } from "./util.js";
 import {
   modPow,
   getConstants,
@@ -209,7 +209,7 @@ export async function createDeviceSrpAuthHandler(
         throw new Error("Missing salt for DEVICE_PASSWORD_VERIFIER");
       }
       debug?.(`🔑 [Device SRP] Salt: ${salt}`);
-      debug?.(`🔑 [Device SRP] Secret Block: ${secretBlock}`);
+      debug?.(`🔑 [Device SRP] Secret Block: ${redactSecret(secretBlock)}`);
       const result = await verifyDeviceSrp({
         deviceGroupKey,
         deviceKey,
@@ -256,7 +256,7 @@ export async function handleDeviceConfirmation(
   debug?.(
     "🔍 [Device Confirmation] Device metadata received:",
     JSON.stringify({
-      deviceKey,
+      deviceKey: redactSecret(deviceKey),
       deviceGroupKey,
     })
   );
@@ -265,7 +265,7 @@ export async function handleDeviceConfirmation(
   if (!deviceKey.includes("_")) {
     debug?.(
       "❌ [Device Confirmation] Invalid device key format (missing underscore): " +
-        deviceKey
+        redactSecret(deviceKey)
     );
     // Just return tokens without attempting confirmation
     tokens.deviceKey = deviceKey;
@@ -278,7 +278,7 @@ export async function handleDeviceConfirmation(
     "🔍 [Device Confirmation] Device key components: region=" +
       region +
       ", uuid=" +
-      uuid
+      redactSecret(uuid)
   );
 
   if (!region || !uuid) {
@@ -331,8 +331,8 @@ export async function handleDeviceConfirmation(
     debug?.(
       `🔍 [Device Confirmation] Access token length: ${tokens.accessToken.length}`
     );
-    debug?.(`🔍 [Device Confirmation] Request details: 
-      - deviceKey: ${deviceKey}
+    debug?.(`🔍 [Device Confirmation] Request details:
+      - deviceKey: ${redactSecret(deviceKey)}
       - deviceName: ${finalDeviceName}
       - passwordVerifier length: ${deviceVerifierConfig.passwordVerifier.length}
       - salt length: ${deviceVerifierConfig.salt.length}

@@ -26,6 +26,7 @@ import {
   throwIfNot2xx,
   bufferFromBase64Url,
   bufferToBase64Url,
+  redactTokensFromObject,
 } from "./util.js";
 import { configure } from "./config.js";
 import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
@@ -1341,7 +1342,10 @@ export function authenticateWithFido2({
 
       let tokens;
       if (isAuthenticatedResponse(authResult)) {
-        debug?.(`Response from respondToAuthChallenge (tokens):`, authResult);
+        debug?.(
+          `Response from respondToAuthChallenge (tokens):`,
+          redactTokensFromObject(authResult)
+        );
         tokens = {
           accessToken: authResult.AuthenticationResult.AccessToken,
           idToken: authResult.AuthenticationResult.IdToken,

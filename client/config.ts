@@ -242,7 +242,15 @@ export function configure(config?: ConfigInput) {
         "Cognito Hosted UI configured, will use cognitoIdpEndpoint for OAuth domain"
       );
     }
-    config_.debug?.("Configuration loaded:", config);
+    // Note: don't log the client secret (only that one is configured).
+    // (Inlined rather than using util.js redaction helpers, to avoid a
+    // circular import: util.js imports configure from this module.)
+    config_.debug?.("Configuration loaded:", {
+      ...config,
+      ...(config.clientSecret && {
+        clientSecret: `[redacted, ${config.clientSecret.length} chars]`,
+      }),
+    });
   } else {
     if (!config_) {
       throw new Error("Call configure(config) first");

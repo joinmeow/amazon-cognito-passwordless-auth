@@ -78,6 +78,64 @@ export function computeClockDriftMs(accessToken?: string): number {
 }
 
 /**
+ * Redact a secret value for debug logging: keep a short prefix (so logs stay
+ * diagnostically useful) plus the length, but never emit the full value.
+ */
+export function redactSecret(value: string, visibleChars = 5): string {
+  if (value.length <= visibleChars) {
+    return `[redacted, ${value.length} chars]`;
+  }
+  return `${value.slice(0, visibleChars)}…[redacted, ${value.length} chars]`;
+}
+
+/**
+ * Keys whose string values must never appear in debug output. Keys are
+ * compared case-insensitively with underscores stripped, so e.g.
+ * AccessToken, accessToken and access_token all match.
+ */
+const SENSITIVE_DEBUG_KEYS = new Set([
+  "accesstoken",
+  "idtoken",
+  "refreshtoken",
+  "secretblock",
+  "passwordclaimsecretblock",
+  "devicekey",
+  "password",
+  "clientsecret",
+]);
+
+/**
+ * Return a copy of the given value in which the string values of known
+ * sensitive keys (tokens, SRP secret blocks, device keys, ...) are redacted
+ * via redactSecret. Plain objects and arrays are copied recursively (up to
+ * a maximum depth); all other values pass through unchanged.
+ */
+export function redactTokensFromObject(value: unknown, depth = 5): unknown {
+  if (depth <= 0 || typeof value !== "object" || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactTokensFromObject(item, depth - 1));
+  }
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    // Leave class instances (Date, Error, ...) alone
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, val]) => {
+      if (
+        typeof val === "string" &&
+        SENSITIVE_DEBUG_KEYS.has(key.toLowerCase().replace(/_/g, ""))
+      ) {
+        return [key, redactSecret(val)];
+      }
+      return [key, redactTokensFromObject(val, depth - 1)];
+    })
+  );
+}
+
+/**
  * Schedule a callback once, like setTimeout, but count
  * time spent sleeping also as time spent. This way, if the browser tab
  * where this is happening is activated again after sleeping,
