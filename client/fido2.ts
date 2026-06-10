@@ -687,18 +687,19 @@ export async function fido2getCredential({
     if (
       typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
     ) {
+      let isAvailable: boolean | undefined;
       try {
-        const isAvailable =
+        isAvailable =
           await PublicKeyCredential.isConditionalMediationAvailable();
-        if (!isAvailable) {
-          throw new Fido2ConfigError(
-            "Conditional mediation requested but not supported by this browser."
-          );
-        }
       } catch (error) {
         debug?.(
-          "⚠️ Cannot verify conditional mediation support - treating as unsupported",
+          "⚠️ Cannot verify conditional mediation support - proceeding with conditional mediation anyway",
           error
+        );
+      }
+      if (isAvailable === false) {
+        throw new Fido2ConfigError(
+          "Conditional mediation requested but not supported by this browser."
         );
       }
     } else {
