@@ -232,6 +232,9 @@ All base properties plus:
 | ------------------------ | -------------------- | ------------------------------------------ | ----------------------------------- |
 | `WEBAUTHN_ABORTED`       | Fido2AbortError      | "Passkey verification was cancelled"       | User cancelled or operation aborted |
 | `CREDENTIAL_ERROR`       | Fido2CredentialError | "Unable to complete passkey operation"     | Credential operation failed         |
+| `CREDENTIAL_NOT_ALLOWED` | Fido2CredentialError | "Passkey access was denied. Please try again." | User cancelled, no gesture, permission denied, or no local credentials (mediation: "immediate"). Detect via `isFido2NotAllowedError()` |
+| `CREDENTIAL_INVALID_STATE` | Fido2CredentialError | "This passkey is already registered"     | Authenticator in invalid state or credential already registered |
+| `CREDENTIAL_REQUEST_PENDING` | Fido2CredentialError | "Another passkey request is in progress. Please try again." | Another WebAuthn request is already pending (Chrome throws OperationError) |
 | `CONFIG_ERROR`           | Fido2ConfigError     | "Passkeys are not properly configured"     | Missing or invalid configuration    |
 | `VALIDATION_ERROR`       | Fido2ValidationError | "Unable to verify passkey"                 | Data validation failed              |
 | `AUTH_ERROR`             | Fido2AuthError       | "Authentication with passkey failed"       | Authentication/authorization failed |
@@ -262,6 +265,7 @@ The library automatically converts WebAuthn DOMExceptions to appropriate Fido2Er
 | `AbortError`        | Fido2AbortError      | "Passkey verification was cancelled"           | Operation cancelled via AbortController or timeout             |
 | `NotAllowedError`   | Fido2CredentialError | "Passkey access was denied. Please try again." | User cancelled ceremony, no user gesture, or permission denied |
 | `InvalidStateError` | Fido2CredentialError | "This passkey is already registered"           | Authenticator is in invalid state                              |
+| `OperationError`    | Fido2CredentialError | "Another passkey request is in progress. Please try again." | Another WebAuthn request is already pending (Chrome-specific, not in spec) |
 | `SecurityError`     | Fido2ConfigError     | "Passkeys cannot be used on this website"      | Invalid domain or HTTPS required                               |
 | `UnknownError`      | Fido2Error           | "Something went wrong with your passkey"       | Client-specific error that doesn't fit other categories        |
 
@@ -275,10 +279,22 @@ try {
   await fido2getCredential({ challenge });
 } catch (error) {
   if (error instanceof Fido2CredentialError) {
-    console.log("Error code:", error.code); // "CREDENTIAL_ERROR"
+    console.log("Error code:", error.code); // "CREDENTIAL_NOT_ALLOWED"
     console.log("Technical:", error.message); // "Operation not allowed..."
     console.log("User-friendly:", error.userMessage); // "Passkey access was denied..."
     console.log("Original DOMException:", error.cause); // NotAllowedError
+  }
+}
+
+// Or use the helper predicate (e.g. to fall back to a password form
+// when mediation: "immediate" finds no local credentials):
+import { isFido2NotAllowedError } from "@joinmeow/cognito-passwordless-auth";
+
+try {
+  await authenticateWithFido2({ mediation: "immediate" }).signedIn;
+} catch (error) {
+  if (isFido2NotAllowedError(error)) {
+    showPasswordForm();
   }
 }
 ```

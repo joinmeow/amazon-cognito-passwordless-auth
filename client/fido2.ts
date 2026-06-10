@@ -143,9 +143,11 @@ export async function getClientCapabilities(): Promise<WebAuthnClientCapabilitie
  * } else if (capabilities.immediate) {
  *   // Use immediate mediation for smart sign-in button
  *   try {
- *     await authenticateWithFido2({ mediation: 'immediate' });
+ *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
  *   } catch (error) {
- *     if (error.name === 'NotAllowedError') {
+ *     // Library errors wrap the DOMException (error.name is never
+ *     // 'NotAllowedError'); use the helper to detect this case
+ *     if (isFido2NotAllowedError(error)) {
  *       showPasswordForm();
  *     }
  *   }
@@ -1213,6 +1215,7 @@ export function authenticateWithFido2({
    * Usage patterns:
    * ```typescript
    * import { detectMediationCapabilities, getClientCapabilities } from './fido2';
+   * import { isFido2NotAllowedError } from './errors';
    *
    * // Option 1: Simple detection helper
    * const { conditional, immediate } = await detectMediationCapabilities();
@@ -1228,9 +1231,11 @@ export function authenticateWithFido2({
    * const capabilities = await getClientCapabilities();
    * if (capabilities?.immediateGet) {
    *   try {
-   *     await authenticateWithFido2({ mediation: 'immediate' });
+   *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
    *   } catch (error) {
-   *     if (error.name === 'NotAllowedError') {
+   *     // Library errors wrap the DOMException (error.name is never
+   *     // 'NotAllowedError'); use the helper to detect this case
+   *     if (isFido2NotAllowedError(error)) {
    *       // No local credentials - show password form
    *       showPasswordForm();
    *     }

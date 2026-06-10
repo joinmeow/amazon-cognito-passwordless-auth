@@ -26,7 +26,9 @@ import {
   Fido2CredentialError,
   Fido2ConfigError,
   Fido2AuthError,
+  Fido2Error,
   Fido2ValidationError,
+  isFido2NotAllowedError,
 } from "../errors.js";
 import type { ConfigWithDefaults } from "../config.js";
 import { configure } from "../config.js";
@@ -546,6 +548,94 @@ describe("fido2.ts error handling", () => {
           relyingPartyId: "example.com",
         })
       ).rejects.toThrow(Fido2CredentialError);
+    });
+
+    it("should convert NotAllowedError from get() to an error detectable via isFido2NotAllowedError", async () => {
+      const mockGet = jest
+        .fn()
+        .mockRejectedValue(new DOMException("Not allowed", "NotAllowedError"));
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      const thrown = await fido2getCredential({
+        challenge: "test-challenge",
+        relyingPartyId: "example.com",
+      }).then(
+        () => undefined,
+        (err: unknown) => err
+      );
+
+      expect(thrown).toBeInstanceOf(Fido2CredentialError);
+      expect((thrown as Fido2CredentialError).code).toBe(
+        "CREDENTIAL_NOT_ALLOWED"
+      );
+      expect(isFido2NotAllowedError(thrown)).toBe(true);
+      // The documented legacy pattern `error.name === 'NotAllowedError'`
+      // does not match library errors - only the cause keeps the DOM name
+      expect((thrown as Fido2CredentialError).name).toBe(
+        "Fido2CredentialError"
+      );
+      expect(((thrown as Fido2CredentialError).cause as DOMException).name).toBe(
+        "NotAllowedError"
+      );
+    });
+
+    it("should convert OperationError (pending request) to Fido2CredentialError with CREDENTIAL_REQUEST_PENDING", async () => {
+      // Chrome throws OperationError when another WebAuthn request is pending
+      const mockGet = jest
+        .fn()
+        .mockRejectedValue(
+          new DOMException("A request is already pending", "OperationError")
+        );
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      const thrown = await fido2getCredential({
+        challenge: "test-challenge",
+        relyingPartyId: "example.com",
+      }).then(
+        () => undefined,
+        (err: unknown) => err
+      );
+
+      expect(thrown).toBeInstanceOf(Fido2CredentialError);
+      expect((thrown as Fido2CredentialError).code).toBe(
+        "CREDENTIAL_REQUEST_PENDING"
+      );
+      expect(isFido2NotAllowedError(thrown)).toBe(false);
+    });
+
+    it("should convert OperationError without a pending message to generic Fido2Error", async () => {
+      // Browsers can surface OperationError for transient/authenticator
+      // failures too - those must keep the generic fallback mapping
+      const mockGet = jest
+        .fn()
+        .mockRejectedValue(
+          new DOMException(
+            "The operation failed for an unknown transient reason.",
+            "OperationError"
+          )
+        );
+      Object.defineProperty(global.navigator, "credentials", {
+        value: { get: mockGet },
+        configurable: true,
+      });
+
+      const thrown = await fido2getCredential({
+        challenge: "test-challenge",
+        relyingPartyId: "example.com",
+      }).then(
+        () => undefined,
+        (err: unknown) => err
+      );
+
+      expect(thrown).toBeInstanceOf(Fido2Error);
+      expect(thrown).not.toBeInstanceOf(Fido2CredentialError);
+      expect((thrown as Fido2Error).code).toBe("WEBAUTHN_ERROR");
     });
 
     it("should convert NotSupportedError to Fido2ConfigError for create", async () => {
