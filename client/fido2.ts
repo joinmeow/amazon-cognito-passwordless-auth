@@ -692,6 +692,19 @@ let pendingConditionalGet:
  * behind them.
  */
 let credentialsGetLock: Promise<void> = Promise.resolve();
+
+/**
+ * How long a new credential request waits for an aborted (superseded)
+ * conditional credentials.get() request to settle before proceeding anyway.
+ *
+ * Conforming browsers settle an aborted request promptly, but a
+ * non-conforming browser or extension-wrapped navigator.credentials.get may
+ * ignore the AbortController and never settle. Since this wait happens while
+ * holding the credentials.get() lock, an unbounded wait would hang all
+ * future passkey requests.
+ */
+export const SUPERSEDED_SETTLEMENT_TIMEOUT_MS = 3000;
+
 async function acquireCredentialsGetLock(): Promise<() => void> {
   const previous = credentialsGetLock;
   let release!: () => void;
@@ -815,11 +828,38 @@ export async function fido2getCredential({
       debug?.(
         "⚠️ Aborting pending conditional (autofill) credentials.get() so the new credential request can proceed"
       );
-      pendingConditionalGet.superseded = true;
-      pendingConditionalGet.controller.abort();
+      const aborted = pendingConditionalGet;
+      aborted.superseded = true;
+      aborted.controller.abort();
       // Wait for the aborted request to settle before issuing the new
-      // request (the tracker is cleared upon settlement)
-      await pendingConditionalGet.settled;
+      // request (the tracker is cleared upon settlement). Bound the wait:
+      // a non-conforming credentials.get may ignore the abort and never
+      // settle, and we hold the lock here - waiting forever would hang all
+      // future credential requests
+      let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        aborted.settled.then(() => false),
+        new Promise<boolean>(
+          (resolve) =>
+            (settlementTimer = setTimeout(
+              () => resolve(true),
+              SUPERSEDED_SETTLEMENT_TIMEOUT_MS
+            ))
+        ),
+      ]);
+      clearTimeout(settlementTimer);
+      if (timedOut) {
+        debug?.(
+          `⚠️ Aborted conditional credentials.get() did not settle within ${SUPERSEDED_SETTLEMENT_TIMEOUT_MS}ms - proceeding with the new request anyway`
+        );
+        // Clear the stale tracker so it cannot wedge subsequent requests.
+        // If the old request ever settles, its settlement handler only
+        // clears the tracker if it still points at itself (identity check),
+        // so it cannot corrupt the state of a newer conditional request
+        if (pendingConditionalGet === aborted) {
+          pendingConditionalGet = undefined;
+        }
+      }
     }
 
     // For conditional requests, use an internal AbortController (chained to

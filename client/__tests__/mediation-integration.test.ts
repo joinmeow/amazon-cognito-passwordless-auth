@@ -13,7 +13,10 @@
  * language governing permissions and limitations under the License.
  */
 
-import { fido2getCredential } from "../fido2.js";
+import {
+  fido2getCredential,
+  SUPERSEDED_SETTLEMENT_TIMEOUT_MS,
+} from "../fido2.js";
 import { configure } from "../config.js";
 import { Fido2AbortError, Fido2ConfigError } from "../errors.js";
 import {
@@ -576,6 +579,138 @@ describe("Mediation Integration Tests", () => {
       expect(secondModal).toBeDefined();
       // Conditional + two (serialized) modal requests
       expect(getSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not hang subsequent requests when an aborted conditional request never settles", async () => {
+      // A non-conforming browser (or extension-wrapped
+      // navigator.credentials.get) may ignore the AbortController entirely.
+      // The new request must not wait forever for the aborted conditional
+      // request to settle - it proceeds after a bounded timeout
+      jest.useFakeTimers();
+      try {
+        const getSpy = jest
+          .fn()
+          // Ignores its abort signal and never settles
+          .mockImplementationOnce(() => new Promise(() => {}))
+          .mockResolvedValueOnce(MOCK_ASSERTION_CREDENTIAL);
+
+        cleanup = setupWebAuthnMock({
+          customCredentials: {
+            get: getSpy,
+            create: jest.fn(),
+          } as any,
+        });
+
+        // Conditional (autofill) request kicked off at page load
+        void fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+          mediation: "conditional",
+        }).catch(() => undefined);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(getSpy).toHaveBeenCalledTimes(1);
+
+        // User clicks "sign in with passkey" → modal request
+        const modal = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+        });
+        let modalSettled = false;
+        modal.then(
+          () => (modalSettled = true),
+          () => (modalSettled = true)
+        );
+
+        // The conditional request was asked to abort (but won't comply)
+        await jest.advanceTimersByTimeAsync(0);
+        const conditionalSignal = getSpy.mock.calls[0][0]
+          .signal as AbortSignal;
+        expect(conditionalSignal.aborted).toBe(true);
+
+        // Just before the settlement timeout: still waiting
+        await jest.advanceTimersByTimeAsync(
+          SUPERSEDED_SETTLEMENT_TIMEOUT_MS - 1
+        );
+        expect(getSpy).toHaveBeenCalledTimes(1);
+        expect(modalSettled).toBe(false);
+
+        // Once the timeout elapses, the modal request proceeds anyway
+        await jest.advanceTimersByTimeAsync(1);
+        await expect(modal).resolves.toBeDefined();
+        expect(getSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it("ignores the late settlement of a timed-out conditional request and keeps tracking the newer one", async () => {
+      jest.useFakeTimers();
+      try {
+        let rejectStale!: (err: unknown) => void;
+        const getSpy = jest
+          .fn()
+          // Non-conforming: ignores its abort signal, settles only when we
+          // make it settle (long after the settlement timeout)
+          .mockImplementationOnce(
+            () => new Promise((_resolve, reject) => (rejectStale = reject))
+          )
+          // Modal takeover succeeds after the settlement timeout
+          .mockResolvedValueOnce(MOCK_ASSERTION_CREDENTIAL)
+          // Second conditional request: conforming, hangs until aborted
+          .mockImplementationOnce(hangingGet)
+          // Final modal request
+          .mockResolvedValueOnce(MOCK_ASSERTION_CREDENTIAL);
+
+        cleanup = setupWebAuthnMock({
+          customCredentials: {
+            get: getSpy,
+            create: jest.fn(),
+          } as any,
+        });
+
+        const staleConditional = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+          mediation: "conditional",
+        }).catch((err: unknown) => err);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(getSpy).toHaveBeenCalledTimes(1);
+
+        // Modal request times out waiting for the stale conditional request
+        // to settle, then proceeds
+        const modal = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+        });
+        await jest.advanceTimersByTimeAsync(SUPERSEDED_SETTLEMENT_TIMEOUT_MS);
+        await expect(modal).resolves.toBeDefined();
+
+        // A new conditional request becomes the tracked pending request
+        const newConditional = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+          mediation: "conditional",
+        }).catch((err: unknown) => err);
+        await jest.advanceTimersByTimeAsync(0);
+        expect(getSpy).toHaveBeenCalledTimes(3);
+
+        // The stale request finally settles - this must not corrupt the
+        // tracking of the newer conditional request
+        rejectStale(
+          new DOMException("The operation was aborted", "AbortError")
+        );
+        await jest.advanceTimersByTimeAsync(0);
+        expect(await staleConditional).toBeInstanceOf(Fido2AbortError);
+
+        // A final modal request still aborts the newer conditional request
+        // (i.e. it was still tracked despite the stale settlement)
+        const finalModal = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+        });
+        await jest.advanceTimersByTimeAsync(0);
+        await expect(finalModal).resolves.toBeDefined();
+        const newConditionalErr = await newConditional;
+        expect(newConditionalErr).toBeInstanceOf(Fido2AbortError);
+        expect((newConditionalErr as Fido2AbortError).superseded).toBe(true);
+        expect(getSpy).toHaveBeenCalledTimes(4);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 

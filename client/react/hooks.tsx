@@ -25,6 +25,7 @@ import {
 } from "../fido2.js";
 import type { PreparedFido2SignIn } from "../fido2.js";
 import { authenticateWithSRP } from "../srp.js";
+import { isFido2AbortError } from "../errors.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
 import {
@@ -1558,6 +1559,15 @@ function _usePasswordless() {
         },
       });
       signinIn.signedIn.catch((error: Error) => {
+        if (isFido2AbortError(error) && error.superseded) {
+          // Aborted because a newer credential request took over (e.g. a
+          // modal passkey sign-in superseding the pending conditional
+          // autofill request) - not a user-facing error
+          debug?.(
+            "FIDO2 sign-in superseded by a newer credential request - not surfacing as error"
+          );
+          return;
+        }
         dispatch({ type: "SET_ERROR", payload: error });
       });
       return signinIn;
