@@ -16,6 +16,7 @@ import { revokeToken } from "./cognito-api.js";
 import { configure } from "./config.js";
 import {
   retrieveTokens,
+  retrieveTokensForRefresh,
   storeTokens,
   storeDeviceKey,
   getRememberedDevice,
@@ -364,13 +365,38 @@ export const signOut = (props?: {
 
   const tokenRevocationTracker = new Set<string>();
 
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+  const customKeyPrefix = `Passwordless.${clientId}`;
+
+  // Resolve the session to tear down. Prefer retrieveTokensForRefresh so a
+  // session whose access token has already expired (but is still refreshable)
+  // is signed out: retrieveTokens drops expired tokens as a safety net, but the
+  // refresh system reads via retrieveTokensForRefresh and would otherwise
+  // silently resurrect a session we believe we signed out of. Fall back to
+  // retrieveTokens for valid access-only sessions (e.g. OAuth implicit flow)
+  // that have no refresh token, and finally to LastAuthUser so an access-only
+  // session whose access token has also expired is still cleared. A refresh
+  // token, when present, is always surfaced by retrieveTokensForRefresh, so the
+  // revocation below still fires whenever there is something to revoke.
+  const resolveSignOutSession = async (): Promise<
+    { username: string; refreshToken?: string } | undefined
+  > => {
+    const tokens =
+      (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
+    if (tokens?.username) {
+      return { username: tokens.username, refreshToken: tokens.refreshToken };
+    }
+    const username = await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`);
+    return username ? { username } : undefined;
+  };
+
   // Wrap sign-out in per-user storage lock
   const signedOut = (async () => {
     // Determine lock key per user
-    const tokens0 = await retrieveTokens();
-    const userIdentifier = tokens0?.username;
+    const session0 = await resolveSignOutSession();
+    const userIdentifier = session0?.username;
     const lockKey = userIdentifier
-      ? `Passwordless.${clientId}.${userIdentifier}.refreshLock`
+      ? `${customKeyPrefix}.${userIdentifier}.refreshLock`
       : undefined;
     // Run sign-out logic under lock if we have a user
     const doSignOut = async () => {
@@ -390,54 +416,45 @@ export const signOut = (props?: {
           cleanupRefreshSystem(userIdentifier);
         }
 
-        const tokens = await retrieveTokens();
+        const session = await resolveSignOutSession();
         if (abort.signal.aborted) {
           debug?.("Aborting sign-out");
           currentStatus && statusCb?.(currentStatus);
           return;
         }
-        if (!tokens) {
-          debug?.("No tokens in storage to delete");
+        if (!session) {
+          debug?.("No session in storage to delete");
           props?.tokensRemovedLocallyCb?.();
           statusCb?.("SIGNED_OUT");
           return;
         }
-        const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-        const customKeyPrefix = `Passwordless.${clientId}`;
+        const { username, refreshToken } = session;
         await Promise.all([
-          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.idToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.idToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.accessToken`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
           storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.accessToken`
+            `${amplifyKeyPrefix}.${username}.tokenScopesString`
           ),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.refreshToken`
-          ),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.tokenScopesString`
-          ),
-          storage.removeItem(`${amplifyKeyPrefix}.${tokens.username}.userData`),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.userData`),
           storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${tokens.username}.clockDriftMs`
-          ),
-          storage.removeItem(`${customKeyPrefix}.${tokens.username}.expireAt`),
-          storage.removeItem(
-            `Passwordless.${clientId}.${tokens.username}.refreshingTokens`
-          ),
+          storage.removeItem(`${amplifyKeyPrefix}.${username}.clockDriftMs`),
+          storage.removeItem(`${customKeyPrefix}.${username}.expireAt`),
+          storage.removeItem(`${customKeyPrefix}.${username}.refreshingTokens`),
           // Note: We do NOT remove deviceKey - it should persist between sessions
         ]);
         props?.tokensRemovedLocallyCb?.();
 
         if (
-          tokens.refreshToken &&
-          !tokenRevocationTracker.has(tokens.refreshToken) &&
+          refreshToken &&
+          !tokenRevocationTracker.has(refreshToken) &&
           !skipTokenRevocation
         ) {
           try {
-            tokenRevocationTracker.add(tokens.refreshToken);
+            tokenRevocationTracker.add(refreshToken);
             await revokeToken({
               abort: undefined,
-              refreshToken: tokens.refreshToken,
+              refreshToken: refreshToken,
             });
             debug?.("Successfully revoked refresh token");
           } catch (revokeError) {
