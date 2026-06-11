@@ -1970,15 +1970,23 @@ function _usePasswordless() {
       dispatch({ type: "SET_ERROR", payload: undefined });
       hostedSignOutWithRedirect({
         statusCb: setSigninInStatus,
+        // Runs only once tokens are actually removed from storage, so React
+        // state stays consistent with storage if hostedSignOutWithRedirect
+        // rejects earlier (e.g. on missing hostedUi / redirectSignOut
+        // configuration). Mirrors the regular signOut callback: a full
+        // per-user reset (SIGN_OUT also clears authMethod, deviceKey, TOTP
+        // MFA status, ...) so nothing leaks into the next user's session
         tokensRemovedLocallyCb: () => {
           _setTokens(undefined);
           parseAndSetTokens(undefined);
-          // Clear authMethod only once tokens are actually removed from
-          // storage, so React state stays consistent with storage if
-          // hostedSignOutWithRedirect rejects earlier (e.g. on missing
-          // hostedUi / redirectSignOut configuration)
-          dispatch({ type: "SET_AUTH_METHOD", payload: undefined });
           dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+          lastActivityAtRef.current = Date.now();
+          // Invalidate any in-flight getUser fetch and reset its cooldown,
+          // so a stale response can't restore the previous user's MFA
+          // status and the next user's fetch runs immediately
+          lastFetchedMfaTokenRef.current = undefined;
+          lastMfaFetchTimeRef.current = 0;
+          dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,
         skipTokenRevocation: options?.skipTokenRevocation,

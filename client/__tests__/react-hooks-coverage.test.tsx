@@ -348,6 +348,15 @@ describe("React hooks coverage for hooks.tsx branches", () => {
 
     expect(result.current.authMethod).toBeUndefined();
     expect(result.current.tokens).toBeUndefined();
+    // Hosted-UI sign-out performs the same full per-user reset (SIGN_OUT)
+    // as the regular signOut path, so nothing leaks to the next user
+    expect(result.current.deviceKey).toBeNull();
+    expect(result.current.mfaStatusReady).toBe(false);
+    expect(result.current.totpMfaStatus).toEqual({
+      enabled: false,
+      preferred: false,
+      availableMfaTypes: [],
+    });
   });
 
   it("forwards prepared bundle to authenticateWithFido2", async () => {
