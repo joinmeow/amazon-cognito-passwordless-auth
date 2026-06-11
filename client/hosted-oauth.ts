@@ -174,9 +174,6 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     return null; // not our redirect
   }
 
-  // Mark as processing to prevent duplicate handling in concurrent invocations
-  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "processing");
-
   const url = new URL(cfg.location.href);
   debug?.(`Current URL: ${url.toString()}`);
   debug?.(
@@ -205,6 +202,12 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
   }
 
   debug?.("URL matches expected redirect URL, continuing OAuth flow");
+
+  // Mark as processing to prevent duplicate handling in concurrent invocations.
+  // This must happen only AFTER the redirect-URL check above: invocations on
+  // other URLs must leave the in-progress flag untouched, so the real callback
+  // can still be processed when it arrives.
+  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "processing");
 
   const error = url.searchParams.get("error");
   if (error) {

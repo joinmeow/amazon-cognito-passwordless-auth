@@ -1,8 +1,8 @@
 import { configure } from "../client/config.js";
 import { scheduleRefresh } from "../client/refresh.js";
 
-// Helper to create a valid JWT for testing
-const createValidJWT = () => {
+// Helper to create a JWT for testing; expiry offset in seconds from now
+const createJWT = (expOffsetSeconds = 3600) => {
   const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
@@ -11,7 +11,7 @@ const createValidJWT = () => {
     JSON.stringify({
       sub: "test-sub",
       username: "testuser",
-      exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
+      exp: Math.floor(Date.now() / 1000) + expOffsetSeconds,
       iat: Math.floor(Date.now() / 1000),
     })
   )
@@ -20,6 +20,7 @@ const createValidJWT = () => {
     .replace(/=+$/, "");
   return `${header}.${payload}.signature`;
 };
+const createValidJWT = () => createJWT(3600);
 
 describe("ScheduleRefresh Lock", () => {
   beforeEach(() => {
@@ -73,4 +74,35 @@ describe("ScheduleRefresh Lock", () => {
     expect(duration).toBeGreaterThan(14000);
     expect(duration).toBeLessThan(16000);
   }, 20000); // Increase timeout to handle lock wait
+
+  test("should honor the per-user lock when the access token is expired", async () => {
+    // Regression: scheduleRefresh used to derive the lock user via
+    // retrieveTokens(), which returns undefined for an expired access token,
+    // so the global watchdog/visibilitychange handlers would take the
+    // unlocked path and race a concurrent signOut holding the lock.
+    const debug = jest.fn();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      debug,
+    });
+    const { storage } = configure();
+    const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
+
+    await storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, "testuser");
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.accessToken`,
+      createJWT(-3600) // expired 1 hour ago
+    );
+    await storage.setItem(
+      `${amplifyKeyPrefix}.testuser.refreshToken`,
+      "test-refresh-token"
+    );
+
+    await scheduleRefresh();
+
+    const messages = debug.mock.calls.map((args) => String(args[0]));
+    expect(messages).not.toContain("scheduleRefresh: no user, running unlocked");
+    expect(messages).toContain("scheduleRefresh: waiting for lock");
+  });
 });
