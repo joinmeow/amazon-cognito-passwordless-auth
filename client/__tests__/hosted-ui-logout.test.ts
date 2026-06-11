@@ -153,6 +153,10 @@ describe("Hosted UI logout (signOutWithRedirect)", () => {
       expect(mockSignOut).toHaveBeenCalledWith({
         skipTokenRevocation: true,
         tokensRemovedLocallyCb,
+        // Always set for the redirect flow: revocation must complete while
+        // the page is still alive, and local removal must happen right
+        // before the navigation
+        revokeTokensBeforeLocalRemoval: true,
       });
     });
 

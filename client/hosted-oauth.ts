@@ -189,10 +189,15 @@ export async function signOutWithRedirect(props?: {
   const logoutEndpoint = getLogoutEndpoint();
   debug?.(`Using Hosted UI logout endpoint: ${logoutEndpoint}`);
 
-  // Perform the local sign-out first (clear tokens, revoke refresh token),
-  // so local state is cleaned up before we navigate away
+  // Perform the local sign-out first, with the refresh token revoked BEFORE
+  // tokens are removed locally: the revocation network call then completes
+  // while the page is still alive, and the local sign-out happens right
+  // before the navigation below — minimizing the window in which the app
+  // already looks signed out while the Cognito hosted-UI session cookie is
+  // still valid (an auto-redirecting app could otherwise call
+  // signInWithRedirect in that window and silently re-auth as this user)
   debug?.("Performing local sign-out before Hosted UI logout redirect");
-  await signOut(props).signedOut;
+  await signOut({ ...props, revokeTokensBeforeLocalRemoval: true }).signedOut;
 
   const qs = new URLSearchParams({
     client_id: cfg.clientId,

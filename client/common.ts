@@ -374,6 +374,17 @@ export const signOut = (props?: {
   tokensRemovedLocallyCb?: () => void;
   statusCb?: (status: BusyState | IdleState) => void;
   skipTokenRevocation?: boolean;
+  /**
+   * Revoke the refresh token BEFORE removing tokens locally (default: after).
+   * Use when sign-out is immediately followed by a navigation (e.g. the
+   * hosted UI /logout redirect): revoking first means the network call
+   * completes while the page is still alive, and the local sign-out happens
+   * right before the navigation — minimizing the window in which the app
+   * looks signed out while the Cognito hosted-UI session cookie is still
+   * valid (an auto-redirecting app could otherwise silently re-auth as the
+   * previous user).
+   */
+  revokeTokensBeforeLocalRemoval?: boolean;
 }) => {
   const { clientId, debug, storage } = configure();
   const { currentStatus, statusCb, skipTokenRevocation } = props ?? {};
@@ -454,6 +465,31 @@ export const signOut = (props?: {
           return;
         }
         const { username, refreshToken } = session;
+        const revokeRefreshTokenOnce = async () => {
+          if (
+            refreshToken &&
+            !tokenRevocationTracker.has(refreshToken) &&
+            !skipTokenRevocation
+          ) {
+            try {
+              tokenRevocationTracker.add(refreshToken);
+              await revokeToken({
+                abort: undefined,
+                refreshToken: refreshToken,
+              });
+              debug?.("Successfully revoked refresh token");
+            } catch (revokeError) {
+              debug?.(
+                "Error revoking token, but continuing sign-out process:",
+                revokeError
+              );
+            }
+          }
+        };
+
+        if (props?.revokeTokensBeforeLocalRemoval) {
+          await revokeRefreshTokenOnce();
+        }
         await Promise.all([
           storage.removeItem(`${amplifyKeyPrefix}.${username}.idToken`),
           storage.removeItem(`${amplifyKeyPrefix}.${username}.accessToken`),
@@ -479,25 +515,7 @@ export const signOut = (props?: {
         ]);
         props?.tokensRemovedLocallyCb?.();
 
-        if (
-          refreshToken &&
-          !tokenRevocationTracker.has(refreshToken) &&
-          !skipTokenRevocation
-        ) {
-          try {
-            tokenRevocationTracker.add(refreshToken);
-            await revokeToken({
-              abort: undefined,
-              refreshToken: refreshToken,
-            });
-            debug?.("Successfully revoked refresh token");
-          } catch (revokeError) {
-            debug?.(
-              "Error revoking token, but continuing sign-out process:",
-              revokeError
-            );
-          }
-        }
+        await revokeRefreshTokenOnce();
 
         statusCb?.("SIGNED_OUT");
       } catch (error) {

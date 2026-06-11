@@ -285,3 +285,93 @@ describe("SignOut with expired access token", () => {
     }
   );
 });
+
+describe("SignOut revocation ordering", () => {
+  const username = "testuser";
+  const refreshToken = "ordering-refresh-token";
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
+
+  // Returns a fetch mock that, when the RevokeToken request arrives,
+  // snapshots whether the refresh token is still in storage at that moment
+  const revokeSnapshottingFetch = (
+    snapshot: { refreshTokenInStorageAtRevoke?: string | null } = {}
+  ) => {
+    const fetchMock = jest.fn(
+      async (url: unknown, init?: { headers?: Record<string, string> }) => {
+        if (init?.headers?.["x-amz-target"]?.endsWith("RevokeToken")) {
+          const { storage } = configure();
+          snapshot.refreshTokenInStorageAtRevoke = await storage.getItem(
+            `${amplifyKeyPrefix}.${username}.refreshToken`
+          );
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    );
+    return { fetchMock, snapshot };
+  };
+
+  const seedSession = async () => {
+    const now = Date.now();
+    await storeTokens({
+      accessToken: createJWT({
+        sub: "user123",
+        username,
+        scope: "openid",
+        exp: Math.floor((now + 3600_000) / 1000),
+        iat: Math.floor(now / 1000),
+      }),
+      idToken: createJWT({
+        sub: "user123",
+        "cognito:username": username,
+        exp: Math.floor((now + 3600_000) / 1000),
+        iat: Math.floor(now / 1000),
+      }),
+      refreshToken,
+      authMethod: "SRP",
+      expireAt: new Date(now + 3600_000),
+    });
+  };
+
+  test("by default revokes AFTER removing local tokens", async () => {
+    const { fetchMock, snapshot } = revokeSnapshottingFetch();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      fetch: fetchMock,
+    });
+    await seedSession();
+
+    await signOut().signedOut;
+
+    expect(snapshot.refreshTokenInStorageAtRevoke).toBeNull();
+  });
+
+  test("revokes BEFORE removing local tokens with revokeTokensBeforeLocalRemoval", async () => {
+    // Used by the hosted-UI logout redirect: revocation completes while the
+    // page is still alive, and local removal happens right before the
+    // navigation - minimizing the signed-out-locally-but-cookie-alive window
+    const { fetchMock, snapshot } = revokeSnapshottingFetch();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      fetch: fetchMock,
+    });
+    await seedSession();
+
+    await signOut({ revokeTokensBeforeLocalRemoval: true }).signedOut;
+
+    // At revoke time the session was still in storage ...
+    expect(snapshot.refreshTokenInStorageAtRevoke).toBe(refreshToken);
+    // ... and it is fully removed afterwards, with exactly one revocation
+    const { storage } = configure();
+    expect(
+      await storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`)
+    ).toBeNull();
+    const revokeCalls = fetchMock.mock.calls.filter(([, init]) =>
+      (init as { headers?: Record<string, string> })?.headers?.[
+        "x-amz-target"
+      ]?.endsWith("RevokeToken")
+    );
+    expect(revokeCalls).toHaveLength(1);
+  });
+});
