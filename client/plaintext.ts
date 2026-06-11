@@ -20,8 +20,30 @@ import {
   isAuthenticatedResponse,
 } from "./cognito-api.js";
 import { processTokens } from "./common.js";
-import { retrieveDeviceKey } from "./storage.js";
+import {
+  retrieveDeviceKey,
+  clearRememberedDevice,
+  getRememberedDevice,
+  setRememberedDevice,
+} from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
+import { parseJwtPayload, redactTokensFromObject } from "./util.js";
+import { CognitoAccessTokenPayload } from "./jwt-model.js";
+
+/**
+ * Cognito rejects a device key it no longer knows (device forgotten
+ * server-side, user pool migrated, ...) with a ResourceNotFoundException
+ * whose message mentions the device, e.g. "Device does not exist.".
+ * Same detection as amazon-cognito-identity-js uses before it clears its
+ * cached device data and retries without the device key.
+ */
+function isDeviceNotFoundError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    err.name === "ResourceNotFoundException" &&
+    err.message.toLowerCase().includes("device")
+  );
+}
 
 export function authenticateWithPlaintextPassword({
   username,
@@ -60,43 +82,141 @@ export function authenticateWithPlaintextPassword({
     try {
       statusCb?.("SIGNING_IN_WITH_PASSWORD");
 
-      // We'll add device key later after we have username context
-      // Do initial authentication without device parameters
-      debug?.(`Invoking initiateAuth with username and password only...`);
+      // Look up a remembered device key to send along with initiateAuth, so
+      // Cognito can recognize the device and skip MFA where applicable.
+      // Only the record stored under the username AS ENTERED is safely
+      // attributable to this sign-in: records of other users (e.g. whoever
+      // signed in last on a shared browser) must never be sent with this
+      // user's credentials — Cognito would reject the key and the stale-key
+      // recovery would wipe the other user's remembered device. Confirmed
+      // records are stored under the canonical user id; after a successful
+      // alias sign-in we copy the record to the alias key (see below), so
+      // subsequent alias sign-ins find it here too. Only a COMPLETE record
+      // (with a device password) is usable: placeholder records created by
+      // storeDeviceKey would make Cognito issue a DEVICE_SRP_AUTH challenge
+      // this client cannot answer.
+      let actualDeviceKey = deviceKey;
+      // The storage key the device key was found under (so we can clear that
+      // exact record if Cognito rejects the key as stale)
+      let deviceKeyUsername: string | undefined;
+      if (!actualDeviceKey) {
+        const record = await getRememberedDevice(username);
+        if (record?.deviceKey && record.password) {
+          actualDeviceKey = record.deviceKey;
+          deviceKeyUsername = username;
+        }
+      } else {
+        // An explicitly passed device key may also live in the entered
+        // user's stored record; remember where it lives, so a stale
+        // rejection clears that record too (not just the in-memory value)
+        const record = await getRememberedDevice(username);
+        if (record?.deviceKey === actualDeviceKey) {
+          deviceKeyUsername = username;
+        }
+      }
 
-      const authParameters: Record<string, string> = {
-        USERNAME: username,
-        PASSWORD: password,
+      const attemptSignIn = async (
+        deviceKeyToUse?: string,
+        rejectedDeviceKey?: string
+      ) => {
+        debug?.(`Invoking initiateAuth with username and password ...`);
+
+        const authResponse = await initiateAuth({
+          authflow: "USER_PASSWORD_AUTH",
+          // initiateAuth adds DEVICE_KEY into the authParameters object it is
+          // given, so build a fresh object per attempt
+          authParameters: {
+            USERNAME: username,
+            PASSWORD: password,
+          },
+          deviceKey: deviceKeyToUse,
+          clientMetadata,
+          abort: abort.signal,
+        });
+        debug?.(
+          `Response from initiateAuth:`,
+          redactTokensFromObject(authResponse)
+        );
+
+        // Resolve the canonical user id, so device records are keyed
+        // consistently with the SRP flow (the username as entered may be an
+        // alias, e.g. e-mail or phone number)
+        let canonicalUserId: string | undefined;
+        if (isAuthenticatedResponse(authResponse)) {
+          try {
+            canonicalUserId = parseJwtPayload<CognitoAccessTokenPayload>(
+              authResponse.AuthenticationResult.AccessToken
+            ).username;
+          } catch (err) {
+            debug?.(`Failed to determine username from access token:`, err);
+          }
+        } else {
+          canonicalUserId = authResponse.ChallengeParameters?.USER_ID_FOR_SRP;
+        }
+
+        // Pre-create a device SRP handler so we can answer DEVICE_SRP_AUTH /
+        // DEVICE_PASSWORD_VERIFIER challenges. The device record may be
+        // stored under the canonical user id or the username as entered
+        // (legacy behavior), so try both — plus the storage key the device
+        // key sent with initiateAuth was found under (if any)
+        const usernamesToTry = new Set([
+          deviceKeyUsername,
+          canonicalUserId,
+          username,
+        ]);
+        let deviceHandler:
+          | Awaited<ReturnType<typeof createDeviceSrpAuthHandler>>
+          | undefined;
+        for (const usernameToTry of usernamesToTry) {
+          if (!usernameToTry) continue;
+          const handlerDeviceKey =
+            deviceKeyToUse ?? (await retrieveDeviceKey(usernameToTry));
+          // Never rebuild a handler around a key Cognito just rejected as
+          // stale (a record under another storage key may still hold it)
+          if (!handlerDeviceKey || handlerDeviceKey === rejectedDeviceKey)
+            continue;
+          deviceHandler = await createDeviceSrpAuthHandler(
+            usernameToTry,
+            handlerDeviceKey
+          );
+          if (deviceHandler) break;
+        }
+
+        const tokens = await handleAuthResponse({
+          authResponse,
+          username: canonicalUserId ?? username,
+          smsMfaCode,
+          otpMfaCode,
+          newPassword,
+          deviceHandler,
+          clientMetadata,
+          abort: abort.signal,
+        });
+
+        return { authResponse, tokens };
       };
 
-      const authResponse = await initiateAuth({
-        authflow: "USER_PASSWORD_AUTH",
-        authParameters,
-        clientMetadata,
-        abort: abort.signal,
-      });
-      debug?.(`Response from initiateAuth:`, authResponse);
-
-      // Now that we have initiated authentication, we can look up device key
-      // using the confirmed username for this session
-      const actualDeviceKey =
-        deviceKey ?? (username ? await retrieveDeviceKey(username) : undefined);
-
-      // Pre-create device SRP handler if we have a device key
-      const deviceHandler = actualDeviceKey
-        ? await createDeviceSrpAuthHandler(username, actualDeviceKey)
-        : undefined;
-
-      const tokens = await handleAuthResponse({
-        authResponse,
-        username,
-        smsMfaCode,
-        otpMfaCode,
-        newPassword,
-        deviceHandler,
-        clientMetadata,
-        abort: abort.signal,
-      });
+      let attemptResult: Awaited<ReturnType<typeof attemptSignIn>>;
+      let rejectedDeviceKey: string | undefined;
+      try {
+        attemptResult = await attemptSignIn(actualDeviceKey);
+      } catch (err) {
+        if (!actualDeviceKey || !isDeviceNotFoundError(err)) {
+          throw err;
+        }
+        // The device key we sent is stale: Cognito no longer knows the
+        // device. Clear the local record it came from and retry ONCE without
+        // a device key, so the user can still sign in (with MFA)
+        debug?.(
+          `Cognito rejected the device key (${err.message}), clearing the stale device record and retrying sign-in without it`
+        );
+        rejectedDeviceKey = actualDeviceKey;
+        if (deviceKeyUsername) {
+          await clearRememberedDevice(deviceKeyUsername);
+        }
+        attemptResult = await attemptSignIn(undefined, rejectedDeviceKey);
+      }
+      const { authResponse, tokens } = attemptResult;
 
       // Check for new device metadata in the response
       if (
@@ -116,6 +236,38 @@ export function authenticateWithPlaintextPassword({
         },
         abort.signal
       )) as TokensFromSignIn;
+
+      const canonicalUsername = processedTokens.username;
+
+      // If a stale device key was rejected during this sign-in, clear any
+      // canonical-keyed record still holding it — otherwise the alias-copy
+      // below would resurrect the stale key on every subsequent sign-in
+      if (rejectedDeviceKey && canonicalUsername) {
+        const canonicalRecord = await getRememberedDevice(canonicalUsername);
+        if (canonicalRecord?.deviceKey === rejectedDeviceKey) {
+          debug?.(
+            "Clearing canonical device record that still holds the rejected stale device key"
+          );
+          await clearRememberedDevice(canonicalUsername);
+        }
+      }
+
+      // If the user signed in with an alias (e-mail, phone number), copy the
+      // canonical-keyed device record to the alias key — attribution is now
+      // verified by the successful sign-in — so the next alias sign-in finds
+      // the device key in the pre-auth lookup above
+      if (canonicalUsername && canonicalUsername !== username) {
+        const [aliasRecord, canonicalRecord] = await Promise.all([
+          getRememberedDevice(username),
+          getRememberedDevice(canonicalUsername),
+        ]);
+        if (canonicalRecord?.password && !aliasRecord?.password) {
+          debug?.(
+            `Copying remembered device record from canonical user id to alias ${username}`
+          );
+          await setRememberedDevice(username, canonicalRecord);
+        }
+      }
 
       // Then call the custom tokensCb if provided (for application-specific needs only)
       if (tokensCb) {

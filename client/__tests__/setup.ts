@@ -16,6 +16,23 @@
 // Mock localStorage for jsdom
 import "jest-localstorage-mock";
 
+// jsdom doesn't provide TextEncoder/TextDecoder, polyfill from Node
+import {
+  TextEncoder as NodeTextEncoder,
+  TextDecoder as NodeTextDecoder,
+} from "util";
+
+if (typeof globalThis.TextEncoder === "undefined") {
+  (
+    globalThis as unknown as { TextEncoder: typeof NodeTextEncoder }
+  ).TextEncoder = NodeTextEncoder;
+}
+if (typeof globalThis.TextDecoder === "undefined") {
+  (
+    globalThis as unknown as { TextDecoder: typeof NodeTextDecoder }
+  ).TextDecoder = NodeTextDecoder;
+}
+
 // Mock setTimeoutWallClock from util.js
 jest.mock("../util.js", () => {
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment

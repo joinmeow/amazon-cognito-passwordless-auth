@@ -26,6 +26,7 @@ import {
   throwIfNot2xx,
   bufferFromBase64Url,
   bufferToBase64Url,
+  redactTokensFromObject,
 } from "./util.js";
 import { configure } from "./config.js";
 import { retrieveTokens, retrieveDeviceKey } from "./storage.js";
@@ -36,7 +37,9 @@ import {
   Fido2ConfigError,
   Fido2ValidationError,
   Fido2AuthError,
+  Fido2AbortError,
   fromDOMException,
+  isFido2AbortError,
 } from "./errors.js";
 
 // Enhanced type definitions for mediation support
@@ -141,9 +144,11 @@ export async function getClientCapabilities(): Promise<WebAuthnClientCapabilitie
  * } else if (capabilities.immediate) {
  *   // Use immediate mediation for smart sign-in button
  *   try {
- *     await authenticateWithFido2({ mediation: 'immediate' });
+ *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
  *   } catch (error) {
- *     if (error.name === 'NotAllowedError') {
+ *     // Library errors wrap the DOMException (error.name is never
+ *     // 'NotAllowedError'); use the helper to detect this case
+ *     if (isFido2NotAllowedError(error)) {
  *       showPasswordForm();
  *     }
  *   }
@@ -206,10 +211,28 @@ export interface ParsedFido2Assertion {
 
 export interface PreparedFido2SignIn {
   username: string;
+  /**
+   * Cognito session for the CUSTOM_AUTH challenge. Note: Cognito invalidates
+   * this session after `AuthSessionValidity` minutes (3 by default), so pass
+   * the prepared bundle to authenticateWithFido2() promptly after it resolves.
+   */
   session: string;
   credential: ParsedFido2Assertion;
   existingDeviceKey?: string;
 }
+
+/**
+ * How long to let a conditional-mediation (autofill) credential request stay
+ * pending on a single Cognito CUSTOM_AUTH session before renewing the session.
+ *
+ * Cognito invalidates a challenge session after `AuthSessionValidity` minutes
+ * (3 by default, configurable 3-15), whereas a conditional
+ * navigator.credentials.get() may stay pending indefinitely, until the user
+ * picks an autofill suggestion. Renewing slightly below the minimum session
+ * validity ensures the assertion is always signed over a challenge whose
+ * Cognito session is still valid.
+ */
+export const COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS = 150_000; // 2.5 minutes
 
 type AuthenticatorAttestationResponseWithOptionalMembers =
   AuthenticatorAttestationResponse & {
@@ -255,6 +278,27 @@ function isAuthenticatorAssertionResponseLike(
   );
 }
 
+/**
+ * Encode the server-provided user handle (user.id) as UTF-8 bytes.
+ *
+ * Sign-in decodes the userHandle returned by the authenticator with
+ * TextDecoder (UTF-8), so registration must use the symmetric encoding —
+ * otherwise non-ASCII usernames are corrupted at registration and
+ * usernameless sign-in permanently fails for that credential.
+ */
+function encodeUserHandle(id: string) {
+  const userHandle = new TextEncoder().encode(id);
+  // WebAuthn caps user handles at 64 bytes — fail loudly instead of
+  // letting the authenticator truncate or reject opaquely
+  if (userHandle.byteLength > 64) {
+    throw new Fido2ValidationError(
+      `User handle must not exceed 64 bytes (got ${userHandle.byteLength} bytes)`,
+      id
+    );
+  }
+  return userHandle;
+}
+
 export async function fido2CreateCredential({
   friendlyName,
 }: {
@@ -276,7 +320,7 @@ export async function fido2CreateCredential({
     challenge: bufferFromBase64Url(publicKeyOptions.challenge),
     user: {
       ...publicKeyOptions.user,
-      id: Uint8Array.from(publicKeyOptions.user.id, (c) => c.charCodeAt(0)),
+      id: encodeUserHandle(publicKeyOptions.user.id),
     },
     excludeCredentials: publicKeyOptions.excludeCredentials.map(
       (credential) => ({
@@ -568,9 +612,13 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
   }
 
   // Required: challenge
-  if (!("challenge" in o) || typeof o.challenge !== "string") {
+  if (
+    !("challenge" in o) ||
+    typeof o.challenge !== "string" ||
+    !o.challenge.length
+  ) {
     throw new Fido2ValidationError(
-      "Fido2 options must have a challenge string",
+      "Fido2 options must have a non-empty challenge string",
       o
     );
   }
@@ -603,9 +651,9 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
 
       const cred = credential as Record<string, unknown>;
 
-      if (!("id" in cred) || typeof cred.id !== "string") {
+      if (!("id" in cred) || typeof cred.id !== "string" || !cred.id.length) {
         throw new Fido2ValidationError(
-          "Each credential must have an id string",
+          "Each credential must have a non-empty id string",
           o
         );
       }
@@ -629,6 +677,63 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
       }
     }
   }
+}
+
+/**
+ * Tracks the currently pending conditional (autofill) credentials.get() request.
+ *
+ * Per the Credential Management API, only one credentials.get() request may be
+ * pending at a time. Without coordination, a deliberate modal request (e.g. the
+ * user clicking "sign in with passkey" while the conditional autofill request
+ * started at page load is still pending) is rejected by the browser (Chrome:
+ * "A request is already pending") while the invisible conditional request keeps
+ * pending. The standard pattern is to abort the pending conditional request via
+ * AbortController before starting a new request.
+ */
+let pendingConditionalGet:
+  | {
+      controller: AbortController;
+      settled: Promise<void>;
+      /**
+       * Set when a newer credential request aborts this conditional request
+       * to take over, so the resulting abort can be told apart from a
+       * cancellation by the caller's own abort signal.
+       */
+      superseded: boolean;
+    }
+  | undefined = undefined;
+
+/**
+ * Serializes the issuance of navigator.credentials.get() requests.
+ *
+ * Concurrent fido2getCredential calls must not issue overlapping
+ * credentials.get() requests: the browser rejects all but the first.
+ * Modal (and immediate/default mediation) requests hold the lock until their
+ * request settles. Conditional (autofill) requests are long-lived, so they
+ * release the lock as soon as their request is issued: a later request takes
+ * the lock and aborts them via pendingConditionalGet instead of queueing
+ * behind them.
+ */
+let credentialsGetLock: Promise<void> = Promise.resolve();
+
+/**
+ * How long a new credential request waits for an aborted (superseded)
+ * conditional credentials.get() request to settle before proceeding anyway.
+ *
+ * Conforming browsers settle an aborted request promptly, but a
+ * non-conforming browser or extension-wrapped navigator.credentials.get may
+ * ignore the AbortController and never settle. Since this wait happens while
+ * holding the credentials.get() lock, an unbounded wait would hang all
+ * future passkey requests.
+ */
+export const SUPERSEDED_SETTLEMENT_TIMEOUT_MS = 3000;
+
+async function acquireCredentialsGetLock(): Promise<() => void> {
+  const previous = credentialsGetLock;
+  let release!: () => void;
+  credentialsGetLock = new Promise<void>((resolve) => (release = resolve));
+  await previous;
+  return release;
 }
 
 export async function fido2getCredential({
@@ -663,18 +768,19 @@ export async function fido2getCredential({
     if (
       typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
     ) {
+      let isAvailable: boolean | undefined;
       try {
-        const isAvailable =
+        isAvailable =
           await PublicKeyCredential.isConditionalMediationAvailable();
-        if (!isAvailable) {
-          throw new Fido2ConfigError(
-            "Conditional mediation requested but not supported by this browser."
-          );
-        }
       } catch (error) {
         debug?.(
-          "⚠️ Cannot verify conditional mediation support - treating as unsupported",
+          "⚠️ Cannot verify conditional mediation support - proceeding with conditional mediation anyway",
           error
+        );
+      }
+      if (isAvailable === false) {
+        throw new Fido2ConfigError(
+          "Conditional mediation requested but not supported by this browser."
         );
       }
     } else {
@@ -701,16 +807,18 @@ export async function fido2getCredential({
   let effectiveTimeout = timeout;
 
   if (mediation === "conditional") {
-    // Conditional mediation requires "preferred" userVerification and no timeout
-    effectiveUserVerification = "preferred";
-    effectiveTimeout = undefined;
-
-    if (userVerification && userVerification !== "preferred") {
+    // Conditional mediation: default userVerification to "preferred" (per passkeys.dev
+    // UX guidance) only when nothing was requested. A requested value (e.g. "required"
+    // from the server's fido2options) is passed through unchanged, so the authenticator
+    // performs user verification when the backend will verify the UV flag.
+    if (!userVerification) {
+      effectiveUserVerification = "preferred";
       debug?.(
-        `⚠️ WebAuthn spec requires userVerification="preferred" for conditional mediation. ` +
-          `Overriding "${userVerification}" → "preferred"`
+        `userVerification not specified - defaulting to "preferred" for conditional mediation`
       );
     }
+    effectiveTimeout = undefined;
+
     if (timeout) {
       debug?.(
         `⚠️ WebAuthn spec recommends removing timeout for conditional mediation. ` +
@@ -734,38 +842,142 @@ export async function fido2getCredential({
   };
   debug?.("Assembled public key options:", publicKey);
 
-  debug?.("🚀 Calling navigator.credentials.get()", {
-    mediation,
-    hasSignal: !!signal,
-    signalAborted: signal?.aborted,
-    effectiveTimeout,
-    effectiveUserVerification,
-  });
-
+  // Only one credentials.get() request may be pending at a time. Take the
+  // lock so concurrent fido2getCredential calls cannot issue overlapping
+  // requests (a pending modal request holds the lock until it settles)
+  const releaseLock = await acquireCredentialsGetLock();
   let credential;
   try {
-    // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
-    // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
-    credential = await navigator.credentials.get({
-      publicKey,
-      signal,
-      mediation: mediation as CredentialMediationRequirement,
-    });
-    debug?.("✅ navigator.credentials.get() succeeded");
-  } catch (err) {
-    if (err instanceof DOMException) {
-      debug?.("❌ credentials.get() threw DOMException", {
-        name: err.name,
-        message: err.message,
-        wasSignalAborted: signal?.aborted,
-        mediation,
-      });
-      throw fromDOMException(err);
+    // If a conditional (autofill) request is still pending, abort it first so
+    // the browser accepts this new request instead of rejecting it
+    if (pendingConditionalGet) {
+      debug?.(
+        "⚠️ Aborting pending conditional (autofill) credentials.get() so the new credential request can proceed"
+      );
+      const aborted = pendingConditionalGet;
+      aborted.superseded = true;
+      aborted.controller.abort();
+      // Wait for the aborted request to settle before issuing the new
+      // request (the tracker is cleared upon settlement). Bound the wait:
+      // a non-conforming credentials.get may ignore the abort and never
+      // settle, and we hold the lock here - waiting forever would hang all
+      // future credential requests
+      let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        aborted.settled.then(() => false),
+        new Promise<boolean>(
+          (resolve) =>
+            (settlementTimer = setTimeout(
+              () => resolve(true),
+              SUPERSEDED_SETTLEMENT_TIMEOUT_MS
+            ))
+        ),
+      ]);
+      clearTimeout(settlementTimer);
+      if (timedOut) {
+        debug?.(
+          `⚠️ Aborted conditional credentials.get() did not settle within ${SUPERSEDED_SETTLEMENT_TIMEOUT_MS}ms - proceeding with the new request anyway`
+        );
+        // Clear the stale tracker so it cannot wedge subsequent requests.
+        // If the old request ever settles, its settlement handler only
+        // clears the tracker if it still points at itself (identity check),
+        // so it cannot corrupt the state of a newer conditional request
+        if (pendingConditionalGet === aborted) {
+          pendingConditionalGet = undefined;
+        }
+      }
     }
-    debug?.("❌ credentials.get() threw non-DOMException error", {
-      error: err,
+
+    // For conditional requests, use an internal AbortController (chained to
+    // the caller's signal, if any) so a subsequent modal request can abort us
+    let effectiveSignal = signal;
+    let conditionalAbort: AbortController | undefined = undefined;
+    if (mediation === "conditional") {
+      const controller = new AbortController();
+      if (signal?.aborted) {
+        controller.abort();
+      } else {
+        signal?.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+      conditionalAbort = controller;
+      effectiveSignal = controller.signal;
+    }
+
+    debug?.("🚀 Calling navigator.credentials.get()", {
+      mediation,
+      hasSignal: !!signal,
+      signalAborted: signal?.aborted,
+      effectiveTimeout,
+      effectiveUserVerification,
     });
-    throw err;
+
+    let conditionalTracker: typeof pendingConditionalGet = undefined;
+    try {
+      // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
+      // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
+      const getCredential = navigator.credentials.get({
+        publicKey,
+        signal: effectiveSignal,
+        mediation: mediation as CredentialMediationRequirement,
+      });
+      if (conditionalAbort) {
+        // Track this conditional request at module level, and clear the
+        // tracker once it settles (for any reason)
+        const tracker = {
+          controller: conditionalAbort,
+          settled: getCredential.then(
+            () => undefined,
+            () => undefined
+          ),
+          superseded: false,
+        };
+        conditionalTracker = tracker;
+        pendingConditionalGet = tracker;
+        void tracker.settled.then(() => {
+          if (pendingConditionalGet === tracker) {
+            pendingConditionalGet = undefined;
+          }
+        });
+        // Conditional requests are long-lived: release the lock as soon as
+        // the request is issued, so a later request can take the lock and
+        // abort us instead of queueing behind us (which would deadlock)
+        releaseLock();
+      }
+      credential = await getCredential;
+      debug?.("✅ navigator.credentials.get() succeeded");
+    } catch (err) {
+      if (err instanceof DOMException) {
+        debug?.("❌ credentials.get() threw DOMException", {
+          name: err.name,
+          message: err.message,
+          wasSignalAborted: signal?.aborted,
+          mediation,
+        });
+        if (
+          err.name === "AbortError" &&
+          conditionalTracker?.superseded &&
+          !signal?.aborted
+        ) {
+          // Aborted by a newer credential request taking over - not by the
+          // caller's own abort signal
+          throw new Fido2AbortError(
+            "WebAuthn operation was aborted: superseded by a newer credential request",
+            "Passkey verification was cancelled",
+            { superseded: true }
+          );
+        }
+        throw fromDOMException(err);
+      }
+      debug?.("❌ credentials.get() threw non-DOMException error", {
+        error: err,
+      });
+      throw err;
+    }
+  } finally {
+    // No-op if the lock was already released (a promise only resolves once)
+    releaseLock();
   }
   if (!credential) {
     throw new Fido2CredentialError("No credential returned from browser");
@@ -858,6 +1070,14 @@ async function requestUsernamelessSignInChallenge() {
  *
  * Password managers typically store usernames, so username-based flow is recommended.
  *
+ * **Session validity**: Cognito invalidates a challenge session after
+ * `AuthSessionValidity` minutes (3 by default). For the username-based flow with
+ * conditional mediation, this function transparently renews the session (and its
+ * FIDO2 challenge) while the autofill request is pending, so users can pick a
+ * passkey from autofill long after page load. Once the returned promise resolves
+ * though, the contained session is subject to expiry: pass the prepared bundle
+ * to authenticateWithFido2() promptly.
+ *
  * @example
  * ```typescript
  * // ✅ Recommended: Fast path with username
@@ -927,47 +1147,129 @@ export async function prepareFido2SignIn({
       mediation,
     });
 
+    const usernameForAuth = resolvedUsername;
     existingDeviceKey = await retrieveDeviceKey(resolvedUsername);
-    const initAuthResponse = await initiateAuth({
-      authflow: "CUSTOM_AUTH",
-      authParameters: {
-        USERNAME: resolvedUsername,
-        ...(existingDeviceKey ? { DEVICE_KEY: existingDeviceKey } : {}),
-      },
-      abort: signal,
-    });
+    const deviceKeyForAuth = existingDeviceKey;
 
-    assertIsChallengeResponse(initAuthResponse);
-    if (!initAuthResponse.ChallengeParameters.fido2options) {
-      throw new Error("Server did not send a FIDO2 challenge");
+    const initiateFido2Challenge = async () => {
+      const initAuthResponse = await initiateAuth({
+        authflow: "CUSTOM_AUTH",
+        authParameters: {
+          USERNAME: usernameForAuth,
+          ...(deviceKeyForAuth ? { DEVICE_KEY: deviceKeyForAuth } : {}),
+        },
+        abort: signal,
+      });
+
+      assertIsChallengeResponse(initAuthResponse);
+      if (!initAuthResponse.ChallengeParameters.fido2options) {
+        throw new Error("Server did not send a FIDO2 challenge");
+      }
+
+      const fido2options: unknown = JSON.parse(
+        initAuthResponse.ChallengeParameters.fido2options
+      );
+      assertIsFido2Options(fido2options);
+      debug?.("FIDO2 challenge received from Cognito");
+      return { fido2options, session: initAuthResponse.Session };
+    };
+
+    const getCredentialForChallenge = (
+      fido2options: Fido2Options,
+      credentialSignal?: AbortSignal
+    ) =>
+      credentialGetter({
+        ...fido2options,
+        relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
+        timeout: fido2.timeout ?? fido2options.timeout,
+        userVerification:
+          fido2.authenticatorSelection?.userVerification ??
+          fido2options.userVerification,
+        credentials: (fido2options.credentials ?? []).concat(
+          credentials?.filter(
+            (cred) =>
+              !fido2options.credentials?.find(
+                (optionsCred) => cred.id === optionsCred.id
+              )
+          ) ?? []
+        ),
+        mediation,
+        signal: credentialSignal,
+      });
+
+    if (mediation === "conditional") {
+      // Conditional mediation is "set and forget": the pending
+      // navigator.credentials.get() only resolves when the user eventually
+      // picks an autofill suggestion, which can easily take longer than the
+      // Cognito auth session stays valid (AuthSessionValidity, 3 minutes by
+      // default). Proactively renew the session (and the FIDO2 challenge that
+      // comes with it) before it expires, by aborting the pending conditional
+      // request and restarting it with the fresh challenge. Pending
+      // conditional requests show no UI, so renewal is invisible to the user.
+      const RENEW_SESSION = Symbol("renew-session");
+      for (;;) {
+        const challenge = await initiateFido2Challenge();
+        const renewalAbort = new AbortController();
+        const forwardAbort = () => renewalAbort.abort();
+        if (signal?.aborted) {
+          renewalAbort.abort();
+        } else {
+          signal?.addEventListener("abort", forwardAbort, { once: true });
+        }
+        let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+        const credentialPromise = getCredentialForChallenge(
+          challenge.fido2options,
+          renewalAbort.signal
+        );
+        try {
+          const raceOutcome = await Promise.race([
+            credentialPromise,
+            new Promise<typeof RENEW_SESSION>((resolve) => {
+              renewalTimer = setTimeout(
+                () => resolve(RENEW_SESSION),
+                COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+              );
+            }),
+          ]);
+          if (raceOutcome !== RENEW_SESSION) {
+            assertion = raceOutcome;
+            session = challenge.session;
+            break;
+          }
+          debug?.(
+            "🔄 Cognito auth session nearing expiry while conditional request pending - renewing challenge"
+          );
+          renewalAbort.abort();
+          try {
+            // The user may have picked a credential just as the renewal timer
+            // fired - if so, the current session is still valid, use it
+            assertion = await credentialPromise;
+            session = challenge.session;
+            break;
+          } catch (err) {
+            if (!isFido2AbortError(err) || signal?.aborted || err.superseded) {
+              // Not our renewal abort: rethrow. In particular, a superseded
+              // abort means a newer credential request (e.g. a modal passkey
+              // sign-in) took over the pending conditional request — the
+              // autofill flow must end here, not restart with a fresh
+              // challenge behind the newer request's back
+              throw err;
+            }
+            // Aborted by us for renewal - loop around for a fresh challenge
+          }
+        } finally {
+          clearTimeout(renewalTimer);
+          signal?.removeEventListener("abort", forwardAbort);
+        }
+      }
+    } else {
+      const challenge = await initiateFido2Challenge();
+      assertion = await getCredentialForChallenge(
+        challenge.fido2options,
+        signal
+      );
+      session = challenge.session;
     }
-
-    const fido2options: unknown = JSON.parse(
-      initAuthResponse.ChallengeParameters.fido2options
-    );
-    assertIsFido2Options(fido2options);
-    debug?.("FIDO2 challenge received from Cognito");
-
-    assertion = await credentialGetter({
-      ...fido2options,
-      relyingPartyId: fido2.rp?.id ?? fido2options.relyingPartyId,
-      timeout: fido2.timeout ?? fido2options.timeout,
-      userVerification:
-        fido2.authenticatorSelection?.userVerification ??
-        fido2options.userVerification,
-      credentials: (fido2options.credentials ?? []).concat(
-        credentials?.filter(
-          (cred) =>
-            !fido2options.credentials?.find(
-              (optionsCred) => cred.id === optionsCred.id
-            )
-        ) ?? []
-      ),
-      mediation,
-      signal,
-    });
-
-    session = initAuthResponse.Session;
   }
   // ⚠️ Flow 2: Usernameless - SLOWER but works when username unknown
   // Only use this when password manager doesn't have username stored
@@ -1087,7 +1389,7 @@ export function authenticateWithFido2({
    * **'conditional'** - Autofill UI (Password Manager Integration):
    * - Passkeys appear in browser autofill suggestions
    * - "Set and forget" - only resolves if user selects from autofill
-   * - userVerification automatically set to "preferred"
+   * - userVerification defaults to "preferred" when not specified
    * - timeout removed (per WebAuthn spec)
    * - Requires: HTML input with autocomplete="username webauthn"
    *
@@ -1101,6 +1403,7 @@ export function authenticateWithFido2({
    * Usage patterns:
    * ```typescript
    * import { detectMediationCapabilities, getClientCapabilities } from './fido2';
+   * import { isFido2NotAllowedError } from './errors';
    *
    * // Option 1: Simple detection helper
    * const { conditional, immediate } = await detectMediationCapabilities();
@@ -1116,9 +1419,11 @@ export function authenticateWithFido2({
    * const capabilities = await getClientCapabilities();
    * if (capabilities?.immediateGet) {
    *   try {
-   *     await authenticateWithFido2({ mediation: 'immediate' });
+   *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
    *   } catch (error) {
-   *     if (error.name === 'NotAllowedError') {
+   *     // Library errors wrap the DOMException (error.name is never
+   *     // 'NotAllowedError'); use the helper to detect this case
+   *     if (isFido2NotAllowedError(error)) {
    *       // No local credentials - show password form
    *       showPasswordForm();
    *     }
@@ -1142,6 +1447,8 @@ export function authenticateWithFido2({
    * Optional pre-fetched WebAuthn assertion bundle returned by prepareFido2SignIn().
    * When provided, authenticateWithFido2() will skip navigator.credentials.get()
    * and directly complete the Cognito challenge using this data.
+   * Note: the bundle's Cognito session expires after `AuthSessionValidity`
+   * minutes (3 by default), so use it promptly after preparation.
    */
   prepared?: PreparedFido2SignIn;
 }) {
@@ -1231,7 +1538,10 @@ export function authenticateWithFido2({
 
       let tokens;
       if (isAuthenticatedResponse(authResult)) {
-        debug?.(`Response from respondToAuthChallenge (tokens):`, authResult);
+        debug?.(
+          `Response from respondToAuthChallenge (tokens):`,
+          redactTokensFromObject(authResult)
+        );
         tokens = {
           accessToken: authResult.AuthenticationResult.AccessToken,
           idToken: authResult.AuthenticationResult.IdToken,
@@ -1292,7 +1602,31 @@ export function authenticateWithFido2({
       statusCb?.("SIGNED_IN_WITH_FIDO2");
       return processedTokens;
     } catch (err) {
-      statusCb?.("FIDO2_SIGNIN_FAILED");
+      if (
+        mediation === "conditional" &&
+        isFido2AbortError(err) &&
+        err.superseded
+      ) {
+        // The conditional (autofill) request was aborted because a newer
+        // credential request (e.g. a modal sign-in) took over. Don't change
+        // status here: that would clobber the status of the sign-in flow that
+        // took over. Caller-initiated aborts fall through to the SIGNED_OUT
+        // handling below, so the UI still transitions out of its busy state
+        debug?.(
+          "Conditional FIDO2 sign-in was superseded by a newer credential request - not reporting failure status"
+        );
+        throw err;
+      }
+      if (
+        isFido2AbortError(err) ||
+        (err instanceof Error && err.name === "AbortError")
+      ) {
+        // Deliberate cancellation (e.g. the caller invoked abort()) is not a
+        // sign-in failure: revert to the idle state the flow started from
+        statusCb?.("SIGNED_OUT");
+      } else {
+        statusCb?.("FIDO2_SIGNIN_FAILED");
+      }
       throw err;
     }
   })();

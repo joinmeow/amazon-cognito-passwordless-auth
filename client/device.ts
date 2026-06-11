@@ -14,12 +14,11 @@
  */
 import { configure } from "./config.js";
 
-import { bufferToBase64 } from "./util.js";
+import { bufferToBase64, redactSecret } from "./util.js";
 import {
   modPow,
   getConstants,
   hexToArrayBuffer,
-  arrayBufferToHex,
   arrayBufferToBigInt,
   padHex,
   generateSmallA,
@@ -76,8 +75,10 @@ async function generateDevicePassword(): Promise<string> {
 /**
  * Calculate SRP verification values for device confirmation
  * This follows the same pattern as the Python example
+ *
+ * Exported for testing purposes only.
  */
-async function calculateDeviceVerifier(
+export async function calculateDeviceVerifier(
   _username: string,
   deviceKey: string,
   deviceGroupKey: string,
@@ -91,9 +92,15 @@ async function calculateDeviceVerifier(
   // Generate salt
   const saltBuffer = new Uint8Array(16);
   crypto.getRandomValues(saltBuffer);
-  // Ensure first bit is not set (making it positive)
-  saltBuffer[0] = saltBuffer[0] & 0x7f;
-  const salt = bufferToBase64(saltBuffer);
+  // Canonicalize the salt as a big integer (like amazon-cognito-identity-js
+  // does): Cognito stores and echoes the salt back as a big integer, which
+  // strips any leading zero bytes (and padHex re-adds a "00" prefix when the
+  // top bit is set, to keep it positive). Hash x over, and upload, that same
+  // canonical encoding, so the salt hashed here is always identical to the
+  // SALT echoed back in later DEVICE_PASSWORD_VERIFIER challenges.
+  const saltHex = padHex(arrayBufferToBigInt(saltBuffer.buffer).toString(16));
+  const saltBytes = hexToArrayBuffer(saltHex);
+  const salt = bufferToBase64(saltBytes);
 
   // Create FULL_PASSWORD = SHA256_HASH(DeviceGroupKey + deviceKey + ":" + DEVICE_PASSWORD)
   const fullPasswordString = `${deviceGroupKey}${deviceKey}:${devicePassword}`;
@@ -103,9 +110,8 @@ async function calculateDeviceVerifier(
   );
 
   // Create x = SHA256_HASH(salt + FULL_PASSWORD)
-  const saltHex = arrayBufferToHex(saltBuffer);
   const saltAndPassword = await new Blob([
-    hexToArrayBuffer(padHex(saltHex)),
+    saltBytes,
     fullPasswordHash,
   ]).arrayBuffer();
 
@@ -171,6 +177,15 @@ export async function createDeviceSrpAuthHandler(
     );
     return undefined;
   }
+  if (!record.password) {
+    // Placeholder ("shadow") record created by storeDeviceKey without the
+    // device secrets — device SRP with an empty password would produce an
+    // invalid signature, so don't build a handler from it
+    debug?.(
+      `Remembered device record for user ${username} has no device password, cannot use it for device SRP`
+    );
+    return undefined;
+  }
 
   const { password: devicePassword, groupKey: deviceGroupKey } = record;
 
@@ -203,7 +218,7 @@ export async function createDeviceSrpAuthHandler(
         throw new Error("Missing salt for DEVICE_PASSWORD_VERIFIER");
       }
       debug?.(`🔑 [Device SRP] Salt: ${salt}`);
-      debug?.(`🔑 [Device SRP] Secret Block: ${secretBlock}`);
+      debug?.(`🔑 [Device SRP] Secret Block: ${redactSecret(secretBlock)}`);
       const result = await verifyDeviceSrp({
         deviceGroupKey,
         deviceKey,
@@ -250,7 +265,7 @@ export async function handleDeviceConfirmation(
   debug?.(
     "🔍 [Device Confirmation] Device metadata received:",
     JSON.stringify({
-      deviceKey,
+      deviceKey: redactSecret(deviceKey),
       deviceGroupKey,
     })
   );
@@ -259,7 +274,7 @@ export async function handleDeviceConfirmation(
   if (!deviceKey.includes("_")) {
     debug?.(
       "❌ [Device Confirmation] Invalid device key format (missing underscore): " +
-        deviceKey
+        redactSecret(deviceKey)
     );
     // Just return tokens without attempting confirmation
     tokens.deviceKey = deviceKey;
@@ -272,7 +287,7 @@ export async function handleDeviceConfirmation(
     "🔍 [Device Confirmation] Device key components: region=" +
       region +
       ", uuid=" +
-      uuid
+      redactSecret(uuid)
   );
 
   if (!region || !uuid) {
@@ -325,8 +340,8 @@ export async function handleDeviceConfirmation(
     debug?.(
       `🔍 [Device Confirmation] Access token length: ${tokens.accessToken.length}`
     );
-    debug?.(`🔍 [Device Confirmation] Request details: 
-      - deviceKey: ${deviceKey}
+    debug?.(`🔍 [Device Confirmation] Request details:
+      - deviceKey: ${redactSecret(deviceKey)}
       - deviceName: ${finalDeviceName}
       - passwordVerifier length: ${deviceVerifierConfig.passwordVerifier.length}
       - salt length: ${deviceVerifierConfig.salt.length}

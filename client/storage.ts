@@ -12,7 +12,11 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { parseJwtPayload } from "./util.js";
+import {
+  parseJwtPayload,
+  redactSecret,
+  redactTokensFromObject,
+} from "./util.js";
 import { configure } from "./config.js";
 import {
   CognitoIdTokenPayload,
@@ -58,6 +62,30 @@ export interface TokensFromStorage {
   authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
   /** Client clock drift (ms) captured at token receipt; 0 when unknown. */
   clockDriftMs?: number;
+}
+
+type TokensStoredListener = (tokens: TokensToStore) => void;
+
+// In-memory registry of same-context subscribers, notified whenever tokens
+// are persisted via storeTokens. Needed because the WHATWG "storage" event
+// only fires in *other* documents, never in the document that performed the
+// write — so without this, a background token refresh in the active tab
+// would update storage without any way for UI state (e.g. the React hook)
+// to find out.
+const tokensStoredListeners = new Set<TokensStoredListener>();
+
+/**
+ * Subscribe to token stores performed in this JavaScript context.
+ * The listener is invoked after the tokens have been persisted to storage.
+ *
+ * @param listener Called with the tokens that were just stored
+ * @returns A function that unsubscribes the listener
+ */
+export function onTokensStored(listener: TokensStoredListener): () => void {
+  tokensStoredListeners.add(listener);
+  return () => {
+    tokensStoredListeners.delete(listener);
+  };
 }
 
 /**
@@ -116,7 +144,7 @@ export async function retrieveClockDriftMs(username: string): Promise<number> {
 
 export async function storeTokens(tokens: TokensToStore) {
   const { clientId, storage, debug } = configure();
-  debug?.("[storeTokens] tokens to store:", tokens);
+  debug?.("[storeTokens] tokens to store:", redactTokensFromObject(tokens));
 
   // --------- 1. Derive username ---------
   let username = tokens.username;
@@ -254,6 +282,33 @@ export async function storeTokens(tokens: TokensToStore) {
   debug?.(
     `[storeTokens] Completed storage${tokens.refreshToken ? ", refreshToken stored under key " + amplifyKeyPrefix + "." + username + ".refreshToken" : ""}`
   );
+
+  // --------- 7. Notify same-context subscribers ---------
+  // The "storage" event never fires in the document that performed the write,
+  // so subscribers in this context (e.g. the React hook) rely on this callback
+  // to pick up tokens written by background refreshes in the same tab.
+  for (const listener of tokensStoredListeners) {
+    try {
+      listener(tokens);
+    } catch (err) {
+      debug?.("[storeTokens] onTokensStored listener threw:", err);
+    }
+  }
+}
+
+/**
+ * The username of the user that last signed in on this device (tracked under
+ * the Amplify-compatible LastAuthUser storage key). This is the CANONICAL
+ * user id (not an alias), so it can be used to locate per-user records (e.g.
+ * remembered devices) before authentication, when the user may have entered
+ * an alias (e-mail, phone number).
+ */
+export async function getLastAuthUsername(): Promise<string | undefined> {
+  const { clientId, storage } = configure();
+  const username = await storage.getItem(
+    `CognitoIdentityServiceProvider.${clientId}.LastAuthUser`
+  );
+  return username ?? undefined;
 }
 
 export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
@@ -406,7 +461,9 @@ export async function setRememberedDevice(
 ) {
   const { clientId, storage, debug } = configure();
   const key = buildDeviceStorageKey(clientId, username);
-  debug?.(`Saving remembered device for user ${username}: ${record.deviceKey}`);
+  debug?.(
+    `Saving remembered device for user ${username}: ${redactSecret(record.deviceKey)}`
+  );
   await storage.setItem(key, JSON.stringify(record));
 }
 
@@ -449,7 +506,7 @@ export async function clearRememberedDevice(username: string) {
 export async function storeDeviceKey(username: string, deviceKey: string) {
   if (!username || !deviceKey) return;
   const { debug } = configure();
-  debug?.(`Storing device key for ${username}: ${deviceKey}`);
+  debug?.(`Storing device key for ${username}: ${redactSecret(deviceKey)}`);
 
   // Check if we already have a record for this user
   const existingRecord = await getRememberedDevice(username);

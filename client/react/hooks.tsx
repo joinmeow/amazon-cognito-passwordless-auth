@@ -25,6 +25,7 @@ import {
 } from "../fido2.js";
 import type { PreparedFido2SignIn } from "../fido2.js";
 import { authenticateWithSRP } from "../srp.js";
+import { isFido2AbortError } from "../errors.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
 import {
@@ -32,6 +33,8 @@ import {
   storeDeviceKey,
   getRememberedDevice,
   setRememberedDevice,
+  clearRememberedDevice,
+  onTokensStored,
   TokensFromStorage,
 } from "../storage.js";
 import {
@@ -153,6 +156,13 @@ export const PasswordlessContextProvider = (props: {
 }) => {
   const passwordlessValue = _usePasswordless();
 
+  // The activity-tracking flag can change via configure(); the memo below
+  // must depend on it so that, on the next render after a change, consumers
+  // get a context whose closures (getTimeSinceLastActivityMs, markUserActive,
+  // the activity getters) honor the new setting instead of the old one
+  const useActivityTracking =
+    configure().tokenRefresh?.useActivityTracking ?? false;
+
   // Memoize the context value to prevent unnecessary re-renders
   const memoizedValue = useMemo(
     () => passwordlessValue,
@@ -172,11 +182,21 @@ export const PasswordlessContextProvider = (props: {
       passwordlessValue.deviceKey,
       passwordlessValue.totpMfaStatus,
       passwordlessValue.mfaStatusReady,
-      passwordlessValue.timeSinceLastActivityMs,
-      passwordlessValue.timeSinceLastActivitySeconds,
       passwordlessValue.authMethod,
-      // Functions are already memoized with useCallback, so they're stable
-      // We don't need to include them in dependencies
+      // Configuration that the activity-tracking closures capture
+      useActivityTracking,
+      // Note: the API methods in passwordlessValue are fresh closures on
+      // every render (they are NOT individually memoized with useCallback).
+      // Omitting them from the deps is only safe because every piece of
+      // state those closures read is itself listed above, so this memo is
+      // recomputed (and fresh closures are picked up) whenever any of that
+      // state changes — the closures can therefore never observe stale state.
+      // Note: timeSinceLastActivityMs / timeSinceLastActivitySeconds are
+      // deliberately NOT deps: they are live getter properties computed from
+      // a ref on each property access (so they stay fresh on any consumer
+      // re-render even though the context identity is stable); including
+      // them would churn the context value (and re-render every consumer)
+      // on each activity tick.
     ]
   );
 
@@ -260,8 +280,6 @@ interface PasswordlessState {
   };
   /** True once we have a reliable MFA status from Cognito (via getUser) */
   mfaStatusReady: boolean;
-  lastActivityAt: number;
-  nowTick: number;
 }
 
 // Define action types
@@ -288,8 +306,6 @@ type PasswordlessAction =
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
   | { type: "SET_MFA_STATUS_READY"; payload: boolean }
-  | { type: "SET_LAST_ACTIVITY"; payload: number }
-  | { type: "SET_NOW_TICK"; payload: number }
   | { type: "SIGN_OUT" };
 
 // Initial state
@@ -305,8 +321,6 @@ const initialPasswordlessState: PasswordlessState = {
     availableMfaTypes: [],
   },
   mfaStatusReady: false,
-  lastActivityAt: Date.now(),
-  nowTick: Date.now(),
 };
 
 // Reducer function
@@ -383,16 +397,15 @@ function passwordlessReducer(
     case "SET_MFA_STATUS_READY":
       return { ...state, mfaStatusReady: action.payload };
 
-    case "SET_LAST_ACTIVITY":
-      return { ...state, lastActivityAt: action.payload };
-
-    case "SET_NOW_TICK":
-      return { ...state, nowTick: action.payload };
-
     case "SIGN_OUT":
+      // Reset all per-user state (tokens, deviceKey, TOTP MFA status, etc.)
+      // so nothing leaks into the next user's session. Keep the signing
+      // status (it is driven by the sign-out flow's status callback) and
+      // device capabilities. Activity tracking lives in a ref
+      // (lastActivityAtRef) and is reset by the signOut flow itself
       return {
         ...initialPasswordlessState,
-        signingInStatus: "SIGNED_OUT",
+        signingInStatus: state.signingInStatus,
         initiallyRetrievingTokensFromStorage: false,
         userVerifyingPlatformAuthenticatorAvailable:
           state.userVerifyingPlatformAuthenticatorAvailable,
@@ -426,8 +439,6 @@ function _usePasswordless() {
     authMethod,
     totpMfaStatus,
     mfaStatusReady,
-    lastActivityAt,
-    nowTick,
   } = state;
 
   // Helper functions for common dispatch actions
@@ -492,6 +503,11 @@ function _usePasswordless() {
   const { tokenRefresh } = configure();
   const useActivityTracking = tokenRefresh?.useActivityTracking ?? false;
 
+  // Timestamp of the last user activity. Kept in a ref (not state) on purpose:
+  // activity happens very frequently (mousemove etc.) and must not trigger
+  // re-renders or invalidate the memoized context value
+  const lastActivityAtRef = useRef(Date.now());
+
   // 1️⃣  Attach lightweight listeners to detect user activity (only if activity tracking is enabled)
   useEffect(() => {
     if (
@@ -499,8 +515,9 @@ function _usePasswordless() {
       typeof globalThis.addEventListener === "undefined"
     )
       return;
-    const activityHandler = () =>
-      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
+    const activityHandler = () => {
+      lastActivityAtRef.current = Date.now();
+    };
     const events: (keyof WindowEventMap)[] = [
       "mousemove",
       "mousedown",
@@ -517,21 +534,15 @@ function _usePasswordless() {
       );
   }, [useActivityTracking]);
 
-  // 2️⃣  Keep an internal clock running so React renders every second and derived
-  //      inactivity duration stays fresh. Only run if activity tracking is enabled.
-  useEffect(() => {
-    if (!useActivityTracking) return;
-    const id = setInterval(
-      () => dispatch({ type: "SET_NOW_TICK", payload: Date.now() }),
-      1000
-    );
-    return () => clearInterval(id);
-  }, [useActivityTracking]);
-
-  /** Helper function for consumers – milliseconds since last activity */
-  const timeSinceLastActivityMs = useActivityTracking
-    ? nowTick - lastActivityAt
-    : 0;
+  /**
+   * Stable getter for consumers – milliseconds since last activity, computed
+   * on demand from a ref so reading a fresh value never requires a re-render
+   * (and the provider no longer needs a per-second clock tick)
+   */
+  const getTimeSinceLastActivityMs = useCallback(
+    () => (useActivityTracking ? Date.now() - lastActivityAtRef.current : 0),
+    [useActivityTracking]
+  );
 
   // At component mount, check sign-in status
   useEffect(() => {
@@ -801,9 +812,22 @@ function _usePasswordless() {
       globalThis.addEventListener("storage", handleStorageChange);
     }
 
+    // The "storage" event above only fires in *other* documents, never in the
+    // document that performed the write. Background token refreshes write the
+    // refreshed tokens to storage from THIS document, so subscribe to
+    // same-context token stores too — otherwise React state would keep the
+    // stale (expiring) tokens in the active tab.
+    const unsubscribeTokensStored = onTokensStored(() => {
+      debug?.("Tokens stored in this context, reloading tokens from storage");
+      void loadTokens();
+    });
+
     // Cleanup function
     return () => {
       abortController.abort();
+      if (typeof unsubscribeTokensStored === "function") {
+        unsubscribeTokensStored();
+      }
       if (typeof globalThis !== "undefined" && globalThis.removeEventListener) {
         globalThis.removeEventListener("storage", handleStorageChange);
       }
@@ -1017,23 +1041,50 @@ function _usePasswordless() {
     // Skip if we fetched recently (within cooldown period)
     if (timeSinceLastFetch < MFA_FETCH_COOLDOWN) {
       const { debug } = configure();
+      const remainingCooldown = MFA_FETCH_COOLDOWN - timeSinceLastFetch;
       debug?.(
         `Skipping getUser call - cooldown active (${Math.round(
-          (MFA_FETCH_COOLDOWN - timeSinceLastFetch) / 1000
+          remainingCooldown / 1000
         )}s remaining)`
       );
-      return;
+      // Schedule a re-run of this effect once the cooldown elapses,
+      // otherwise mfaStatusReady could stay false forever (the access
+      // token changed, so updateTokens reset it, but no dependency of
+      // this effect would change again on its own)
+      if (mfaRetryTimeoutRef.current) {
+        clearTimeout(mfaRetryTimeoutRef.current);
+      }
+      mfaRetryTimeoutRef.current = setTimeout(() => {
+        mfaRetryTimeoutRef.current = undefined;
+        // Nudge a re-run
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+      }, remainingCooldown);
+      return () => {
+        if (mfaRetryTimeoutRef.current) {
+          clearTimeout(mfaRetryTimeoutRef.current);
+          mfaRetryTimeoutRef.current = undefined;
+        }
+      };
     }
 
     lastFetchedMfaTokenRef.current = tokens.accessToken;
     lastMfaFetchTimeRef.current = now;
 
     const abortController = new AbortController();
+    // Capture the token this fetch is for: if it is no longer the one we
+    // last fetched for by the time the response lands (sign-out cleared it,
+    // or a newer token's fetch started), the result must be discarded —
+    // the abort check alone can't cover the microtask gap between a
+    // SIGN_OUT dispatch and this effect's cleanup
+    const fetchedForToken = tokens.accessToken;
+    const isStale = () =>
+      abortController.signal.aborted ||
+      lastFetchedMfaTokenRef.current !== fetchedForToken;
 
     // Get MFA settings for the signed-in user
     getUser({ accessToken: tokens.accessToken, abort: abortController.signal })
       .then((user) => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // If we have a valid user object with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
@@ -1074,7 +1125,7 @@ function _usePasswordless() {
         }
       })
       .catch(() => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // On error we keep the previously known MFA status to avoid
         // falsely disabling security-gated UI. Log for debugging.
@@ -1222,7 +1273,7 @@ function _usePasswordless() {
         debug?.("markUserActive called but activity tracking is disabled");
         return;
       }
-      dispatch({ type: "SET_LAST_ACTIVITY", payload: Date.now() });
+      lastActivityAtRef.current = Date.now();
       // Schedule a refresh if tokens exist but only if we're not currently refreshing
       if (tokens && !isRefreshingTokens) {
         // Using void to properly handle the promise
@@ -1366,7 +1417,15 @@ function _usePasswordless() {
 
       // If forgetting the current device, clear it
       if (deviceKeyToForget === deviceKey) {
-        // Remove the device key from storage
+        // Remove the per-user remembered-device record — the one that
+        // retrieveDeviceKey() reads — so the local record can't outlive the
+        // server-side ForgetDevice (a surviving record would be sent as a
+        // stale DEVICE_KEY on the next sign-in)
+        if (tokens.username) {
+          await clearRememberedDevice(tokens.username);
+        }
+
+        // Also remove the legacy device key storage location
         const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
         const result = storage.removeItem(deviceKeyStorageKey);
         if (result instanceof Promise) {
@@ -1380,18 +1439,31 @@ function _usePasswordless() {
     /**
      * Clear the stored device key locally without removing it from the server
      */
-    clearDeviceKey: () => {
+    clearDeviceKey: async () => {
       const { storage, clientId, debug } = configure();
-      const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
 
-      const result = storage.removeItem(deviceKeyStorageKey);
-      if (result instanceof Promise) {
-        result.catch((err: Error) => {
-          debug?.("Failed to remove device key from storage:", err);
-        });
+      // Remove the per-user remembered-device record — the one that
+      // retrieveDeviceKey() reads on subsequent sign-ins. Await the removal
+      // so callers that await this method can immediately sign in again
+      // without the old record still being read from storage
+      if (tokens?.username) {
+        try {
+          await clearRememberedDevice(tokens.username);
+        } catch (err) {
+          debug?.("Failed to clear remembered device record:", err);
+        }
       }
 
-      // Clear deviceKey in state
+      // Also remove the legacy device key storage location
+      const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
+      try {
+        await storage.removeItem(deviceKeyStorageKey);
+      } catch (err) {
+        debug?.("Failed to remove device key from storage:", err);
+      }
+
+      // Clear deviceKey in state (after storage, so state and storage can't
+      // disagree for callers that await this method)
       dispatch({ type: "SET_DEVICE_KEY", payload: null });
     },
     /** Register a FIDO2 credential with the Relying Party */
@@ -1423,6 +1495,20 @@ function _usePasswordless() {
           _setTokens(undefined);
           parseAndSetTokens(undefined);
           dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+          // Reset remaining per-user state (deviceKey, TOTP MFA status,
+          // mfaStatusReady, activity timestamps) so it cannot leak into
+          // the next user's session
+          lastActivityAtRef.current = Date.now();
+          // Invalidate any in-flight getUser fetch so a response landing
+          // after sign-out cannot restore the previous user's MFA status
+          // (and a same-token re-sign-in refetches afresh)
+          lastFetchedMfaTokenRef.current = undefined;
+          // Also reset the fetch cooldown: it rate-limits fetches within a
+          // session, and sign-out is a session boundary — the next user's
+          // MFA status fetch must run immediately, not wait out a cooldown
+          // started by the previous user
+          lastMfaFetchTimeRef.current = 0;
+          dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,
         skipTokenRevocation: options?.skipTokenRevocation,
@@ -1542,6 +1628,15 @@ function _usePasswordless() {
         },
       });
       signinIn.signedIn.catch((error: Error) => {
+        if (isFido2AbortError(error) && error.superseded) {
+          // Aborted because a newer credential request took over (e.g. a
+          // modal passkey sign-in superseding the pending conditional
+          // autofill request) - not a user-facing error
+          debug?.(
+            "FIDO2 sign-in superseded by a newer credential request - not surfacing as error"
+          );
+          return;
+        }
         dispatch({ type: "SET_ERROR", payload: error });
       });
       return signinIn;
@@ -1806,14 +1901,36 @@ function _usePasswordless() {
         dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
       }
     },
-    /** Milliseconds since the last user activity (mousemove, keydown, scroll, touch) */
-    timeSinceLastActivityMs: useActivityTracking
-      ? timeSinceLastActivityMs
-      : null,
-    /** Seconds (rounded) since the last user activity */
-    timeSinceLastActivitySeconds: useActivityTracking
-      ? Math.round(timeSinceLastActivityMs / 1000)
-      : null,
+    /**
+     * Milliseconds since the last user activity (mousemove, keydown, scroll, touch).
+     * Computed on demand (getter property backed by a ref), so every read —
+     * e.g. during any consumer re-render, or after markUserActive() — returns
+     * an up-to-date value reflecting the latest activity, without the context
+     * value (and thus every usePasswordless() consumer) churning once per
+     * second. NOTE: this value advancing does not by itself trigger a
+     * re-render; poll it (or call getTimeSinceLastActivityMs()) if you need
+     * a self-updating idle timer.
+     */
+    get timeSinceLastActivityMs(): number | null {
+      return useActivityTracking
+        ? Date.now() - lastActivityAtRef.current
+        : null;
+    },
+    /**
+     * Seconds (rounded) since the last user activity.
+     * Live getter semantics — see timeSinceLastActivityMs.
+     */
+    get timeSinceLastActivitySeconds(): number | null {
+      return useActivityTracking
+        ? Math.round((Date.now() - lastActivityAtRef.current) / 1000)
+        : null;
+    },
+    /**
+     * Returns the milliseconds since the last user activity, computed on demand.
+     * Stable function identity (safe to use in effect deps); returns 0 when
+     * activity tracking is disabled.
+     */
+    getTimeSinceLastActivityMs,
     /** Sign in via Cognito Hosted UI (redirect, e.g. Google) */
     signInWithRedirect: ({
       provider = "Google",
@@ -2120,6 +2237,10 @@ export function useAwaitableState<T>(state: T) {
 
   // Cleanup on unmount
   useEffect(() => {
+    // Mark as mounted (again) — under React StrictMode the effect cleanup
+    // below runs on the simulated unmount, but refs survive the remount,
+    // so we must reset the flag or resolve/reject become permanent no-ops
+    isMounted.current = true;
     return () => {
       isMounted.current = false;
       // Clear references to prevent memory leaks
