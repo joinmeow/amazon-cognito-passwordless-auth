@@ -361,6 +361,30 @@ describe("OAuth Integration with processTokens", () => {
       expect(mockProcessTokens).not.toHaveBeenCalled();
     });
 
+    it("surfaces a state-validated query-string error in the implicit flow when the fragment has no tokens", async () => {
+      // Cognito's authorize endpoint is documented to deliver errors in the
+      // query string even for response_type=token (deviating from RFC 6749
+      // §4.2.2.1). When the fragment carries no tokens, surface that error
+      // instead of the misleading generic "Access token missing" message
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=unauthorized_client&error_description=Client+is+not+enabled+for+this+flow&state=test-state";
+      mockLocation.search =
+        "?error=unauthorized_client&error_description=Client+is+not+enabled+for+this+flow&state=test-state";
+      mockLocation.hash = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "Client is not enabled for this flow"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
     it("ignores a crafted ?error query on a legitimate implicit-flow callback", async () => {
       // Mirror of the code-flow case: per RFC 6749 §4.2.2.1 the implicit
       // flow delivers errors in the FRAGMENT only; the query string is not

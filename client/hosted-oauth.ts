@@ -258,11 +258,14 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   // State is validated, so error/error_description genuinely originate from
   // the OAuth provider's response to OUR request - safe to surface them now.
-  // Per RFC 6749 each flow has exactly ONE error channel: the query string
+  // RFC 6749 specifies one error delivery channel per flow: the query string
   // for the code flow (§4.1.2.1), the fragment for the implicit flow
-  // (§4.2.2.1). Only that channel is honored — a crafted error in the other
-  // location (e.g. a #error fragment on a code-flow callback, or a ?error
-  // query on an implicit-flow callback) must not abort a legitimate sign-in
+  // (§4.2.2.1). As a hardening policy, only that channel is honored here —
+  // a crafted error in the other location (e.g. a #error fragment on a
+  // code-flow callback) must not abort a legitimate sign-in. (Cognito is
+  // documented to deliver implicit-flow errors in the query string too; the
+  // implicit branch below falls back to a state-validated query error when
+  // the fragment carries no tokens.)
   const oauthError =
     responseType === "token"
       ? hashParams.get("error")
@@ -338,6 +341,23 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     );
 
     if (!access_token) {
+      // No tokens in the fragment. Cognito's authorize endpoint is
+      // documented to deliver errors in the query string even for
+      // response_type=token (deviating from RFC 6749 §4.2.2.1), so before
+      // giving up, surface a query-delivered error — state has already been
+      // validated above, and this fallback never runs when the fragment
+      // carries tokens, so a crafted ?error can't abort a valid sign-in
+      const queryError = url.searchParams.get("error");
+      if (queryError) {
+        const queryErrorDesc =
+          url.searchParams.get("error_description") ?? queryError;
+        debug?.(
+          `OAuth error received via query string in implicit flow: ${queryError}, description: ${queryErrorDesc}`
+        );
+        cleanupCallbackUrl();
+        await clear();
+        throw new Error(queryErrorDesc);
+      }
       debug?.("Required access token missing in implicit flow response");
       cleanupCallbackUrl();
       await clear();
