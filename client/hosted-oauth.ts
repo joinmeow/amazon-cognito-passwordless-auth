@@ -12,7 +12,12 @@
  * ANY KIND, either express or implied. See the License for the specific
  * language governing permissions and limitations under the License.
  */
-import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
+import {
+  configure,
+  getAuthorizeEndpoint,
+  getLogoutEndpoint,
+  getTokenEndpoint,
+} from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
 import {
   parseJwtPayload,
@@ -23,8 +28,8 @@ import {
 } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
-import { processTokens } from "./common.js";
-import { TokensFromSignIn } from "./model.js";
+import { processTokens, signOut } from "./common.js";
+import { BusyState, IdleState, TokensFromSignIn } from "./model.js";
 
 const STATE_KEY = "cognito_oauth_state";
 const PKCE_KEY = "cognito_oauth_pkce";
@@ -131,6 +136,77 @@ export async function signInWithRedirect({
   const oauthUrl = `${authorizeEndpoint}?${qs}`;
   debug?.(`Redirecting to: ${oauthUrl}`);
   cfg.location.href = oauthUrl;
+}
+
+/**
+ * Sign the user out locally (clear tokens from storage, revoke the refresh
+ * token) and then redirect to the Cognito Hosted UI /logout endpoint to
+ * terminate the Hosted UI (managed login) session as well. Without this
+ * redirect, the Cognito session cookie survives a local signOut and the next
+ * signInWithRedirect may silently sign in as the previous user.
+ *
+ * Requires hostedUi.redirectSignOut to be configured, and that URL must be
+ * registered as an allowed sign-out URL in the Cognito user-pool app client.
+ */
+export async function signOutWithRedirect(props?: {
+  currentStatus?: BusyState | IdleState;
+  tokensRemovedLocallyCb?: () => void;
+  statusCb?: (status: BusyState | IdleState) => void;
+  skipTokenRevocation?: boolean;
+}) {
+  const cfg = configure();
+  const { debug } = cfg;
+
+  if (!cfg.hostedUi) {
+    throw new Error("hostedUi configuration missing");
+  }
+
+  const { redirectSignOut } = cfg.hostedUi;
+  if (!redirectSignOut) {
+    throw new Error("hostedUi.redirectSignOut configuration missing");
+  }
+
+  // Construct full URL from relative URL if needed
+  let fullRedirectUrl = redirectSignOut;
+
+  // Check if the redirectSignOut is relative (doesn't start with http:// or https://)
+  if (!redirectSignOut.match(/^https?:\/\//)) {
+    debug?.(
+      `Converting relative redirectSignOut "${redirectSignOut}" to absolute URL`
+    );
+
+    // Create a URL object using the current location as base
+    const currentUrl = new URL(cfg.location.href);
+
+    // Create a new URL with the current as base and the redirect path as the path
+    const absoluteUrl = new URL(redirectSignOut, currentUrl.origin);
+    fullRedirectUrl = absoluteUrl.href;
+
+    debug?.(`Converted to absolute URL: ${fullRedirectUrl}`);
+  }
+
+  // Get the Hosted UI logout endpoint
+  const logoutEndpoint = getLogoutEndpoint();
+  debug?.(`Using Hosted UI logout endpoint: ${logoutEndpoint}`);
+
+  // Perform the local sign-out first, with the refresh token revoked BEFORE
+  // tokens are removed locally: the revocation network call then completes
+  // while the page is still alive, and the local sign-out happens right
+  // before the navigation below — minimizing the window in which the app
+  // already looks signed out while the Cognito hosted-UI session cookie is
+  // still valid (an auto-redirecting app could otherwise call
+  // signInWithRedirect in that window and silently re-auth as this user)
+  debug?.("Performing local sign-out before Hosted UI logout redirect");
+  await signOut({ ...props, revokeTokensBeforeLocalRemoval: true }).signedOut;
+
+  const qs = new URLSearchParams({
+    client_id: cfg.clientId,
+    logout_uri: fullRedirectUrl,
+  }).toString();
+
+  const logoutUrl = `${logoutEndpoint}?${qs}`;
+  debug?.(`Redirecting to: ${logoutUrl}`);
+  cfg.location.href = logoutUrl;
 }
 
 export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | null> {
