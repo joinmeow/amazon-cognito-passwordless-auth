@@ -144,9 +144,11 @@ export async function getClientCapabilities(): Promise<WebAuthnClientCapabilitie
  * } else if (capabilities.immediate) {
  *   // Use immediate mediation for smart sign-in button
  *   try {
- *     await authenticateWithFido2({ mediation: 'immediate' });
+ *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
  *   } catch (error) {
- *     if (error.name === 'NotAllowedError') {
+ *     // Library errors wrap the DOMException (error.name is never
+ *     // 'NotAllowedError'); use the helper to detect this case
+ *     if (isFido2NotAllowedError(error)) {
  *       showPasswordForm();
  *     }
  *   }
@@ -276,6 +278,27 @@ function isAuthenticatorAssertionResponseLike(
   );
 }
 
+/**
+ * Encode the server-provided user handle (user.id) as UTF-8 bytes.
+ *
+ * Sign-in decodes the userHandle returned by the authenticator with
+ * TextDecoder (UTF-8), so registration must use the symmetric encoding —
+ * otherwise non-ASCII usernames are corrupted at registration and
+ * usernameless sign-in permanently fails for that credential.
+ */
+function encodeUserHandle(id: string) {
+  const userHandle = new TextEncoder().encode(id);
+  // WebAuthn caps user handles at 64 bytes — fail loudly instead of
+  // letting the authenticator truncate or reject opaquely
+  if (userHandle.byteLength > 64) {
+    throw new Fido2ValidationError(
+      `User handle must not exceed 64 bytes (got ${userHandle.byteLength} bytes)`,
+      id
+    );
+  }
+  return userHandle;
+}
+
 export async function fido2CreateCredential({
   friendlyName,
 }: {
@@ -297,7 +320,7 @@ export async function fido2CreateCredential({
     challenge: bufferFromBase64Url(publicKeyOptions.challenge),
     user: {
       ...publicKeyOptions.user,
-      id: Uint8Array.from(publicKeyOptions.user.id, (c) => c.charCodeAt(0)),
+      id: encodeUserHandle(publicKeyOptions.user.id),
     },
     excludeCredentials: publicKeyOptions.excludeCredentials.map(
       (credential) => ({
@@ -745,18 +768,19 @@ export async function fido2getCredential({
     if (
       typeof PublicKeyCredential.isConditionalMediationAvailable === "function"
     ) {
+      let isAvailable: boolean | undefined;
       try {
-        const isAvailable =
+        isAvailable =
           await PublicKeyCredential.isConditionalMediationAvailable();
-        if (!isAvailable) {
-          throw new Fido2ConfigError(
-            "Conditional mediation requested but not supported by this browser."
-          );
-        }
       } catch (error) {
         debug?.(
-          "⚠️ Cannot verify conditional mediation support - treating as unsupported",
+          "⚠️ Cannot verify conditional mediation support - proceeding with conditional mediation anyway",
           error
+        );
+      }
+      if (isAvailable === false) {
+        throw new Fido2ConfigError(
+          "Conditional mediation requested but not supported by this browser."
         );
       }
     } else {
@@ -783,16 +807,18 @@ export async function fido2getCredential({
   let effectiveTimeout = timeout;
 
   if (mediation === "conditional") {
-    // Conditional mediation requires "preferred" userVerification and no timeout
-    effectiveUserVerification = "preferred";
-    effectiveTimeout = undefined;
-
-    if (userVerification && userVerification !== "preferred") {
+    // Conditional mediation: default userVerification to "preferred" (per passkeys.dev
+    // UX guidance) only when nothing was requested. A requested value (e.g. "required"
+    // from the server's fido2options) is passed through unchanged, so the authenticator
+    // performs user verification when the backend will verify the UV flag.
+    if (!userVerification) {
+      effectiveUserVerification = "preferred";
       debug?.(
-        `⚠️ WebAuthn spec requires userVerification="preferred" for conditional mediation. ` +
-          `Overriding "${userVerification}" → "preferred"`
+        `userVerification not specified - defaulting to "preferred" for conditional mediation`
       );
     }
+    effectiveTimeout = undefined;
+
     if (timeout) {
       debug?.(
         `⚠️ WebAuthn spec recommends removing timeout for conditional mediation. ` +
@@ -1363,7 +1389,7 @@ export function authenticateWithFido2({
    * **'conditional'** - Autofill UI (Password Manager Integration):
    * - Passkeys appear in browser autofill suggestions
    * - "Set and forget" - only resolves if user selects from autofill
-   * - userVerification automatically set to "preferred"
+   * - userVerification defaults to "preferred" when not specified
    * - timeout removed (per WebAuthn spec)
    * - Requires: HTML input with autocomplete="username webauthn"
    *
@@ -1377,6 +1403,7 @@ export function authenticateWithFido2({
    * Usage patterns:
    * ```typescript
    * import { detectMediationCapabilities, getClientCapabilities } from './fido2';
+   * import { isFido2NotAllowedError } from './errors';
    *
    * // Option 1: Simple detection helper
    * const { conditional, immediate } = await detectMediationCapabilities();
@@ -1392,9 +1419,11 @@ export function authenticateWithFido2({
    * const capabilities = await getClientCapabilities();
    * if (capabilities?.immediateGet) {
    *   try {
-   *     await authenticateWithFido2({ mediation: 'immediate' });
+   *     await authenticateWithFido2({ mediation: 'immediate' }).signedIn;
    *   } catch (error) {
-   *     if (error.name === 'NotAllowedError') {
+   *     // Library errors wrap the DOMException (error.name is never
+   *     // 'NotAllowedError'); use the helper to detect this case
+   *     if (isFido2NotAllowedError(error)) {
    *       // No local credentials - show password form
    *       showPasswordForm();
    *     }

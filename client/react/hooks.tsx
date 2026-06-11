@@ -1034,12 +1034,30 @@ function _usePasswordless() {
     // Skip if we fetched recently (within cooldown period)
     if (timeSinceLastFetch < MFA_FETCH_COOLDOWN) {
       const { debug } = configure();
+      const remainingCooldown = MFA_FETCH_COOLDOWN - timeSinceLastFetch;
       debug?.(
         `Skipping getUser call - cooldown active (${Math.round(
-          (MFA_FETCH_COOLDOWN - timeSinceLastFetch) / 1000
+          remainingCooldown / 1000
         )}s remaining)`
       );
-      return;
+      // Schedule a re-run of this effect once the cooldown elapses,
+      // otherwise mfaStatusReady could stay false forever (the access
+      // token changed, so updateTokens reset it, but no dependency of
+      // this effect would change again on its own)
+      if (mfaRetryTimeoutRef.current) {
+        clearTimeout(mfaRetryTimeoutRef.current);
+      }
+      mfaRetryTimeoutRef.current = setTimeout(() => {
+        mfaRetryTimeoutRef.current = undefined;
+        // Nudge a re-run
+        dispatch({ type: "INCREMENT_RECHECK_STATUS" });
+      }, remainingCooldown);
+      return () => {
+        if (mfaRetryTimeoutRef.current) {
+          clearTimeout(mfaRetryTimeoutRef.current);
+          mfaRetryTimeoutRef.current = undefined;
+        }
+      };
     }
 
     lastFetchedMfaTokenRef.current = tokens.accessToken;

@@ -126,7 +126,10 @@ sequenceDiagram
 
 ```tsx
 import { useEffect } from "react";
-import { detectMediationCapabilities } from "@joinmeow/cognito-passwordless-auth";
+import {
+  detectMediationCapabilities,
+  isFido2NotAllowedError,
+} from "@joinmeow/cognito-passwordless-auth";
 import { usePasswordless } from "@joinmeow/cognito-passwordless-auth/react";
 
 function AutofillSignInButton() {
@@ -144,7 +147,9 @@ function AutofillSignInButton() {
         // User selected a passkey – finish sign-in using the prepared assertion.
         authenticateWithFido2({ prepared });
       } catch (error) {
-        if (error instanceof DOMException && error.name === "NotAllowedError") {
+        // The library wraps DOMExceptions (error.name is never
+        // "NotAllowedError"); use the helper to detect this case.
+        if (isFido2NotAllowedError(error)) {
           // User ignored the autofill UI – fall back gracefully.
           return;
         }
