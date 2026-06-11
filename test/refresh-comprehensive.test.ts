@@ -56,6 +56,10 @@ describe("Refresh System Comprehensive Tests", () => {
     configure({
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
+      hostedUi: {
+        domain: "example.auth.us-west-2.amazoncognito.com",
+        redirectSignIn: "https://app.example.com/signin-redirect",
+      },
       fetch: fetchMock,
       storage: mockStorage,
       debug: (...args: unknown[]) => {

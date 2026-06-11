@@ -14,7 +14,13 @@
  */
 import { configure, getAuthorizeEndpoint, getTokenEndpoint } from "./config.js";
 import { generateRandomString, generatePkcePair } from "./oauthUtil.js";
-import { parseJwtPayload } from "./util.js";
+import {
+  parseJwtPayload,
+  bufferFromBase64Url,
+  bufferToBase64Url,
+  redactSecret,
+  redactTokensFromObject,
+} from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 import { withStorageLock, LockTimeoutError } from "./lock.js";
 import { processTokens } from "./common.js";
@@ -66,8 +72,10 @@ export async function signInWithRedirect({
   }
 
   const stateRandom = generateRandomString(32);
+  // Encode customState as base64url of its UTF-8 bytes: btoa throws on
+  // non-Latin1 characters and emits "+", "/" and "=" which aren't URL-safe
   const state = customState
-    ? `${stateRandom}-${btoa(customState)}`
+    ? `${stateRandom}-${bufferToBase64Url(new TextEncoder().encode(customState))}`
     : stateRandom;
 
   const { verifier, challenge, method } = await generatePkcePair();
@@ -109,7 +117,15 @@ export async function signInWithRedirect({
     query.code_challenge_method = method;
   }
 
-  debug?.(`Initiating OAuth redirect with params: ${JSON.stringify(query)}`);
+  debug?.(
+    `Initiating OAuth redirect with params: ${JSON.stringify({
+      ...query,
+      state: redactSecret(state),
+      ...(query.code_challenge && {
+        code_challenge: redactSecret(query.code_challenge),
+      }),
+    })}`
+  );
   const qs = new URLSearchParams(query).toString();
 
   const oauthUrl = `${authorizeEndpoint}?${qs}`;
@@ -158,9 +174,6 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     return null; // not our redirect
   }
 
-  // Mark as processing to prevent duplicate handling in concurrent invocations
-  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "processing");
-
   const url = new URL(cfg.location.href);
   debug?.(`Current URL: ${url.toString()}`);
   debug?.(
@@ -190,9 +203,16 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   debug?.("URL matches expected redirect URL, continuing OAuth flow");
 
+  // Mark as processing to prevent duplicate handling in concurrent invocations.
+  // This must happen only AFTER the redirect-URL check above: invocations on
+  // other URLs must leave the in-progress flag untouched, so the real callback
+  // can still be processed when it arrives.
+  await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "processing");
+
   // Per RFC 6749, response parameters (state, error, error_description) are
   // delivered in the query string for the code flow (§4.1.2.1) but in the
-  // URL FRAGMENT for the implicit flow (§4.2.2.1), so check both.
+  // URL FRAGMENT for the implicit flow (§4.2.2.1). Note: errors are only
+  // surfaced AFTER state validation below (RFC 6749 §10.12).
   const hashParams = new URLSearchParams(url.hash.substring(1));
 
   // For code flow, state is in search params. For implicit flow, it's in hash
@@ -223,6 +243,10 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
       }
     });
   } catch (error) {
+    // Scrub OAuth params from the URL on every failure exit — including lock
+    // timeouts — so code/state/tokens don't linger in the address bar or
+    // session history
+    cleanupCallbackUrl();
     if (error instanceof LockTimeoutError) {
       debug?.("⏱️ [OAuth] Lock timeout during state validation");
       throw new Error("OAuth operation in progress. Please try again.");
@@ -233,16 +257,42 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
   debug?.("OAuth state validation successful");
 
   // State is validated, so error/error_description genuinely originate from
-  // the OAuth provider's response to OUR request - safe to surface them now
-  const error = url.searchParams.get("error") ?? hashParams.get("error");
-  if (error) {
+  // the OAuth provider's response to OUR request - safe to surface them now.
+  // Per RFC 6749 the code flow delivers errors in the query (§4.1.2.1) and
+  // only the implicit flow uses the fragment (§4.2.2.1), so the fragment is
+  // consulted only for responseType "token" — a crafted #error fragment must
+  // not abort a legitimate code-flow callback that carries a valid code
+  const oauthError =
+    url.searchParams.get("error") ??
+    (responseType === "token" ? hashParams.get("error") : null);
+  if (oauthError) {
     const errorDesc =
       url.searchParams.get("error_description") ??
-      hashParams.get("error_description") ??
-      error;
-    debug?.(`OAuth error received: ${error}, description: ${errorDesc}`);
+      (responseType === "token"
+        ? hashParams.get("error_description")
+        : null) ??
+      oauthError;
+    debug?.(`OAuth error received: ${oauthError}, description: ${errorDesc}`);
+    // Scrub OAuth params from the URL on this failure exit too
+    cleanupCallbackUrl();
     await clear();
     throw new Error(errorDesc);
+  }
+
+  // The state is a random hex string, optionally followed by
+  // `-<base64url(customState)>` (see signInWithRedirect). The random part is
+  // hex only, so the first "-" (if any) marks the start of the customState
+  let customState: string | undefined;
+  const customStateMatch = returnedState?.match(/^[0-9a-f]+-([A-Za-z0-9_-]+)$/);
+  if (customStateMatch) {
+    try {
+      customState = new TextDecoder().decode(
+        bufferFromBase64Url(customStateMatch[1])
+      );
+      debug?.("Recovered customState from OAuth state parameter");
+    } catch (err) {
+      debug?.("Failed to decode customState from OAuth state:", err);
+    }
   }
 
   let tokens: TokensFromSignIn;
@@ -253,18 +303,30 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
     if (!code) {
       debug?.("No authorization code in response");
+      cleanupCallbackUrl();
       await clear();
       throw new Error("Authorization code missing");
     }
 
     debug?.("Proceeding to exchange code for tokens");
-    tokens = await exchangeCodeForTokens(code);
+    try {
+      tokens = await exchangeCodeForTokens(code);
+    } catch (err) {
+      // Scrub the (possibly still valid) authorization code from the URL so
+      // it can't be replayed from the address bar or browser history
+      cleanupCallbackUrl();
+      throw err;
+    }
   } else {
     // implicit flow: tokens are in hash
     debug?.("Using implicit flow, extracting tokens from URL hash");
     const hash = url.hash.substring(1);
     const params = new URLSearchParams(hash);
-    debug?.(`Hash parameters: ${JSON.stringify(Object.fromEntries(params))}`);
+    debug?.(
+      `Hash parameters: ${JSON.stringify(
+        redactTokensFromObject(Object.fromEntries(params))
+      )}`
+    );
 
     const access_token = params.get("access_token");
     const id_token = params.get("id_token");
@@ -277,6 +339,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
     if (!access_token) {
       debug?.("Required access token missing in implicit flow response");
+      cleanupCallbackUrl();
       await clear();
       throw new Error("Access token missing in implicit flow");
     }
@@ -300,6 +363,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
       username = payload.username;
     } catch (error) {
       debug?.("Failed to extract username from access token:", error);
+      cleanupCallbackUrl();
       throw new Error("Invalid access token received from OAuth");
     }
 
@@ -319,19 +383,94 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     debug?.("Processing OAuth tokens through standard flow (implicit)");
 
     // Process tokens through the standard flow
-    tokens = (await processTokens(tokensForProcessing)) as TokensFromSignIn;
+    try {
+      tokens = (await processTokens(tokensForProcessing)) as TokensFromSignIn;
+    } catch (err) {
+      // Scrub the tokens from the URL hash so they can't be re-read from the
+      // address bar or session history
+      cleanupCallbackUrl();
+      throw err;
+    }
 
     debug?.("OAuth tokens successfully processed (implicit flow)");
   }
 
   // cleanup URL
-  debug?.(`Cleaning up URL, pushing state to: ${fullRedirectUrl}`);
-  cfg.history.pushState(null, "", fullRedirectUrl);
+  debug?.("Cleaning up URL, scrubbing OAuth parameters");
+  cleanupCallbackUrl();
 
   await clear();
   debug?.("OAuth flow completed successfully");
 
+  if (customState !== undefined) {
+    tokens = { ...tokens, customState };
+  }
+
   return tokens;
+}
+
+/**
+ * Scrub OAuth parameters (authorization code, state, tokens) from the current
+ * URL via history.replaceState, so they are not left in the address bar or
+ * browser history (where e.g. an unconsumed authorization code could be
+ * replayed). Unrelated query parameters and hash content are preserved.
+ */
+function cleanupCallbackUrl() {
+  const cfg = configure();
+  const { debug } = cfg;
+
+  try {
+    const url = new URL(cfg.location.href);
+    let modified = false;
+
+    // OAuth params delivered in the query string (code flow)
+    for (const param of ["code", "state", "error", "error_description"]) {
+      if (url.searchParams.has(param)) {
+        url.searchParams.delete(param);
+        modified = true;
+      }
+    }
+
+    // OAuth params delivered in the fragment (implicit flow)
+    if (url.hash) {
+      const hashParams = new URLSearchParams(url.hash.substring(1));
+      let hashModified = false;
+      for (const param of [
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "token_type",
+        "expires_in",
+        "state",
+        "error",
+        "error_description",
+      ]) {
+        if (hashParams.has(param)) {
+          hashParams.delete(param);
+          hashModified = true;
+        }
+      }
+      if (hashModified) {
+        const remaining = hashParams.toString();
+        url.hash = remaining ? `#${remaining}` : "";
+        modified = true;
+      }
+    }
+
+    if (!modified) return;
+
+    debug?.(`Scrubbing OAuth parameters from URL, replacing with: ${url.href}`);
+    // Use replaceState (not pushState) so the URL carrying the authorization
+    // code or tokens doesn't remain reachable one step back in session history
+    if (cfg.history.replaceState) {
+      cfg.history.replaceState(null, "", url.href);
+    } else {
+      cfg.history.pushState(null, "", url.href);
+    }
+  } catch (err) {
+    // URL cleanup is best-effort and must never mask the original error
+    debug?.("Failed to scrub OAuth parameters from URL:", err);
+  }
 }
 
 async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {

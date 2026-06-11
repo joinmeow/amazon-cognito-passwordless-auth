@@ -31,6 +31,7 @@ describe("hostedUi implicit flow deprecation warning", () => {
       clientId: "test-client-id",
       cognitoIdpEndpoint: "eu-west-1",
       hostedUi: {
+        domain: "test.auth.eu-west-1.amazoncognito.com",
         redirectSignIn: "https://app.example.com/signin-redirect",
         responseType: "code",
       },
@@ -44,6 +45,7 @@ describe("hostedUi implicit flow deprecation warning", () => {
       clientId: "test-client-id",
       cognitoIdpEndpoint: "eu-west-1",
       hostedUi: {
+        domain: "test.auth.eu-west-1.amazoncognito.com",
         redirectSignIn: "https://app.example.com/signin-redirect",
         responseType: "token",
       },
@@ -60,6 +62,7 @@ describe("hostedUi implicit flow deprecation warning", () => {
       clientId: "test-client-id",
       cognitoIdpEndpoint: "eu-west-1",
       hostedUi: {
+        domain: "test.auth.eu-west-1.amazoncognito.com",
         redirectSignIn: "https://app.example.com/signin-redirect",
         responseType: "token",
       },

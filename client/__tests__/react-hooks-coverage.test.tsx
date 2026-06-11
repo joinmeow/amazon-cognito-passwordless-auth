@@ -21,13 +21,14 @@ import {
   usePasswordless,
 } from "../react/hooks.js";
 import { configure } from "../config.js";
-import { retrieveTokens } from "../storage.js";
+import { retrieveTokens, onTokensStored } from "../storage.js";
 import { handleCognitoOAuthCallback } from "../hosted-oauth.js";
 import {
   prepareFido2SignIn as prepareFido2SignInCore,
   authenticateWithFido2 as authenticateWithFido2Core,
 } from "../fido2.js";
 import type { PreparedFido2SignIn } from "../fido2.js";
+import { Fido2AbortError } from "../errors.js";
 
 // Mocks
 jest.mock("../config");
@@ -55,6 +56,9 @@ jest.mock("../fido2", () => {
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
 const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
   typeof retrieveTokens
+>;
+const mockOnTokensStored = onTokensStored as jest.MockedFunction<
+  typeof onTokensStored
 >;
 const mockHandleOAuth = handleCognitoOAuthCallback as jest.MockedFunction<
   typeof handleCognitoOAuthCallback
@@ -94,6 +98,9 @@ describe("React hooks coverage for hooks.tsx branches", () => {
 
     // By default, no cached tokens
     mockRetrieveTokens.mockResolvedValue(undefined);
+
+    // onTokensStored returns an unsubscribe function
+    mockOnTokensStored.mockReturnValue(() => {});
   });
 
   it("synthesizes idToken for REDIRECT tokens missing idToken", async () => {
@@ -289,5 +296,55 @@ describe("React hooks coverage for hooks.tsx branches", () => {
     );
 
     await expect(response.signedIn).resolves.toEqual(resolvedTokens);
+  });
+
+  it("does not set lastError when FIDO2 sign-in fails with a superseded abort", async () => {
+    // A pending conditional (autofill) sign-in that is superseded by a newer
+    // credential request (e.g. a modal passkey sign-in taking over) rejects
+    // with a superseded Fido2AbortError. That is not a user-facing error:
+    // surfacing it would leave a stale "cancelled" error after the takeover
+    // request succeeds
+    const supersededError = new Fido2AbortError(
+      "WebAuthn operation was aborted: superseded by a newer credential request",
+      "Passkey verification was cancelled",
+      { superseded: true }
+    );
+    mockAuthenticateWithFido2.mockReturnValueOnce({
+      signedIn: Promise.reject(supersededError),
+      abort: jest.fn(),
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      result.current.authenticateWithFido2({ username: "alice" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(result.current.lastError).toBeUndefined();
+  });
+
+  it("still sets lastError when FIDO2 sign-in fails with a non-superseded abort", async () => {
+    // A genuine cancellation (the caller's own abort, user dismissing the
+    // browser UI, ...) must keep surfacing as before
+    const abortError = new Fido2AbortError(
+      "WebAuthn operation was aborted",
+      "Passkey verification was cancelled"
+    );
+    mockAuthenticateWithFido2.mockReturnValueOnce({
+      signedIn: Promise.reject(abortError),
+      abort: jest.fn(),
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      result.current.authenticateWithFido2({ username: "alice" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(result.current.lastError).toBe(abortError);
   });
 });
