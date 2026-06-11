@@ -186,14 +186,14 @@ describe("authenticateWithPlaintextPassword (USER_PASSWORD_AUTH) device key", ()
     expect(initiateAuthDeviceKey(0)).toBe("remembered-device-key");
   });
 
-  test("finds the device record of the last authenticated (canonical) user when signing in with an alias", async () => {
-    // Confirmed devices are stored under the CANONICAL user id. When the
-    // user signs in again with an alias, the alias-keyed lookup misses — but
-    // the LastAuthUser record (same browser, repeat sign-in) identifies the
-    // canonical id pre-auth
+  test("does not send another user's (LastAuthUser) device key when signing in with a different identifier", async () => {
+    // On a shared browser, LastAuthUser may belong to someone else entirely.
+    // Their device key must never be attached to this user's credentials —
+    // Cognito would reject it, and the stale-key recovery would then wipe
+    // the OTHER user's remembered device.
     memoryStorage.setItem(LAST_AUTH_USER_KEY, CANONICAL_USER_ID);
     await setRememberedDevice(CANONICAL_USER_ID, {
-      deviceKey: "canonical-device-key",
+      deviceKey: "other-users-device-key",
       groupKey: "group-key",
       password: "device-password",
       remembered: true,
@@ -207,7 +207,62 @@ describe("authenticateWithPlaintextPassword (USER_PASSWORD_AUTH) device key", ()
     await signedIn;
 
     expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
-    expect(initiateAuthDeviceKey(0)).toBe("canonical-device-key");
+    expect(initiateAuthDeviceKey(0)).toBeUndefined();
+    // The other user's record is untouched
+    expect(await getRememberedDevice(CANONICAL_USER_ID)).toMatchObject({
+      deviceKey: "other-users-device-key",
+    });
+  });
+
+  test("does not send a device key from a placeholder record without device password", async () => {
+    // storeDeviceKey creates placeholder records with an empty password.
+    // Sending such a key would make Cognito issue a DEVICE_SRP_AUTH
+    // challenge this client cannot answer — and that failure is not a
+    // ResourceNotFoundException, so the stale-key retry would not recover.
+    await storeDeviceKey("test-user", "shadow-device-key");
+
+    mockAuthenticatedResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    await signedIn;
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(initiateAuthDeviceKey(0)).toBeUndefined();
+  });
+
+  test("copies the canonical device record to the alias key after a successful alias sign-in, then sends it next time", async () => {
+    // Confirmed devices are stored under the CANONICAL user id (#71). The
+    // first alias sign-in cannot safely use it pre-auth — but once the
+    // sign-in succeeds (attribution verified), the record is copied to the
+    // alias key so subsequent alias sign-ins send the device key.
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "canonical-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
+
+    // First alias sign-in: no key sent, record copied on success
+    await authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    }).signedIn;
+    expect(initiateAuthDeviceKey(0)).toBeUndefined();
+    expect(await getRememberedDevice(ALIAS_USERNAME)).toMatchObject({
+      deviceKey: "canonical-device-key",
+    });
+
+    // Second alias sign-in: the copied record is found pre-auth
+    await authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    }).signedIn;
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(initiateAuthDeviceKey(1)).toBe("canonical-device-key");
   });
 
   test("omits DEVICE_KEY when no device key is known", async () => {
@@ -273,10 +328,19 @@ describe("stale device key fallback", () => {
     expect(await getRememberedDevice("test-user")).toBeUndefined();
   });
 
-  test("clears the canonical (LastAuthUser) record when that is where the stale key came from", async () => {
-    memoryStorage.setItem(LAST_AUTH_USER_KEY, CANONICAL_USER_ID);
-    await setRememberedDevice(CANONICAL_USER_ID, {
+  test("clears only the alias-keyed record the stale key came from, never another user's record", async () => {
+    // A previously-copied alias record goes stale: it is cleared and the
+    // sign-in retried — but the canonical record (potentially refreshed by
+    // another flow) is not touched, because we only clear the exact record
+    // the rejected key was read from
+    await setRememberedDevice(ALIAS_USERNAME, {
       deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "fresh-canonical-key",
       groupKey: "group-key",
       password: "device-password",
       remembered: true,
@@ -292,7 +356,15 @@ describe("stale device key fallback", () => {
     await signedIn;
 
     expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
-    expect(await getRememberedDevice(CANONICAL_USER_ID)).toBeUndefined();
+    expect(initiateAuthDeviceKey(0)).toBe("stale-device-key");
+    // The canonical record survives; the alias record was re-copied from it
+    // after the successful retry (fresh key for next time)
+    expect(await getRememberedDevice(CANONICAL_USER_ID)).toMatchObject({
+      deviceKey: "fresh-canonical-key",
+    });
+    expect(await getRememberedDevice(ALIAS_USERNAME)).toMatchObject({
+      deviceKey: "fresh-canonical-key",
+    });
   });
 
   test("retries without DEVICE_KEY when the device challenge path rejects the device", async () => {

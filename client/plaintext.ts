@@ -23,7 +23,8 @@ import { processTokens } from "./common.js";
 import {
   retrieveDeviceKey,
   clearRememberedDevice,
-  getLastAuthUsername,
+  getRememberedDevice,
+  setRememberedDevice,
 } from "./storage.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
 import { parseJwtPayload, redactTokensFromObject } from "./util.js";
@@ -83,26 +84,26 @@ export function authenticateWithPlaintextPassword({
 
       // Look up a remembered device key to send along with initiateAuth, so
       // Cognito can recognize the device and skip MFA where applicable.
-      // Confirmed device records are stored under the user's CANONICAL id,
-      // while the username entered here may be an alias (e-mail, phone
-      // number). The canonical id isn't known until after authentication, so
-      // for the common same-browser repeat sign-in we try the record of the
-      // user that last signed in here (LastAuthUser holds the canonical id),
-      // and fall back to the username as entered (legacy records).
+      // Only the record stored under the username AS ENTERED is safely
+      // attributable to this sign-in: records of other users (e.g. whoever
+      // signed in last on a shared browser) must never be sent with this
+      // user's credentials — Cognito would reject the key and the stale-key
+      // recovery would wipe the other user's remembered device. Confirmed
+      // records are stored under the canonical user id; after a successful
+      // alias sign-in we copy the record to the alias key (see below), so
+      // subsequent alias sign-ins find it here too. Only a COMPLETE record
+      // (with a device password) is usable: placeholder records created by
+      // storeDeviceKey would make Cognito issue a DEVICE_SRP_AUTH challenge
+      // this client cannot answer.
       let actualDeviceKey = deviceKey;
       // The storage key the device key was found under (so we can clear that
       // exact record if Cognito rejects the key as stale)
       let deviceKeyUsername: string | undefined;
       if (!actualDeviceKey) {
-        const lastAuthUsername = await getLastAuthUsername();
-        for (const candidate of new Set([lastAuthUsername, username])) {
-          if (!candidate) continue;
-          const storedDeviceKey = await retrieveDeviceKey(candidate);
-          if (storedDeviceKey) {
-            actualDeviceKey = storedDeviceKey;
-            deviceKeyUsername = candidate;
-            break;
-          }
+        const record = await getRememberedDevice(username);
+        if (record?.deviceKey && record.password) {
+          actualDeviceKey = record.deviceKey;
+          deviceKeyUsername = username;
         }
       }
 
@@ -219,6 +220,24 @@ export function authenticateWithPlaintextPassword({
         },
         abort.signal
       )) as TokensFromSignIn;
+
+      // If the user signed in with an alias (e-mail, phone number), copy the
+      // canonical-keyed device record to the alias key — attribution is now
+      // verified by the successful sign-in — so the next alias sign-in finds
+      // the device key in the pre-auth lookup above
+      const canonicalUsername = processedTokens.username;
+      if (canonicalUsername && canonicalUsername !== username) {
+        const [aliasRecord, canonicalRecord] = await Promise.all([
+          getRememberedDevice(username),
+          getRememberedDevice(canonicalUsername),
+        ]);
+        if (canonicalRecord?.password && !aliasRecord?.password) {
+          debug?.(
+            `Copying remembered device record from canonical user id to alias ${username}`
+          );
+          await setRememberedDevice(username, canonicalRecord);
+        }
+      }
 
       // Then call the custom tokensCb if provided (for application-specific needs only)
       if (tokensCb) {
