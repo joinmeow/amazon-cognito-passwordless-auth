@@ -13,83 +13,140 @@
  * language governing permissions and limitations under the License.
  */
 
+import { webcrypto } from "crypto";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
-import { processTokens } from "../common.js";
-import { retrieveDeviceKey } from "../storage.js";
+import type { MinimalCrypto } from "../config.js";
+import {
+  setRememberedDevice,
+  getRememberedDevice,
+  storeDeviceKey,
+} from "../storage.js";
 import { createDeviceSrpAuthHandler } from "../device.js";
-import type { ConfigWithDefaults } from "../config.js";
+import { initiateAuth, handleAuthResponse } from "../cognito-api.js";
+import { processTokens } from "../common.js";
 
-jest.mock("../config");
-jest.mock("../common");
-jest.mock("../storage");
-jest.mock("../device");
-jest.mock("../cognito-security", () => ({
-  CognitoSecurityProvider: {
-    getInstance: jest.fn(() => ({
-      getSecurityData: jest.fn().mockResolvedValue(undefined),
-    })),
-  },
+jest.mock("../cognito-api.js", () => {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+  const actual = jest.requireActual("../cognito-api.js");
+  return {
+    ...(actual as object),
+    initiateAuth: jest.fn(),
+    handleAuthResponse: jest.fn(),
+  };
+});
+
+jest.mock("../common.js", () => ({
+  processTokens: jest.fn(),
 }));
 
-const mockConfigure = configure as jest.MockedFunction<typeof configure>;
+const mockInitiateAuth = initiateAuth as jest.MockedFunction<
+  typeof initiateAuth
+>;
+const mockHandleAuthResponse = handleAuthResponse as jest.MockedFunction<
+  typeof handleAuthResponse
+>;
 const mockProcessTokens = processTokens as jest.MockedFunction<
   typeof processTokens
 >;
-const mockRetrieveDeviceKey = retrieveDeviceKey as jest.MockedFunction<
-  typeof retrieveDeviceKey
->;
-const mockCreateDeviceSrpAuthHandler =
-  createDeviceSrpAuthHandler as jest.MockedFunction<
-    typeof createDeviceSrpAuthHandler
-  >;
+
+const CLIENT_ID = "test-client";
+const CANONICAL_USER_ID = "canonical-user-sub";
+const ALIAS_USERNAME = "alias@example.com";
+const LAST_AUTH_USER_KEY = `CognitoIdentityServiceProvider.${CLIENT_ID}.LastAuthUser`;
+
+function createMemoryStorage() {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, value);
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+  };
+}
+
+let memoryStorage: ReturnType<typeof createMemoryStorage>;
+
+function mockChallengeResponse(
+  challengeParameters: Record<string, string> = {
+    USER_ID_FOR_SRP: CANONICAL_USER_ID,
+  }
+) {
+  mockInitiateAuth.mockResolvedValue({
+    ChallengeName: "SMS_MFA",
+    ChallengeParameters: challengeParameters,
+    Session: "test-session",
+  } as unknown as Awaited<ReturnType<typeof initiateAuth>>);
+}
+
+function buildAuthenticatedResponse() {
+  // Access token whose payload carries the canonical username claim
+  const accessToken = `${btoa(JSON.stringify({ alg: "none" }))}.${btoa(
+    JSON.stringify({
+      username: CANONICAL_USER_ID,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })
+  )}.signature`;
+  return {
+    AuthenticationResult: {
+      AccessToken: accessToken,
+      IdToken: "test-id-token",
+      RefreshToken: "test-refresh-token",
+      ExpiresIn: 3600,
+      TokenType: "Bearer",
+    },
+    ChallengeParameters: {},
+  } as unknown as Awaited<ReturnType<typeof initiateAuth>>;
+}
+
+function mockAuthenticatedResponse() {
+  mockInitiateAuth.mockResolvedValue(buildAuthenticatedResponse());
+}
+
+function deviceNotFoundError() {
+  // Shape thrown by throwIfNot2xx / assertIsNotErrorResponse for Cognito's
+  // ResourceNotFoundException when a device key is no longer known
+  const err = new Error("Device does not exist.");
+  err.name = "ResourceNotFoundException";
+  return err;
+}
+
+/** deviceKey argument of the n-th initiateAuth call */
+function initiateAuthDeviceKey(call: number) {
+  return mockInitiateAuth.mock.calls[call][0].deviceKey;
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  memoryStorage = createMemoryStorage();
+  configure({
+    clientId: CLIENT_ID,
+    userPoolId: "us-east-1_testpool",
+    storage: memoryStorage,
+    // Real WebCrypto so the device SRP handler can compute SRP_A
+    crypto: webcrypto as unknown as MinimalCrypto,
+  });
+  mockHandleAuthResponse.mockImplementation(({ username }) =>
+    Promise.resolve({
+      accessToken: "mock-access-token",
+      idToken: "mock-id-token",
+      refreshToken: "mock-refresh-token",
+      expireAt: new Date(Date.now() + 3600 * 1000),
+      username,
+      deviceKey: undefined,
+      newDeviceMetadata: undefined,
+    })
+  );
+  mockProcessTokens.mockImplementation((tokens) => Promise.resolve(tokens));
+});
 
 describe("authenticateWithPlaintextPassword (USER_PASSWORD_AUTH) device key", () => {
-  let mockFetch: jest.Mock;
+  test("includes DEVICE_KEY in initiateAuth when a device key is provided", async () => {
+    mockAuthenticatedResponse();
 
-  const getRequestBody = (call = 0) =>
-    JSON.parse(
-      (mockFetch.mock.calls[call] as [string, { body: string }])[1].body
-    ) as {
-      AuthFlow: string;
-      AuthParameters: Record<string, string>;
-    };
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-
-    mockFetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          AuthenticationResult: {
-            AccessToken: "mock-access-token",
-            IdToken: "mock-id-token",
-            RefreshToken: "mock-refresh-token",
-            ExpiresIn: 3600,
-            TokenType: "Bearer",
-          },
-        }),
-    });
-
-    mockConfigure.mockReturnValue({
-      userPoolId: "eu-west-1_test",
-      clientId: "test-client-id",
-      cognitoIdpEndpoint: "eu-west-1",
-      fetch: mockFetch,
-      debug: undefined,
-    } as unknown as ConfigWithDefaults);
-
-    mockProcessTokens.mockImplementation((tokens) => Promise.resolve(tokens));
-    mockRetrieveDeviceKey.mockResolvedValue(undefined);
-    mockCreateDeviceSrpAuthHandler.mockResolvedValue({
-      deviceKey: "unused",
-      generateStep1: jest.fn(),
-      generateStep2: jest.fn(),
-    } as unknown as Awaited<ReturnType<typeof createDeviceSrpAuthHandler>>);
-  });
-
-  test("includes DEVICE_KEY in InitiateAuth AuthParameters when a device key is provided", async () => {
     const { signedIn } = authenticateWithPlaintextPassword({
       username: "test-user",
       password: "test-password",
@@ -97,18 +154,27 @@ describe("authenticateWithPlaintextPassword (USER_PASSWORD_AUTH) device key", ()
     });
     await signedIn;
 
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const body = getRequestBody();
-    expect(body.AuthFlow).toBe("USER_PASSWORD_AUTH");
-    expect(body.AuthParameters).toMatchObject({
-      USERNAME: "test-user",
-      PASSWORD: "test-password",
-      DEVICE_KEY: "explicit-device-key",
-    });
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(mockInitiateAuth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authflow: "USER_PASSWORD_AUTH",
+        authParameters: expect.objectContaining({
+          USERNAME: "test-user",
+          PASSWORD: "test-password",
+        }) as unknown,
+        deviceKey: "explicit-device-key",
+      })
+    );
   });
 
   test("includes remembered DEVICE_KEY from storage when none is provided", async () => {
-    mockRetrieveDeviceKey.mockResolvedValue("remembered-device-key");
+    await setRememberedDevice("test-user", {
+      deviceKey: "remembered-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
 
     const { signedIn } = authenticateWithPlaintextPassword({
       username: "test-user",
@@ -116,19 +182,306 @@ describe("authenticateWithPlaintextPassword (USER_PASSWORD_AUTH) device key", ()
     });
     await signedIn;
 
-    expect(mockRetrieveDeviceKey).toHaveBeenCalledWith("test-user");
-    const body = getRequestBody();
-    expect(body.AuthParameters.DEVICE_KEY).toBe("remembered-device-key");
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(initiateAuthDeviceKey(0)).toBe("remembered-device-key");
+  });
+
+  test("finds the device record of the last authenticated (canonical) user when signing in with an alias", async () => {
+    // Confirmed devices are stored under the CANONICAL user id. When the
+    // user signs in again with an alias, the alias-keyed lookup misses — but
+    // the LastAuthUser record (same browser, repeat sign-in) identifies the
+    // canonical id pre-auth
+    memoryStorage.setItem(LAST_AUTH_USER_KEY, CANONICAL_USER_ID);
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "canonical-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    });
+    await signedIn;
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(initiateAuthDeviceKey(0)).toBe("canonical-device-key");
   });
 
   test("omits DEVICE_KEY when no device key is known", async () => {
+    mockAuthenticatedResponse();
+
     const { signedIn } = authenticateWithPlaintextPassword({
       username: "test-user",
       password: "test-password",
     });
     await signedIn;
 
-    const body = getRequestBody();
-    expect(body.AuthParameters).not.toHaveProperty("DEVICE_KEY");
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(initiateAuthDeviceKey(0)).toBeUndefined();
+  });
+
+  test("valid device key happy path: exactly one initiateAuth call, record kept", async () => {
+    await setRememberedDevice("test-user", {
+      deviceKey: "valid-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    const tokens = await signedIn;
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    expect(tokens.accessToken).toBe("mock-access-token");
+    expect(await getRememberedDevice("test-user")).toMatchObject({
+      deviceKey: "valid-device-key",
+    });
+  });
+});
+
+describe("stale device key fallback", () => {
+  test("clears the stale record and retries once without DEVICE_KEY when Cognito rejects it", async () => {
+    await setRememberedDevice("test-user", {
+      deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockInitiateAuth
+      .mockRejectedValueOnce(deviceNotFoundError())
+      .mockResolvedValueOnce(buildAuthenticatedResponse());
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    const tokens = await signedIn;
+
+    // Sign-in succeeded where it used to hard-fail
+    expect(tokens.accessToken).toBe("mock-access-token");
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(initiateAuthDeviceKey(0)).toBe("stale-device-key");
+    expect(initiateAuthDeviceKey(1)).toBeUndefined();
+    // The stale record was cleared, so it won't be sent again
+    expect(await getRememberedDevice("test-user")).toBeUndefined();
+  });
+
+  test("clears the canonical (LastAuthUser) record when that is where the stale key came from", async () => {
+    memoryStorage.setItem(LAST_AUTH_USER_KEY, CANONICAL_USER_ID);
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockInitiateAuth
+      .mockRejectedValueOnce(deviceNotFoundError())
+      .mockResolvedValueOnce(buildAuthenticatedResponse());
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    });
+    await signedIn;
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(await getRememberedDevice(CANONICAL_USER_ID)).toBeUndefined();
+  });
+
+  test("retries without DEVICE_KEY when the device challenge path rejects the device", async () => {
+    await setRememberedDevice("test-user", {
+      deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
+    // First full attempt fails during the (device) challenge handling
+    mockHandleAuthResponse.mockRejectedValueOnce(deviceNotFoundError());
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    const tokens = await signedIn;
+
+    expect(tokens.accessToken).toBe("mock-access-token");
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(initiateAuthDeviceKey(1)).toBeUndefined();
+    expect(await getRememberedDevice("test-user")).toBeUndefined();
+  });
+
+  test("does not retry when no device key was sent", async () => {
+    mockInitiateAuth.mockRejectedValue(deviceNotFoundError());
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    await expect(signedIn).rejects.toThrow("Device does not exist.");
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not retry on non-device errors", async () => {
+    await setRememberedDevice("test-user", {
+      deviceKey: "some-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    const err = new Error("Incorrect username or password.");
+    err.name = "NotAuthorizedException";
+    mockInitiateAuth.mockRejectedValue(err);
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+    });
+    await expect(signedIn).rejects.toThrow("Incorrect username or password.");
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+    // Record untouched: the key was not the problem
+    expect(await getRememberedDevice("test-user")).toMatchObject({
+      deviceKey: "some-device-key",
+    });
+  });
+});
+
+describe("plaintext flow device record lookup", () => {
+  it("finds a device record stored under the canonical user id when signing in with an alias", async () => {
+    // Device confirmed during an SRP sign-in is stored under the canonical user id
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "us-east-1_device-1",
+      groupKey: "group-key-1",
+      password: "device-password-1",
+      remembered: true,
+    });
+    mockChallengeResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+      smsMfaCode: () => Promise.resolve("123456"),
+    });
+    await signedIn;
+
+    expect(mockHandleAuthResponse).toHaveBeenCalledTimes(1);
+    const callArgs = mockHandleAuthResponse.mock.calls[0][0];
+    expect(callArgs.username).toBe(CANONICAL_USER_ID);
+    expect(callArgs.deviceHandler?.deviceKey).toBe("us-east-1_device-1");
+  });
+
+  it("falls back to a legacy device record stored under the username as entered", async () => {
+    // Device record stored by previous versions, keyed by the alias
+    await setRememberedDevice(ALIAS_USERNAME, {
+      deviceKey: "us-east-1_device-2",
+      groupKey: "group-key-2",
+      password: "device-password-2",
+      remembered: true,
+    });
+    mockChallengeResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+      smsMfaCode: () => Promise.resolve("123456"),
+    });
+    await signedIn;
+
+    // The legacy record is also found pre-auth and sent with initiateAuth
+    expect(initiateAuthDeviceKey(0)).toBe("us-east-1_device-2");
+    expect(mockHandleAuthResponse).toHaveBeenCalledTimes(1);
+    const callArgs = mockHandleAuthResponse.mock.calls[0][0];
+    // Challenges still use the canonical user id ...
+    expect(callArgs.username).toBe(CANONICAL_USER_ID);
+    // ... while the legacy device record is found via the fallback lookup
+    expect(callArgs.deviceHandler?.deviceKey).toBe("us-east-1_device-2");
+  });
+
+  it("resolves the canonical user id from the access token for authenticated responses", async () => {
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "us-east-1_device-3",
+      groupKey: "group-key-3",
+      password: "device-password-3",
+      remembered: true,
+    });
+    mockAuthenticatedResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    });
+    await signedIn;
+
+    expect(mockHandleAuthResponse).toHaveBeenCalledTimes(1);
+    const callArgs = mockHandleAuthResponse.mock.calls[0][0];
+    expect(callArgs.username).toBe(CANONICAL_USER_ID);
+    expect(callArgs.deviceHandler?.deviceKey).toBe("us-east-1_device-3");
+  });
+
+  it("uses the username as entered when no canonical user id is available", async () => {
+    mockChallengeResponse({});
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+      smsMfaCode: () => Promise.resolve("123456"),
+    });
+    await signedIn;
+
+    expect(mockHandleAuthResponse).toHaveBeenCalledTimes(1);
+    const callArgs = mockHandleAuthResponse.mock.calls[0][0];
+    expect(callArgs.username).toBe(ALIAS_USERNAME);
+    expect(callArgs.deviceHandler).toBeUndefined();
+  });
+});
+
+describe("device SRP handler and shadow records", () => {
+  it("does not build a handler from a placeholder record without device password", async () => {
+    // storeDeviceKey creates a "shadow" record with empty password/groupKey
+    await storeDeviceKey("test-user", "shadow-device-key");
+
+    const handler = await createDeviceSrpAuthHandler(
+      "test-user",
+      "shadow-device-key"
+    );
+
+    expect(handler).toBeUndefined();
+  });
+
+  it("falls through a shadow record to a full record under another username key", async () => {
+    // Shadow record under the canonical id (e.g. created by storeDeviceKey
+    // during token refresh), full legacy record under the alias
+    memoryStorage.setItem(LAST_AUTH_USER_KEY, CANONICAL_USER_ID);
+    await storeDeviceKey(CANONICAL_USER_ID, "us-east-1_device-9");
+    await setRememberedDevice(ALIAS_USERNAME, {
+      deviceKey: "us-east-1_device-9",
+      groupKey: "group-key-9",
+      password: "device-password-9",
+      remembered: true,
+    });
+    mockChallengeResponse();
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+      smsMfaCode: () => Promise.resolve("123456"),
+    });
+    await signedIn;
+
+    const callArgs = mockHandleAuthResponse.mock.calls[0][0];
+    // The shadow record under the canonical id is skipped, the full record
+    // under the alias provides the SRP handler
+    expect(callArgs.deviceHandler?.deviceKey).toBe("us-east-1_device-9");
+    const step1 = await callArgs.deviceHandler?.generateStep1();
+    expect(step1?.srpAHex).toBeTruthy();
   });
 });

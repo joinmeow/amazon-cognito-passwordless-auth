@@ -15,11 +15,17 @@
 
 import {
   fido2getCredential,
+  fido2CreateCredential,
   prepareFido2SignIn,
   authenticateWithFido2,
+  COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS,
 } from "../fido2.js";
 import { configure } from "../config.js";
-import { Fido2CredentialError, Fido2ValidationError } from "../errors.js";
+import {
+  Fido2AbortError,
+  Fido2CredentialError,
+  Fido2ValidationError,
+} from "../errors.js";
 import {
   MOCK_ASSERTION_CREDENTIAL,
   EXPECTED_TRANSFORMED_CREDENTIAL,
@@ -33,15 +39,24 @@ import {
   createWebAuthnError,
   assertTransformedCredentialMatches,
 } from "./__utils__/webauthn-mocks.js";
-import { initiateAuth } from "../cognito-api.js";
-import { retrieveDeviceKey } from "../storage.js";
+import { initiateAuth, respondToAuthChallenge } from "../cognito-api.js";
+import { retrieveDeviceKey, retrieveTokens } from "../storage.js";
 import { bufferToBase64Url } from "../util.js";
-import { TextDecoder as NodeTextDecoder } from "util";
+import {
+  TextDecoder as NodeTextDecoder,
+  TextEncoder as NodeTextEncoder,
+} from "util";
 
 if (typeof globalThis.TextDecoder === "undefined") {
   (
     globalThis as unknown as { TextDecoder: typeof NodeTextDecoder }
   ).TextDecoder = NodeTextDecoder;
+}
+
+if (typeof globalThis.TextEncoder === "undefined") {
+  (
+    globalThis as unknown as { TextEncoder: typeof NodeTextEncoder }
+  ).TextEncoder = NodeTextEncoder;
 }
 
 // Mock dependencies
@@ -56,6 +71,11 @@ const mockInitiateAuth = initiateAuth as jest.MockedFunction<
 const mockRetrieveDeviceKey = retrieveDeviceKey as jest.MockedFunction<
   typeof retrieveDeviceKey
 >;
+const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
+  typeof retrieveTokens
+>;
+const mockRespondToAuthChallenge =
+  respondToAuthChallenge as jest.MockedFunction<typeof respondToAuthChallenge>;
 
 describe("FIDO2 Core Functionality", () => {
   let cleanup: (() => void) | null = null;
@@ -312,6 +332,89 @@ describe("FIDO2 Core Functionality", () => {
     // Note: Full integration tests for credential creation are complex
     // as they require mocking multiple API calls. These are covered by
     // the existing fido2-errors.test.ts file.
+
+    describe("user handle (user.id) encoding", () => {
+      const startCreateResponse = (userId: string) => ({
+        ok: true,
+        json: async () => ({
+          challenge: "test-challenge",
+          rp: { name: TEST_RP.name, id: TEST_RP.id },
+          user: { id: userId, name: "test", displayName: "Test User" },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          timeout: 60000,
+          excludeCredentials: [],
+          authenticatorSelection: { userVerification: "preferred" },
+        }),
+      });
+
+      const captureUserHandle = async (userId: string) => {
+        mockRetrieveTokens.mockResolvedValue({
+          username: "testuser",
+          idToken: "test-token",
+        } as Awaited<ReturnType<typeof retrieveTokens>>);
+        (baseConfig.fetch as jest.Mock).mockResolvedValue(
+          startCreateResponse(userId)
+        );
+        // Return null from create() so fido2CreateCredential throws after
+        // we have captured the assembled publicKey options
+        const mockCreate = jest.fn().mockResolvedValue(null);
+        Object.defineProperty(global.navigator, "credentials", {
+          value: { create: mockCreate },
+          configurable: true,
+        });
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow(Fido2CredentialError);
+        const { publicKey } = mockCreate.mock.calls[0][0] as {
+          publicKey: { user: { id: Uint8Array } };
+        };
+        return publicKey.user.id;
+      };
+
+      it("round-trips non-ASCII user handles through the sign-in decoder", async () => {
+        const userId = "u|Ünïcødé用户";
+        const userHandle = await captureUserHandle(userId);
+        // Sign-in decodes the userHandle with TextDecoder (UTF-8), so the
+        // registered bytes must decode back to the exact same string
+        expect(new TextDecoder().decode(userHandle)).toBe(userId);
+        // The old Latin-1 byte-stuffing encoding corrupted these bytes
+        expect(Array.from(userHandle)).not.toEqual(
+          Array.from(userId, (c) => c.charCodeAt(0))
+        );
+      });
+
+      it("encodes ASCII user handles identically to the previous encoding", async () => {
+        const userId = "u|user-123";
+        const userHandle = await captureUserHandle(userId);
+        expect(Array.from(userHandle)).toEqual(
+          Array.from(userId, (c) => c.charCodeAt(0))
+        );
+        expect(new TextDecoder().decode(userHandle)).toBe(userId);
+      });
+
+      it("throws a clear error when the user handle exceeds 64 bytes", async () => {
+        const userId = `u|${"用".repeat(22)}`; // 2 + 22 * 3 = 68 bytes UTF-8
+        mockRetrieveTokens.mockResolvedValue({
+          username: "testuser",
+          idToken: "test-token",
+        } as Awaited<ReturnType<typeof retrieveTokens>>);
+        (baseConfig.fetch as jest.Mock).mockResolvedValue(
+          startCreateResponse(userId)
+        );
+        const mockCreate = jest.fn();
+        Object.defineProperty(global.navigator, "credentials", {
+          value: { create: mockCreate },
+          configurable: true,
+        });
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow(Fido2ValidationError);
+        await expect(
+          fido2CreateCredential({ friendlyName: "Test" })
+        ).rejects.toThrow("User handle must not exceed 64 bytes");
+        expect(mockCreate).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe("Error Handling", () => {
@@ -542,6 +645,167 @@ describe("FIDO2 Core Functionality", () => {
       );
     });
 
+    describe("conditional mediation session renewal", () => {
+      const parsedAssertion = {
+        credentialIdB64: "cred-renewal",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "signature",
+        userHandleB64: null,
+      };
+
+      const challengeResponse = (n: number) =>
+        ({
+          ChallengeParameters: {
+            fido2options: JSON.stringify({
+              challenge: `server-challenge-${n}`,
+              relyingPartyId: "server-rp",
+            }),
+          },
+          Session: `session-${n}`,
+        }) as any;
+
+      // A conditional credentials.get() that stays pending until aborted,
+      // mimicking the browser's autofill behavior
+      const pendingUntilAborted = ({ signal }: { signal?: AbortSignal }) =>
+        new Promise<never>((_, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new Fido2AbortError())
+          );
+        });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it("renews the Cognito session with a fresh challenge when the conditional request outlives the renewal interval", async () => {
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1))
+          .mockResolvedValueOnce(challengeResponse(2));
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        await expect(prepared).resolves.toEqual({
+          username: "alice",
+          credential: parsedAssertion,
+          session: "session-2",
+          existingDeviceKey: undefined,
+        });
+
+        // The whole CUSTOM_AUTH flow restarted: new session, new challenge
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+        expect(credentialGetter).toHaveBeenCalledTimes(2);
+        expect(credentialGetter.mock.calls[0][0].challenge).toBe(
+          "server-challenge-1"
+        );
+        expect(credentialGetter.mock.calls[1][0].challenge).toBe(
+          "server-challenge-2"
+        );
+      });
+
+      it("renews repeatedly while the conditional request stays pending", async () => {
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1))
+          .mockResolvedValueOnce(challengeResponse(2))
+          .mockResolvedValueOnce(challengeResponse(3));
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        await expect(prepared).resolves.toEqual(
+          expect.objectContaining({ session: "session-3" })
+        );
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(3);
+        expect(credentialGetter).toHaveBeenCalledTimes(3);
+      });
+
+      it("does not renew when the credential resolves before the renewal interval", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+
+        const result = await prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+
+        expect(result.session).toBe("session-1");
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("propagates caller aborts instead of renewing", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted);
+        const abortController = new AbortController();
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+          signal: abortController.signal,
+        });
+
+        // Let the flow reach the pending credential request, then abort
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        abortController.abort();
+
+        await expect(prepared).rejects.toThrow(Fido2AbortError);
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("passes the caller signal straight through for non-conditional mediation", async () => {
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
+        const abortController = new AbortController();
+
+        await prepareFido2SignIn({
+          username: "alice",
+          mediation: "immediate",
+          credentialGetter,
+          signal: abortController.signal,
+        });
+
+        expect(credentialGetter.mock.calls[0][0].signal).toBe(
+          abortController.signal
+        );
+      });
+    });
+
     it("rejects authenticateWithFido2 when provided username mismatches prepared bundle", async () => {
       const prepared = {
         username: "bundle-user",
@@ -565,6 +829,74 @@ describe("FIDO2 Core Functionality", () => {
       await expect(result.signedIn).rejects.toThrow(
         /Prepared credentials belong to username/
       );
+    });
+  });
+
+  describe("authenticateWithFido2 status on cancellation", () => {
+    const prepared = {
+      username: "bundle-user",
+      session: "mock-session",
+      credential: {
+        credentialIdB64: "cred-id",
+        authenticatorDataB64: "auth-data",
+        clientDataJSON_B64: "client-data",
+        signatureB64: "sig",
+        userHandleB64: null,
+      },
+    };
+
+    it("does not report FIDO2_SIGNIN_FAILED when the caller aborts a pending sign-in", async () => {
+      mockRespondToAuthChallenge.mockImplementationOnce(
+        ({ abort: signal }) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () =>
+              reject(
+                new DOMException("The operation was aborted.", "AbortError")
+              )
+            );
+          })
+      );
+
+      const statusCb = jest.fn();
+      const { signedIn, abort } = authenticateWithFido2({
+        prepared,
+        statusCb,
+      });
+      // Let the flow reach respondToAuthChallenge before cancelling
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      abort();
+
+      await expect(signedIn).rejects.toThrow("aborted");
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses).not.toContain("FIDO2_SIGNIN_FAILED");
+      expect(statuses[statuses.length - 1]).toBe("SIGNED_OUT");
+    });
+
+    it("does not report FIDO2_SIGNIN_FAILED when WebAuthn is cancelled (Fido2AbortError)", async () => {
+      mockRespondToAuthChallenge.mockRejectedValueOnce(new Fido2AbortError());
+
+      const statusCb = jest.fn();
+      const { signedIn } = authenticateWithFido2({ prepared, statusCb });
+
+      await expect(signedIn).rejects.toThrow(Fido2AbortError);
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses).not.toContain("FIDO2_SIGNIN_FAILED");
+      expect(statuses[statuses.length - 1]).toBe("SIGNED_OUT");
+    });
+
+    it("still reports FIDO2_SIGNIN_FAILED for genuine failures", async () => {
+      mockRespondToAuthChallenge.mockRejectedValueOnce(
+        new Error("Incorrect username or password.")
+      );
+
+      const statusCb = jest.fn();
+      const { signedIn } = authenticateWithFido2({ prepared, statusCb });
+
+      await expect(signedIn).rejects.toThrow(
+        "Incorrect username or password."
+      );
+      const statuses = statusCb.mock.calls.map(([status]) => status);
+      expect(statuses[statuses.length - 1]).toBe("FIDO2_SIGNIN_FAILED");
     });
   });
 });

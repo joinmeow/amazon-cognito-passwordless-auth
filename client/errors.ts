@@ -62,12 +62,29 @@ export class Fido2AbortError extends Fido2Error {
  * - No credential returned from browser
  * - Invalid credential format
  * - Credential not found
+ *
+ * The `code` property discriminates the failure mode:
+ * - "CREDENTIAL_NOT_ALLOWED": user cancelled, no local credentials
+ *   (mediation: "immediate"), no user gesture, or permission denied
+ *   (DOMException NotAllowedError)
+ * - "CREDENTIAL_INVALID_STATE": authenticator in invalid state or credential
+ *   already registered (DOMException InvalidStateError)
+ * - "CREDENTIAL_REQUEST_PENDING": another WebAuthn request is already pending
+ *   (DOMException OperationError whose message indicates a pending request,
+ *   e.g. Chrome's "A request is already pending"; other OperationErrors map
+ *   to the generic fallback)
+ * - "CREDENTIAL_ERROR": other credential failures (default)
  */
 export class Fido2CredentialError extends Fido2Error {
-  constructor(message: string, cause?: unknown, userMessage?: string) {
+  constructor(
+    message: string,
+    cause?: unknown,
+    userMessage?: string,
+    code = "CREDENTIAL_ERROR"
+  ) {
     super(
       message,
-      "CREDENTIAL_ERROR",
+      code,
       userMessage ?? "Unable to complete passkey operation",
       cause
     );
@@ -176,6 +193,37 @@ export function isFido2AbortError(error: unknown): error is Fido2AbortError {
 }
 
 /**
+ * Type guard to check if error means the WebAuthn ceremony was not allowed:
+ * the user cancelled the passkey dialog, no user gesture was present,
+ * permission was denied, or (with mediation: "immediate") no local
+ * credentials were available.
+ *
+ * Note: errors thrown by this library are Fido2Error instances, so checking
+ * `error.name === "NotAllowedError"` does NOT work — the original
+ * DOMException is only preserved in `error.cause`. Use this helper instead,
+ * e.g. to fall back to a password form:
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await authenticateWithFido2({ mediation: "immediate" }).signedIn;
+ * } catch (error) {
+ *   if (isFido2NotAllowedError(error)) {
+ *     showPasswordForm();
+ *   }
+ * }
+ * ```
+ */
+export function isFido2NotAllowedError(
+  error: unknown
+): error is Fido2CredentialError {
+  return (
+    error instanceof Fido2CredentialError &&
+    error.code === "CREDENTIAL_NOT_ALLOWED"
+  );
+}
+
+/**
  * Helper to convert DOMException (from WebAuthn API) to appropriate Fido2Error
  *
  * Based on WebAuthn Level 2 specification:
@@ -194,12 +242,15 @@ export function fromDOMException(error: DOMException): Fido2Error {
       );
 
     case "NotAllowedError":
-      // User cancelled the ceremony, or no user gesture, or permission denied
+      // User cancelled the ceremony, or no user gesture, or permission denied,
+      // or no local credentials with mediation: "immediate"
       // This is a catch-all covering many scenarios
+      // Detect via isFido2NotAllowedError() or code === "CREDENTIAL_NOT_ALLOWED"
       return new Fido2CredentialError(
         "Operation not allowed (user cancelled, no gesture, or permission denied)",
         error,
-        "Passkey access was denied. Please try again."
+        "Passkey access was denied. Please try again.",
+        "CREDENTIAL_NOT_ALLOWED"
       );
 
     case "InvalidStateError":
@@ -208,8 +259,26 @@ export function fromDOMException(error: DOMException): Fido2Error {
       return new Fido2CredentialError(
         "Authenticator is in invalid state or credential already registered",
         error,
-        "This passkey is already registered"
+        "This passkey is already registered",
+        "CREDENTIAL_INVALID_STATE"
       );
+
+    case "OperationError":
+      // Not in the WebAuthn spec list, but thrown by Chrome when another
+      // WebAuthn request is already pending ("A request is already pending").
+      // Browsers also surface OperationError for generic transient or
+      // authenticator failures, so only map to CREDENTIAL_REQUEST_PENDING
+      // when the message actually indicates a pending/concurrent request;
+      // other OperationErrors fall through to the generic fallback below
+      if (/pending/i.test(error.message)) {
+        return new Fido2CredentialError(
+          "Another WebAuthn request is already pending",
+          error,
+          "Another passkey request is in progress. Please try again.",
+          "CREDENTIAL_REQUEST_PENDING"
+        );
+      }
+      break;
 
     case "NotSupportedError":
       // No pubKeyCredParams had type="public-key", or authenticator doesn't support algorithms
@@ -242,13 +311,14 @@ export function fromDOMException(error: DOMException): Fido2Error {
         error
       );
 
-    default:
-      // Catch any other DOMExceptions not in spec
-      return new Fido2Error(
-        `WebAuthn operation failed: ${error.message}`,
-        "WEBAUTHN_ERROR",
-        "Unable to use passkey. Please try again.",
-        error
-      );
   }
+
+  // Catch any other DOMExceptions not in spec
+  // (incl. OperationError without a pending-request message)
+  return new Fido2Error(
+    `WebAuthn operation failed: ${error.message}`,
+    "WEBAUTHN_ERROR",
+    "Unable to use passkey. Please try again.",
+    error
+  );
 }

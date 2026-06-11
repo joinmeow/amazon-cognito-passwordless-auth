@@ -36,14 +36,22 @@ const getWindow = (): (CognitoWindow & typeof globalThis) | undefined =>
 const getDocument = (): Document | undefined =>
   isBrowser() ? (globalThis as BrowserGlobal).document : undefined;
 
+// The Amazon Cognito Advanced Security script is only hosted in these regions
+const SUPPORTED_SCRIPT_REGIONS = [
+  "us-east-1",
+  "us-east-2",
+  "us-west-2",
+  "eu-west-1",
+  "eu-west-2",
+  "eu-central-1",
+];
+
 /**
  * Manages the Amazon Cognito Advanced Security data collection
  */
 export class CognitoSecurityProvider {
   private static instance: CognitoSecurityProvider;
-  private initialized = false;
-  private scriptLoaded = false;
-  private scriptLoading = false;
+  private scriptInjectionAttempted = false;
 
   // Private constructor for singleton
   private constructor() {}
@@ -59,92 +67,103 @@ export class CognitoSecurityProvider {
   }
 
   /**
-   * Initialize the security provider
+   * Determine the region to load the security script from, based on the
+   * configured Cognito IDP endpoint. Only used when no explicit
+   * advancedSecurity.region is configured. Returns undefined if the region
+   * cannot be determined (e.g. a custom proxy endpoint).
+   */
+  private resolveScriptRegion(cognitoIdpEndpoint: string): string | undefined {
+    if (/^[a-z]{2}-[a-z]+-\d+$/.test(cognitoIdpEndpoint)) {
+      return cognitoIdpEndpoint;
+    }
+    const urlMatch = cognitoIdpEndpoint.match(
+      /^https:\/\/cognito-idp\.([a-z]{2}-[a-z]+-\d+)\.amazonaws\.com\/?$/
+    );
+    return urlMatch?.[1];
+  }
+
+  /**
+   * Initialize the security provider by injecting the Amazon Cognito
+   * Advanced Security script, if it isn't already present.
+   *
+   * This is fire-and-forget: it never waits for the script to load (auth
+   * calls must not block on it) and injection is attempted at most once per
+   * page load — a later call only retries if the injection itself failed
+   * synchronously (e.g. no DOM available yet, or appendChild threw). If the
+   * script isn't (yet) available, security data is simply omitted from auth
+   * calls — same behavior as AWS's own libraries.
    */
   public async initialize(): Promise<void> {
-    if (this.initialized || this.scriptLoading) {
+    if (this.scriptInjectionAttempted) {
       return;
     }
 
-    const { debug } = configure();
     const win = getWindow();
-
     if (!win) {
-      debug?.(
-        "CognitoSecurityProvider: Window not available, skipping initialization"
-      );
       return;
     }
 
-    // Check if script is already loaded
+    const { debug, cognitoIdpEndpoint, advancedSecurity } = configure();
+
+    // Check if script is already loaded (e.g. included by the application)
     if (typeof win.AmazonCognitoAdvancedSecurityData !== "undefined") {
-      this.scriptLoaded = true;
-      this.initialized = true;
+      this.scriptInjectionAttempted = true;
       debug?.(
         "CognitoSecurityProvider: Amazon Cognito Advanced Security already available"
       );
       return;
     }
 
-    const { cognitoIdpEndpoint } = configure();
-    // Extract region from endpoint or use default region
-    const regionMatch = cognitoIdpEndpoint.match(/^[a-z]{2}-[a-z]+-\d$/);
-    const region = regionMatch ? cognitoIdpEndpoint : "us-east-1";
+    // Prefer the explicitly configured script region (e.g. for custom proxy
+    // endpoints), and only fall back to parsing the Cognito IDP endpoint
+    const region =
+      advancedSecurity?.region ?? this.resolveScriptRegion(cognitoIdpEndpoint);
+    if (!region || !SUPPORTED_SCRIPT_REGIONS.includes(region)) {
+      // Final for this page load: don't reattempt on later calls
+      this.scriptInjectionAttempted = true;
+      debug?.(
+        region
+          ? `CognitoSecurityProvider: Security script not hosted in region ${region}, skipping script injection`
+          : `CognitoSecurityProvider: Cannot determine security script region for endpoint ${cognitoIdpEndpoint}, skipping script injection`
+      );
+      return;
+    }
+
+    const doc = getDocument();
+    if (!doc) {
+      // No DOM available (yet); leave the flag unset so a later
+      // initialize() call can retry
+      return;
+    }
+
+    debug?.(
+      `CognitoSecurityProvider: Loading security script for region ${region}`
+    );
 
     try {
-      this.scriptLoading = true;
-      debug?.(
-        `CognitoSecurityProvider: Loading security script for region ${region}`
-      );
-
-      const doc = getDocument();
-      if (!doc) {
-        throw new Error("Document not available");
-      }
-
       // Create script element
       const script = doc.createElement("script");
       script.src = `https://amazon-cognito-assets.${region}.amazoncognito.com/amazon-cognito-advanced-security-data.min.js`;
       script.async = true;
+      script.onload = () => {
+        debug?.("CognitoSecurityProvider: Security script loaded successfully");
+      };
+      script.onerror = () => {
+        debug?.(
+          `CognitoSecurityProvider: Failed to load Amazon Cognito Advanced Security script for region ${region}`
+        );
+      };
 
-      // Create promise to track script loading
-      const scriptLoadPromise = new Promise<void>((resolve, reject) => {
-        script.onload = () => {
-          this.scriptLoaded = true;
-          this.initialized = true;
-          debug?.(
-            "CognitoSecurityProvider: Security script loaded successfully"
-          );
-          resolve();
-        };
-
-        script.onerror = () => {
-          const error = new Error(
-            `Failed to load Amazon Cognito Advanced Security script for region ${region}`
-          );
-          debug?.("CognitoSecurityProvider:", error);
-          reject(error);
-        };
-      });
-
-      // Append script to document
+      // Append script to document, without waiting for it to load. Only
+      // latch the flag once injection actually succeeded, so a synchronous
+      // failure (e.g. CSP blocking appendChild) doesn't prevent a retry
       doc.head.appendChild(script);
-
-      // Wait for script to load with timeout
-      const timeoutPromise = new Promise<void>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error("Security script loading timed out after 5000ms"));
-        }, 5000);
-      });
-
-      await Promise.race([scriptLoadPromise, timeoutPromise]);
+      this.scriptInjectionAttempted = true;
     } catch (error) {
       debug?.(
-        "CognitoSecurityProvider: Error initializing security script:",
+        "CognitoSecurityProvider: Failed to inject security script, will retry on next call:",
         error
       );
-    } finally {
-      this.scriptLoading = false;
     }
   }
 
@@ -162,7 +181,7 @@ export class CognitoSecurityProvider {
       return undefined;
     }
 
-    if (!this.scriptLoaded || !win || !win.AmazonCognitoAdvancedSecurityData) {
+    if (!win || !win.AmazonCognitoAdvancedSecurityData) {
       debug?.(
         "CognitoSecurityProvider: Security script not loaded, cannot generate security data"
       );
@@ -185,7 +204,9 @@ export class CognitoSecurityProvider {
   }
 
   /**
-   * Ensures the security provider is initialized and returns encoded data
+   * Ensures the security provider is initialized and returns encoded data.
+   * Never blocks on script loading: if the script isn't (yet) available,
+   * this resolves immediately with undefined.
    */
   public async getSecurityData(username: string): Promise<string | undefined> {
     await this.initialize();
