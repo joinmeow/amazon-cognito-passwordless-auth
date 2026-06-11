@@ -177,6 +177,15 @@ export async function createDeviceSrpAuthHandler(
     );
     return undefined;
   }
+  if (!record.password) {
+    // Placeholder ("shadow") record created by storeDeviceKey without the
+    // device secrets — device SRP with an empty password would produce an
+    // invalid signature, so don't build a handler from it
+    debug?.(
+      `Remembered device record for user ${username} has no device password, cannot use it for device SRP`
+    );
+    return undefined;
+  }
 
   const { password: devicePassword, groupKey: deviceGroupKey } = record;
 

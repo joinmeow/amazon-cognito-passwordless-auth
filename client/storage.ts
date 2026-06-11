@@ -296,6 +296,21 @@ export async function storeTokens(tokens: TokensToStore) {
   }
 }
 
+/**
+ * The username of the user that last signed in on this device (tracked under
+ * the Amplify-compatible LastAuthUser storage key). This is the CANONICAL
+ * user id (not an alias), so it can be used to locate per-user records (e.g.
+ * remembered devices) before authentication, when the user may have entered
+ * an alias (e-mail, phone number).
+ */
+export async function getLastAuthUsername(): Promise<string | undefined> {
+  const { clientId, storage } = configure();
+  const username = await storage.getItem(
+    `CognitoIdentityServiceProvider.${clientId}.LastAuthUser`
+  );
+  return username ?? undefined;
+}
+
 export async function retrieveTokens(): Promise<TokensFromStorage | undefined> {
   const { clientId, storage } = configure();
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
