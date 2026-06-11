@@ -37,6 +37,7 @@ import {
   Fido2ConfigError,
   Fido2ValidationError,
   Fido2AuthError,
+  Fido2AbortError,
   fromDOMException,
   isFido2AbortError,
 } from "./errors.js";
@@ -678,6 +679,63 @@ function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
   }
 }
 
+/**
+ * Tracks the currently pending conditional (autofill) credentials.get() request.
+ *
+ * Per the Credential Management API, only one credentials.get() request may be
+ * pending at a time. Without coordination, a deliberate modal request (e.g. the
+ * user clicking "sign in with passkey" while the conditional autofill request
+ * started at page load is still pending) is rejected by the browser (Chrome:
+ * "A request is already pending") while the invisible conditional request keeps
+ * pending. The standard pattern is to abort the pending conditional request via
+ * AbortController before starting a new request.
+ */
+let pendingConditionalGet:
+  | {
+      controller: AbortController;
+      settled: Promise<void>;
+      /**
+       * Set when a newer credential request aborts this conditional request
+       * to take over, so the resulting abort can be told apart from a
+       * cancellation by the caller's own abort signal.
+       */
+      superseded: boolean;
+    }
+  | undefined = undefined;
+
+/**
+ * Serializes the issuance of navigator.credentials.get() requests.
+ *
+ * Concurrent fido2getCredential calls must not issue overlapping
+ * credentials.get() requests: the browser rejects all but the first.
+ * Modal (and immediate/default mediation) requests hold the lock until their
+ * request settles. Conditional (autofill) requests are long-lived, so they
+ * release the lock as soon as their request is issued: a later request takes
+ * the lock and aborts them via pendingConditionalGet instead of queueing
+ * behind them.
+ */
+let credentialsGetLock: Promise<void> = Promise.resolve();
+
+/**
+ * How long a new credential request waits for an aborted (superseded)
+ * conditional credentials.get() request to settle before proceeding anyway.
+ *
+ * Conforming browsers settle an aborted request promptly, but a
+ * non-conforming browser or extension-wrapped navigator.credentials.get may
+ * ignore the AbortController and never settle. Since this wait happens while
+ * holding the credentials.get() lock, an unbounded wait would hang all
+ * future passkey requests.
+ */
+export const SUPERSEDED_SETTLEMENT_TIMEOUT_MS = 3000;
+
+async function acquireCredentialsGetLock(): Promise<() => void> {
+  const previous = credentialsGetLock;
+  let release!: () => void;
+  credentialsGetLock = new Promise<void>((resolve) => (release = resolve));
+  await previous;
+  return release;
+}
+
 export async function fido2getCredential({
   relyingPartyId,
   challenge,
@@ -784,38 +842,142 @@ export async function fido2getCredential({
   };
   debug?.("Assembled public key options:", publicKey);
 
-  debug?.("🚀 Calling navigator.credentials.get()", {
-    mediation,
-    hasSignal: !!signal,
-    signalAborted: signal?.aborted,
-    effectiveTimeout,
-    effectiveUserVerification,
-  });
-
+  // Only one credentials.get() request may be pending at a time. Take the
+  // lock so concurrent fido2getCredential calls cannot issue overlapping
+  // requests (a pending modal request holds the lock until it settles)
+  const releaseLock = await acquireCredentialsGetLock();
   let credential;
   try {
-    // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
-    // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
-    credential = await navigator.credentials.get({
-      publicKey,
-      signal,
-      mediation: mediation as CredentialMediationRequirement,
-    });
-    debug?.("✅ navigator.credentials.get() succeeded");
-  } catch (err) {
-    if (err instanceof DOMException) {
-      debug?.("❌ credentials.get() threw DOMException", {
-        name: err.name,
-        message: err.message,
-        wasSignalAborted: signal?.aborted,
-        mediation,
-      });
-      throw fromDOMException(err);
+    // If a conditional (autofill) request is still pending, abort it first so
+    // the browser accepts this new request instead of rejecting it
+    if (pendingConditionalGet) {
+      debug?.(
+        "⚠️ Aborting pending conditional (autofill) credentials.get() so the new credential request can proceed"
+      );
+      const aborted = pendingConditionalGet;
+      aborted.superseded = true;
+      aborted.controller.abort();
+      // Wait for the aborted request to settle before issuing the new
+      // request (the tracker is cleared upon settlement). Bound the wait:
+      // a non-conforming credentials.get may ignore the abort and never
+      // settle, and we hold the lock here - waiting forever would hang all
+      // future credential requests
+      let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        aborted.settled.then(() => false),
+        new Promise<boolean>(
+          (resolve) =>
+            (settlementTimer = setTimeout(
+              () => resolve(true),
+              SUPERSEDED_SETTLEMENT_TIMEOUT_MS
+            ))
+        ),
+      ]);
+      clearTimeout(settlementTimer);
+      if (timedOut) {
+        debug?.(
+          `⚠️ Aborted conditional credentials.get() did not settle within ${SUPERSEDED_SETTLEMENT_TIMEOUT_MS}ms - proceeding with the new request anyway`
+        );
+        // Clear the stale tracker so it cannot wedge subsequent requests.
+        // If the old request ever settles, its settlement handler only
+        // clears the tracker if it still points at itself (identity check),
+        // so it cannot corrupt the state of a newer conditional request
+        if (pendingConditionalGet === aborted) {
+          pendingConditionalGet = undefined;
+        }
+      }
     }
-    debug?.("❌ credentials.get() threw non-DOMException error", {
-      error: err,
+
+    // For conditional requests, use an internal AbortController (chained to
+    // the caller's signal, if any) so a subsequent modal request can abort us
+    let effectiveSignal = signal;
+    let conditionalAbort: AbortController | undefined = undefined;
+    if (mediation === "conditional") {
+      const controller = new AbortController();
+      if (signal?.aborted) {
+        controller.abort();
+      } else {
+        signal?.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+      conditionalAbort = controller;
+      effectiveSignal = controller.signal;
+    }
+
+    debug?.("🚀 Calling navigator.credentials.get()", {
+      mediation,
+      hasSignal: !!signal,
+      signalAborted: signal?.aborted,
+      effectiveTimeout,
+      effectiveUserVerification,
     });
-    throw err;
+
+    let conditionalTracker: typeof pendingConditionalGet = undefined;
+    try {
+      // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
+      // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
+      const getCredential = navigator.credentials.get({
+        publicKey,
+        signal: effectiveSignal,
+        mediation: mediation as CredentialMediationRequirement,
+      });
+      if (conditionalAbort) {
+        // Track this conditional request at module level, and clear the
+        // tracker once it settles (for any reason)
+        const tracker = {
+          controller: conditionalAbort,
+          settled: getCredential.then(
+            () => undefined,
+            () => undefined
+          ),
+          superseded: false,
+        };
+        conditionalTracker = tracker;
+        pendingConditionalGet = tracker;
+        void tracker.settled.then(() => {
+          if (pendingConditionalGet === tracker) {
+            pendingConditionalGet = undefined;
+          }
+        });
+        // Conditional requests are long-lived: release the lock as soon as
+        // the request is issued, so a later request can take the lock and
+        // abort us instead of queueing behind us (which would deadlock)
+        releaseLock();
+      }
+      credential = await getCredential;
+      debug?.("✅ navigator.credentials.get() succeeded");
+    } catch (err) {
+      if (err instanceof DOMException) {
+        debug?.("❌ credentials.get() threw DOMException", {
+          name: err.name,
+          message: err.message,
+          wasSignalAborted: signal?.aborted,
+          mediation,
+        });
+        if (
+          err.name === "AbortError" &&
+          conditionalTracker?.superseded &&
+          !signal?.aborted
+        ) {
+          // Aborted by a newer credential request taking over - not by the
+          // caller's own abort signal
+          throw new Fido2AbortError(
+            "WebAuthn operation was aborted: superseded by a newer credential request",
+            "Passkey verification was cancelled",
+            { superseded: true }
+          );
+        }
+        throw fromDOMException(err);
+      }
+      debug?.("❌ credentials.get() threw non-DOMException error", {
+        error: err,
+      });
+      throw err;
+    }
+  } finally {
+    // No-op if the lock was already released (a promise only resolves once)
+    releaseLock();
   }
   if (!credential) {
     throw new Fido2CredentialError("No credential returned from browser");
@@ -1085,7 +1247,12 @@ export async function prepareFido2SignIn({
             session = challenge.session;
             break;
           } catch (err) {
-            if (!isFido2AbortError(err) || signal?.aborted) {
+            if (!isFido2AbortError(err) || signal?.aborted || err.superseded) {
+              // Not our renewal abort: rethrow. In particular, a superseded
+              // abort means a newer credential request (e.g. a modal passkey
+              // sign-in) took over the pending conditional request — the
+              // autofill flow must end here, not restart with a fresh
+              // challenge behind the newer request's back
               throw err;
             }
             // Aborted by us for renewal - loop around for a fresh challenge
@@ -1435,6 +1602,21 @@ export function authenticateWithFido2({
       statusCb?.("SIGNED_IN_WITH_FIDO2");
       return processedTokens;
     } catch (err) {
+      if (
+        mediation === "conditional" &&
+        isFido2AbortError(err) &&
+        err.superseded
+      ) {
+        // The conditional (autofill) request was aborted because a newer
+        // credential request (e.g. a modal sign-in) took over. Don't change
+        // status here: that would clobber the status of the sign-in flow that
+        // took over. Caller-initiated aborts fall through to the SIGNED_OUT
+        // handling below, so the UI still transitions out of its busy state
+        debug?.(
+          "Conditional FIDO2 sign-in was superseded by a newer credential request - not reporting failure status"
+        );
+        throw err;
+      }
       if (
         isFido2AbortError(err) ||
         (err instanceof Error && err.name === "AbortError")

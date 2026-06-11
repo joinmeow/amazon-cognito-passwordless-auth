@@ -765,6 +765,54 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(1);
       });
 
+      it("ends the flow instead of renewing when the conditional request was superseded by a newer request", async () => {
+        // Regression: a modal passkey sign-in taking over the pending
+        // conditional request rejects it with a superseded Fido2AbortError.
+        // If that rejection lands at the renewal boundary (after the renewal
+        // timer aborts the pending get()), the renewal loop must NOT treat it
+        // as its own renewal abort and restart the autofill flow behind the
+        // modal request's back.
+        jest.useFakeTimers();
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+        const supersededWhenAborted = ({
+          signal,
+        }: {
+          signal?: AbortSignal;
+        }) =>
+          new Promise<never>((_, reject) =>
+            signal?.addEventListener("abort", () =>
+              reject(
+                new Fido2AbortError(
+                  "WebAuthn operation was aborted: superseded by a newer credential request",
+                  "Passkey verification was cancelled",
+                  { superseded: true }
+                )
+              )
+            )
+          );
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(supersededWhenAborted);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        expect((err as Fido2AbortError).superseded).toBe(true);
+        // No restart: one challenge, one credentials.get()
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(1);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
       it("propagates caller aborts instead of renewing", async () => {
         mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
         const credentialGetter = jest
@@ -830,6 +878,100 @@ describe("FIDO2 Core Functionality", () => {
         /Prepared credentials belong to username/
       );
     });
+
+    it("does not report FIDO2_SIGNIN_FAILED when a conditional sign-in is superseded by a newer request", async () => {
+      // A conditional (autofill) request that was aborted because another
+      // credential request took over (e.g. a modal sign-in) must stay quiet:
+      // it must not clobber the status of the sign-in flow that took over
+      const statusCb = jest.fn();
+      const credentialGetter = jest
+        .fn()
+        .mockRejectedValue(
+          new Fido2AbortError(
+            "WebAuthn operation was aborted: superseded by a newer credential request",
+            undefined,
+            { superseded: true }
+          )
+        );
+
+      mockInitiateAuth.mockResolvedValueOnce({
+        ChallengeParameters: {
+          fido2options: JSON.stringify({
+            challenge: "server-challenge",
+          }),
+        },
+        Session: "session-token",
+      } as any);
+
+      const { signedIn } = authenticateWithFido2({
+        username: "alice",
+        mediation: "conditional",
+        credentialGetter,
+        statusCb,
+      });
+
+      await expect(signedIn).rejects.toThrow(Fido2AbortError);
+      expect(statusCb).toHaveBeenCalledWith("STARTING_SIGN_IN_WITH_FIDO2");
+      expect(statusCb).not.toHaveBeenCalledWith("FIDO2_SIGNIN_FAILED");
+    });
+
+    it("reports SIGNED_OUT when a conditional sign-in is aborted by the caller", async () => {
+      // A caller-initiated abort is a real cancellation (no other flow is
+      // taking over). Unlike a superseded conditional request - which leaves
+      // status untouched so the taking-over flow's status survives - this must
+      // transition the UI out of its busy state. A deliberate abort is not a
+      // failure, so it reports SIGNED_OUT rather than FIDO2_SIGNIN_FAILED
+      const statusCb = jest.fn();
+      const credentialGetter = jest
+        .fn()
+        .mockRejectedValue(new Fido2AbortError());
+
+      mockInitiateAuth.mockResolvedValueOnce({
+        ChallengeParameters: {
+          fido2options: JSON.stringify({
+            challenge: "server-challenge",
+          }),
+        },
+        Session: "session-token",
+      } as any);
+
+      const { signedIn } = authenticateWithFido2({
+        username: "alice",
+        mediation: "conditional",
+        credentialGetter,
+        statusCb,
+      });
+
+      await expect(signedIn).rejects.toThrow(Fido2AbortError);
+      expect(statusCb).toHaveBeenCalledWith("SIGNED_OUT");
+      expect(statusCb).not.toHaveBeenCalledWith("FIDO2_SIGNIN_FAILED");
+    });
+
+    it("reports SIGNED_OUT when a modal sign-in is aborted", async () => {
+      const statusCb = jest.fn();
+      const credentialGetter = jest
+        .fn()
+        .mockRejectedValue(new Fido2AbortError());
+
+      mockInitiateAuth.mockResolvedValueOnce({
+        ChallengeParameters: {
+          fido2options: JSON.stringify({
+            challenge: "server-challenge",
+          }),
+        },
+        Session: "session-token",
+      } as any);
+
+      const { signedIn } = authenticateWithFido2({
+        username: "alice",
+        credentialGetter,
+        statusCb,
+      });
+
+      await expect(signedIn).rejects.toThrow(Fido2AbortError);
+      expect(statusCb).toHaveBeenCalledWith("SIGNED_OUT");
+      expect(statusCb).not.toHaveBeenCalledWith("FIDO2_SIGNIN_FAILED");
+    });
   });
 
   describe("authenticateWithFido2 status on cancellation", () => {
@@ -892,9 +1034,7 @@ describe("FIDO2 Core Functionality", () => {
       const statusCb = jest.fn();
       const { signedIn } = authenticateWithFido2({ prepared, statusCb });
 
-      await expect(signedIn).rejects.toThrow(
-        "Incorrect username or password."
-      );
+      await expect(signedIn).rejects.toThrow("Incorrect username or password.");
       const statuses = statusCb.mock.calls.map(([status]) => status);
       expect(statuses[statuses.length - 1]).toBe("FIDO2_SIGNIN_FAILED");
     });

@@ -46,12 +46,22 @@ export class Fido2Error extends Error {
  * Example: User closes passkey dialog, component unmounts during authentication
  */
 export class Fido2AbortError extends Fido2Error {
+  /**
+   * True when the WebAuthn operation was aborted because a newer
+   * credentials.get() request superseded it (e.g. a modal passkey sign-in
+   * taking over from the pending conditional autofill request), as opposed
+   * to being cancelled by the caller's own abort signal.
+   */
+  public readonly superseded: boolean;
+
   constructor(
     message = "WebAuthn operation was cancelled",
-    userMessage = "Passkey verification was cancelled"
+    userMessage = "Passkey verification was cancelled",
+    { superseded = false }: { superseded?: boolean } = {}
   ) {
     super(message, "WEBAUTHN_ABORTED", userMessage);
     this.name = "Fido2AbortError";
+    this.superseded = superseded;
   }
 }
 
