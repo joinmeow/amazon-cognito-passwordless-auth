@@ -258,20 +258,20 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
 
   // State is validated, so error/error_description genuinely originate from
   // the OAuth provider's response to OUR request - safe to surface them now.
-  // Per RFC 6749 the code flow delivers errors in the query (§4.1.2.1) and
-  // only the implicit flow uses the fragment (§4.2.2.1), so the fragment is
-  // consulted only for responseType "token" — a crafted #error fragment must
-  // not abort a legitimate code-flow callback that carries a valid code
+  // Per RFC 6749 each flow has exactly ONE error channel: the query string
+  // for the code flow (§4.1.2.1), the fragment for the implicit flow
+  // (§4.2.2.1). Only that channel is honored — a crafted error in the other
+  // location (e.g. a #error fragment on a code-flow callback, or a ?error
+  // query on an implicit-flow callback) must not abort a legitimate sign-in
   const oauthError =
-    url.searchParams.get("error") ??
-    (responseType === "token" ? hashParams.get("error") : null);
+    responseType === "token"
+      ? hashParams.get("error")
+      : url.searchParams.get("error");
   if (oauthError) {
     const errorDesc =
-      url.searchParams.get("error_description") ??
       (responseType === "token"
         ? hashParams.get("error_description")
-        : null) ??
-      oauthError;
+        : url.searchParams.get("error_description")) ?? oauthError;
     debug?.(`OAuth error received: ${oauthError}, description: ${errorDesc}`);
     // Scrub OAuth params from the URL on this failure exit too
     cleanupCallbackUrl();

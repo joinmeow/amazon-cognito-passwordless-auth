@@ -361,6 +361,40 @@ describe("OAuth Integration with processTokens", () => {
       expect(mockProcessTokens).not.toHaveBeenCalled();
     });
 
+    it("ignores a crafted ?error query on a legitimate implicit-flow callback", async () => {
+      // Mirror of the code-flow case: per RFC 6749 §4.2.2.1 the implicit
+      // flow delivers errors in the FRAGMENT only; the query string is not
+      // an error channel and must not abort a callback whose fragment
+      // carries valid tokens and state
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=Attacker+chosen+text#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.hash =
+        "#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+      const processedTokens = {
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      };
+      mockProcessTokens.mockResolvedValue(processedTokens);
+
+      const result = await handleCognitoOAuthCallback();
+
+      expect(result).toEqual(processedTokens);
+      expect(mockProcessTokens).toHaveBeenCalledTimes(1);
+    });
+
     it("ignores a crafted #error fragment on a legitimate code-flow callback", async () => {
       // Per RFC 6749 the code flow delivers errors in the query string only
       // (§4.1.2.1); the fragment is app-owned. A crafted #error fragment on a
