@@ -105,9 +105,20 @@ export function authenticateWithPlaintextPassword({
           actualDeviceKey = record.deviceKey;
           deviceKeyUsername = username;
         }
+      } else {
+        // An explicitly passed device key may also live in the entered
+        // user's stored record; remember where it lives, so a stale
+        // rejection clears that record too (not just the in-memory value)
+        const record = await getRememberedDevice(username);
+        if (record?.deviceKey === actualDeviceKey) {
+          deviceKeyUsername = username;
+        }
       }
 
-      const attemptSignIn = async (deviceKeyToUse?: string) => {
+      const attemptSignIn = async (
+        deviceKeyToUse?: string,
+        rejectedDeviceKey?: string
+      ) => {
         debug?.(`Invoking initiateAuth with username and password ...`);
 
         const authResponse = await initiateAuth({
@@ -160,7 +171,10 @@ export function authenticateWithPlaintextPassword({
           if (!usernameToTry) continue;
           const handlerDeviceKey =
             deviceKeyToUse ?? (await retrieveDeviceKey(usernameToTry));
-          if (!handlerDeviceKey) continue;
+          // Never rebuild a handler around a key Cognito just rejected as
+          // stale (a record under another storage key may still hold it)
+          if (!handlerDeviceKey || handlerDeviceKey === rejectedDeviceKey)
+            continue;
           deviceHandler = await createDeviceSrpAuthHandler(
             usernameToTry,
             handlerDeviceKey
@@ -183,6 +197,7 @@ export function authenticateWithPlaintextPassword({
       };
 
       let attemptResult: Awaited<ReturnType<typeof attemptSignIn>>;
+      let rejectedDeviceKey: string | undefined;
       try {
         attemptResult = await attemptSignIn(actualDeviceKey);
       } catch (err) {
@@ -195,10 +210,11 @@ export function authenticateWithPlaintextPassword({
         debug?.(
           `Cognito rejected the device key (${err.message}), clearing the stale device record and retrying sign-in without it`
         );
+        rejectedDeviceKey = actualDeviceKey;
         if (deviceKeyUsername) {
           await clearRememberedDevice(deviceKeyUsername);
         }
-        attemptResult = await attemptSignIn(undefined);
+        attemptResult = await attemptSignIn(undefined, rejectedDeviceKey);
       }
       const { authResponse, tokens } = attemptResult;
 
@@ -221,11 +237,25 @@ export function authenticateWithPlaintextPassword({
         abort.signal
       )) as TokensFromSignIn;
 
+      const canonicalUsername = processedTokens.username;
+
+      // If a stale device key was rejected during this sign-in, clear any
+      // canonical-keyed record still holding it — otherwise the alias-copy
+      // below would resurrect the stale key on every subsequent sign-in
+      if (rejectedDeviceKey && canonicalUsername) {
+        const canonicalRecord = await getRememberedDevice(canonicalUsername);
+        if (canonicalRecord?.deviceKey === rejectedDeviceKey) {
+          debug?.(
+            "Clearing canonical device record that still holds the rejected stale device key"
+          );
+          await clearRememberedDevice(canonicalUsername);
+        }
+      }
+
       // If the user signed in with an alias (e-mail, phone number), copy the
       // canonical-keyed device record to the alias key — attribution is now
       // verified by the successful sign-in — so the next alias sign-in finds
       // the device key in the pre-auth lookup above
-      const canonicalUsername = processedTokens.username;
       if (canonicalUsername && canonicalUsername !== username) {
         const [aliasRecord, canonicalRecord] = await Promise.all([
           getRememberedDevice(username),

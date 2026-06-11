@@ -1423,29 +1423,31 @@ function _usePasswordless() {
     /**
      * Clear the stored device key locally without removing it from the server
      */
-    clearDeviceKey: () => {
+    clearDeviceKey: async () => {
       const { storage, clientId, debug } = configure();
 
       // Remove the per-user remembered-device record — the one that
-      // retrieveDeviceKey() reads on subsequent sign-ins
+      // retrieveDeviceKey() reads on subsequent sign-ins. Await the removal
+      // so callers that await this method can immediately sign in again
+      // without the old record still being read from storage
       if (tokens?.username) {
-        Promise.resolve(clearRememberedDevice(tokens.username)).catch(
-          (err: Error) => {
-            debug?.("Failed to clear remembered device record:", err);
-          }
-        );
+        try {
+          await clearRememberedDevice(tokens.username);
+        } catch (err) {
+          debug?.("Failed to clear remembered device record:", err);
+        }
       }
 
       // Also remove the legacy device key storage location
       const deviceKeyStorageKey = `Passwordless.${clientId}.deviceKey`;
-      const result = storage.removeItem(deviceKeyStorageKey);
-      if (result instanceof Promise) {
-        result.catch((err: Error) => {
-          debug?.("Failed to remove device key from storage:", err);
-        });
+      try {
+        await storage.removeItem(deviceKeyStorageKey);
+      } catch (err) {
+        debug?.("Failed to remove device key from storage:", err);
       }
 
-      // Clear deviceKey in state
+      // Clear deviceKey in state (after storage, so state and storage can't
+      // disagree for callers that await this method)
       dispatch({ type: "SET_DEVICE_KEY", payload: null });
     },
     /** Register a FIDO2 credential with the Relying Party */

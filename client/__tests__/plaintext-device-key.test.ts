@@ -390,6 +390,78 @@ describe("stale device key fallback", () => {
     expect(await getRememberedDevice("test-user")).toBeUndefined();
   });
 
+  test("clears the matching stored record when an explicitly passed device key is stale", async () => {
+    // The caller passed the key explicitly, but the same key also lives in
+    // the entered user's stored record: a stale rejection must clear that
+    // record (and never rebuild a device handler around the rejected key),
+    // or the retry could fail again with no second recovery
+    await setRememberedDevice("test-user", {
+      deviceKey: "stale-explicit-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockInitiateAuth
+      .mockRejectedValueOnce(deviceNotFoundError())
+      .mockResolvedValueOnce(buildAuthenticatedResponse());
+
+    const { signedIn } = authenticateWithPlaintextPassword({
+      username: "test-user",
+      password: "test-password",
+      deviceKey: "stale-explicit-key",
+    });
+    const tokens = await signedIn;
+
+    expect(tokens.accessToken).toBe("mock-access-token");
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(initiateAuthDeviceKey(1)).toBeUndefined();
+    expect(await getRememberedDevice("test-user")).toBeUndefined();
+    // The retry must not rebuild a device handler around the rejected key
+    expect(
+      mockHandleAuthResponse.mock.calls[0][0].deviceHandler
+    ).toBeUndefined();
+  });
+
+  test("clears a stale canonical record after the retry so the alias copy is not resurrected", async () => {
+    // Alias copy AND canonical record both hold the same stale key (e.g.
+    // the device was forgotten via forgetDevice on another browser). The
+    // retry clears the alias record it sent from; the canonical record
+    // holding the same rejected key must be cleared too — otherwise the
+    // post-auth alias-copy would resurrect the stale key on every sign-in
+    await setRememberedDevice(ALIAS_USERNAME, {
+      deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    await setRememberedDevice(CANONICAL_USER_ID, {
+      deviceKey: "stale-device-key",
+      groupKey: "group-key",
+      password: "device-password",
+      remembered: true,
+    });
+    mockInitiateAuth
+      .mockRejectedValueOnce(deviceNotFoundError())
+      .mockResolvedValue(buildAuthenticatedResponse());
+
+    await authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    }).signedIn;
+
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+    expect(await getRememberedDevice(ALIAS_USERNAME)).toBeUndefined();
+    expect(await getRememberedDevice(CANONICAL_USER_ID)).toBeUndefined();
+
+    // The next alias sign-in has nothing stale left to send
+    await authenticateWithPlaintextPassword({
+      username: ALIAS_USERNAME,
+      password: "secret",
+    }).signedIn;
+    expect(mockInitiateAuth).toHaveBeenCalledTimes(3);
+    expect(initiateAuthDeviceKey(2)).toBeUndefined();
+  });
+
   test("does not retry when no device key was sent", async () => {
     mockInitiateAuth.mockRejectedValue(deviceNotFoundError());
 

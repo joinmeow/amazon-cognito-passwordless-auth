@@ -187,8 +187,10 @@ describe("usePasswordless forgetDevice / clearDeviceKey", () => {
     const { result } = renderHook(() => usePasswordless(), { wrapper });
     await signInWithDevice(result);
 
-    act(() => {
-      result.current.clearDeviceKey();
+    // clearDeviceKey awaits the storage removal: once it resolves, a
+    // sign-in started immediately afterwards cannot read the old record
+    await act(async () => {
+      await result.current.clearDeviceKey();
     });
 
     expect(mockClearRememberedDevice).toHaveBeenCalledWith(USERNAME);
