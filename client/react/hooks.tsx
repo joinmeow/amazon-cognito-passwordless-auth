@@ -395,9 +395,14 @@ function passwordlessReducer(
       return { ...state, mfaStatusReady: action.payload };
 
     case "SIGN_OUT":
+      // Reset all per-user state (tokens, deviceKey, TOTP MFA status, etc.)
+      // so nothing leaks into the next user's session. Keep the signing
+      // status (it is driven by the sign-out flow's status callback) and
+      // device capabilities. Activity tracking lives in a ref
+      // (lastActivityAtRef) and is reset by the signOut flow itself
       return {
         ...initialPasswordlessState,
-        signingInStatus: "SIGNED_OUT",
+        signingInStatus: state.signingInStatus,
         initiallyRetrievingTokensFromStorage: false,
         userVerifyingPlatformAuthenticatorAvailable:
           state.userVerifyingPlatformAuthenticatorAvailable,
@@ -1063,11 +1068,20 @@ function _usePasswordless() {
     lastMfaFetchTimeRef.current = now;
 
     const abortController = new AbortController();
+    // Capture the token this fetch is for: if it is no longer the one we
+    // last fetched for by the time the response lands (sign-out cleared it,
+    // or a newer token's fetch started), the result must be discarded —
+    // the abort check alone can't cover the microtask gap between a
+    // SIGN_OUT dispatch and this effect's cleanup
+    const fetchedForToken = tokens.accessToken;
+    const isStale = () =>
+      abortController.signal.aborted ||
+      lastFetchedMfaTokenRef.current !== fetchedForToken;
 
     // Get MFA settings for the signed-in user
     getUser({ accessToken: tokens.accessToken, abort: abortController.signal })
       .then((user) => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // If we have a valid user object with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
@@ -1108,7 +1122,7 @@ function _usePasswordless() {
         }
       })
       .catch(() => {
-        if (abortController.signal.aborted) return;
+        if (isStale()) return;
 
         // On error we keep the previously known MFA status to avoid
         // falsely disabling security-gated UI. Log for debugging.
@@ -1457,6 +1471,20 @@ function _usePasswordless() {
           _setTokens(undefined);
           parseAndSetTokens(undefined);
           dispatch({ type: "SET_FIDO2_CREDENTIALS", payload: undefined });
+          // Reset remaining per-user state (deviceKey, TOTP MFA status,
+          // mfaStatusReady, activity timestamps) so it cannot leak into
+          // the next user's session
+          lastActivityAtRef.current = Date.now();
+          // Invalidate any in-flight getUser fetch so a response landing
+          // after sign-out cannot restore the previous user's MFA status
+          // (and a same-token re-sign-in refetches afresh)
+          lastFetchedMfaTokenRef.current = undefined;
+          // Also reset the fetch cooldown: it rate-limits fetches within a
+          // session, and sign-out is a session boundary — the next user's
+          // MFA status fetch must run immediately, not wait out a cooldown
+          // started by the previous user
+          lastMfaFetchTimeRef.current = 0;
+          dispatch({ type: "SIGN_OUT" });
         },
         currentStatus: signingInStatus,
         skipTokenRevocation: options?.skipTokenRevocation,
