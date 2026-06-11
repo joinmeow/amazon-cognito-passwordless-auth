@@ -1,7 +1,17 @@
-import { configure } from "../client/config.js";
-import { scheduleRefresh, cleanupRefreshSystem } from "../client/refresh.js";
-import { storeTokens, retrieveTokens } from "../client/storage.js";
-import { processTokens } from "../client/common.js";
+// NOTE on test isolation: processTokens launches fire-and-forget
+// scheduleRefresh() chains whose hops (storage-lock jitter sleeps, poll
+// loops) routinely outlive the test that started them. With static imports,
+// such a straggler chain re-reads the process-global config singleton at
+// execution time and operates on the NEXT test's storage/mocks — the source
+// of this suite's flakiness under load. Each test therefore gets a FRESH
+// module graph (jest.resetModules + dynamic imports): stragglers stay bound
+// to the previous test's module instances and can't touch the new test.
+let configure: typeof import("../client/config.js").configure;
+let scheduleRefresh: typeof import("../client/refresh.js").scheduleRefresh;
+let cleanupRefreshSystem: typeof import("../client/refresh.js").cleanupRefreshSystem;
+let storeTokens: typeof import("../client/storage.js").storeTokens;
+let retrieveTokens: typeof import("../client/storage.js").retrieveTokens;
+let processTokens: typeof import("../client/common.js").processTokens;
 
 // Poll until the predicate is true (used to await fire-and-forget chains)
 const waitFor = async (predicate: () => boolean, timeoutMs = 4000) => {
@@ -36,9 +46,17 @@ describe("Refresh System Bug Hunt", () => {
     removeItem: jest.Mock<Promise<void>, [string]>;
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Fresh module graph per test (see note above the imports)
+    jest.resetModules();
+    ({ configure } = await import("../client/config.js"));
+    ({ scheduleRefresh, cleanupRefreshSystem } = await import(
+      "../client/refresh.js"
+    ));
+    ({ storeTokens, retrieveTokens } = await import("../client/storage.js"));
+    ({ processTokens } = await import("../client/common.js"));
+
     fetchMock = jest.fn();
-    debugLogs = [];
 
     // Clear all mocks
     jest.clearAllMocks();
@@ -59,6 +77,11 @@ describe("Refresh System Bug Hunt", () => {
       }),
     };
 
+    // Capture THIS test's log array by value: a straggler chain from a
+    // previous test holds the previous closure and keeps writing to its
+    // own (discarded) array, never into this test's logs
+    const logs: string[] = [];
+    debugLogs = logs;
     configure({
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
@@ -66,15 +89,20 @@ describe("Refresh System Bug Hunt", () => {
       storage: mockStorage,
       debug: (...args: unknown[]) => {
         const msg = args.map(String).join(" ");
-        debugLogs.push(msg);
+        logs.push(msg);
         console.log("[DEBUG]", msg);
       },
     });
   });
 
-  afterEach(() => {
-    // Clean up any timers
-    jest.clearAllTimers();
+  afterEach(async () => {
+    // Tear down this test's module-global refresh machinery (watchdog,
+    // listeners, per-user timers) before the module graph is replaced —
+    // jest.clearAllTimers() would be a no-op here (real timers)
+    cleanupRefreshSystem();
+    // Give just-settling chains one macrotask to run their final hops
+    // against THIS test's (now torn down) module graph
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   test("BUG: scheduleRefresh doesn't actually schedule anything", async () => {
@@ -129,7 +157,7 @@ describe("Refresh System Bug Hunt", () => {
     };
 
     // Clear logs
-    debugLogs = [];
+    debugLogs.length = 0; // clear in place: the debug closure writes to this same array
 
     // Process tokens (simulating post-refresh)
     await processTokens(tokens);
@@ -208,7 +236,7 @@ describe("Refresh System Bug Hunt", () => {
     });
 
     // Clear logs
-    debugLogs = [];
+    debugLogs.length = 0; // clear in place: the debug closure writes to this same array
 
     // Schedule refresh for expired tokens
     await scheduleRefresh();
@@ -257,7 +285,7 @@ describe("Refresh System Bug Hunt", () => {
     };
 
     // Clear logs
-    debugLogs = [];
+    debugLogs.length = 0; // clear in place: the debug closure writes to this same array
 
     // Process tokens multiple times
     await processTokens(tokens);
@@ -331,7 +359,7 @@ describe("Refresh System Bug Hunt", () => {
       expireAt: new Date(now + 600000),
     };
 
-    debugLogs = [];
+    debugLogs.length = 0; // clear in place: the debug closure writes to this same array
     await processTokens(refreshedTokens);
 
     // The new tokens MUST get their own refresh scheduled; deduplication
@@ -351,15 +379,17 @@ describe("Refresh System Bug Hunt", () => {
     const now = Date.now();
     const username = "selfabort-user";
 
-    // Spy on AbortController.prototype.abort: nothing in the happy-path
-    // refresh flow below should cancel anything. Before the fix, the
-    // nested processTokens (running inside the active refresh, with the
-    // schedule's own abort signal passed through by refreshTokens)
-    // aborted that very signal when replacing the tracked schedule,
-    // firing the old schedule's abort listeners and wiring the new
-    // schedule to an already-aborted signal.
-    const abortSpy = jest.spyOn(AbortController.prototype, "abort");
-
+    // Nothing in the happy-path refresh flow below should cancel anything.
+    // Before the fix, the nested processTokens (running inside the active
+    // refresh, with the schedule's own abort signal passed through by
+    // refreshTokens) aborted that very signal when replacing the tracked
+    // schedule, firing the old schedule's abort listeners ("Refresh
+    // scheduling aborted") and wiring the new schedule to an
+    // already-aborted signal. Asserted via this test's debug logs — which,
+    // thanks to the per-test module graph and per-test log array, no other
+    // test's straggler chain can write into (a prototype-wide
+    // AbortController spy used here previously picked up unrelated aborts
+    // from cross-test chains and made this test flaky under load).
     try {
       // Token that expires in 30 seconds: scheduleRefresh takes its
       // immediate-refresh path, so the chain
@@ -401,7 +431,7 @@ describe("Refresh System Bug Hunt", () => {
         }),
       });
 
-      debugLogs = [];
+      debugLogs.length = 0; // clear in place: the debug closure writes to this same array
       await processTokens(initialTokens);
 
       // Wait for the fire-and-forget refresh chain to complete: the
@@ -414,13 +444,20 @@ describe("Refresh System Bug Hunt", () => {
 
       // The nested processTokens replaced the tracked schedule while the
       // schedule's own abort signal was driving the call. That must not
-      // abort anything:
-      expect(abortSpy).not.toHaveBeenCalled();
+      // abort anything. In the regression, the armed schedule's abort
+      // listener fired (logging "Refresh scheduling aborted") — or the new
+      // schedule was wired to an already-aborted signal and never armed,
+      // which the waitFor above catches as a timeout. The log array is
+      // per-test (module isolation above), so no other test's chain can
+      // write into it.
       expect(
-        debugLogs.some((log) => log.includes("Refresh scheduling aborted"))
-      ).toBe(false);
+        debugLogs.filter(
+          (log) =>
+            log.includes("Refresh scheduling aborted") ||
+            log.includes("cancelling active refresh schedule")
+        )
+      ).toEqual([]);
     } finally {
-      abortSpy.mockRestore();
       cleanupRefreshSystem(username);
     }
   });
