@@ -9,6 +9,12 @@
 let configure: typeof import("../client/config.js").configure;
 let scheduleRefresh: typeof import("../client/refresh.js").scheduleRefresh;
 let cleanupRefreshSystem: typeof import("../client/refresh.js").cleanupRefreshSystem;
+let cleanupUserRefreshState: typeof import("../client/refresh.js").cleanupUserRefreshState;
+
+// Every username used by tests in this suite: cleanupRefreshSystem() without
+// a username only tears down the GLOBAL listeners/watchdog — per-user timers
+// must be cancelled per username (there is no all-users teardown API)
+const TEST_USERNAMES = ["testuser", "shortlived-user", "selfabort-user"];
 let storeTokens: typeof import("../client/storage.js").storeTokens;
 let retrieveTokens: typeof import("../client/storage.js").retrieveTokens;
 let processTokens: typeof import("../client/common.js").processTokens;
@@ -50,9 +56,8 @@ describe("Refresh System Bug Hunt", () => {
     // Fresh module graph per test (see note above the imports)
     jest.resetModules();
     ({ configure } = await import("../client/config.js"));
-    ({ scheduleRefresh, cleanupRefreshSystem } = await import(
-      "../client/refresh.js"
-    ));
+    ({ scheduleRefresh, cleanupRefreshSystem, cleanupUserRefreshState } =
+      await import("../client/refresh.js"));
     ({ storeTokens, retrieveTokens } = await import("../client/storage.js"));
     ({ processTokens } = await import("../client/common.js"));
 
@@ -96,9 +101,13 @@ describe("Refresh System Bug Hunt", () => {
   });
 
   afterEach(async () => {
-    // Tear down this test's module-global refresh machinery (watchdog,
-    // listeners, per-user timers) before the module graph is replaced —
-    // jest.clearAllTimers() would be a no-op here (real timers)
+    // Tear down this test's refresh machinery before the module graph is
+    // replaced — jest.clearAllTimers() would be a no-op here (real timers).
+    // cleanupRefreshSystem() without a username only removes the GLOBAL
+    // watchdog/listeners; per-user timers must be cancelled per username
+    for (const username of TEST_USERNAMES) {
+      cleanupUserRefreshState(username);
+    }
     cleanupRefreshSystem();
     // Give just-settling chains one macrotask to run their final hops
     // against THIS test's (now torn down) module graph
