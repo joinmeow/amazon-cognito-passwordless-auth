@@ -270,6 +270,237 @@ describe("OAuth Integration with processTokens", () => {
       expect(result).toEqual(processedTokens);
     });
 
+    it("should surface IdP errors delivered in the URL fragment (implicit flow)", async () => {
+      // Per RFC 6749 §4.2.2.1, implicit-flow error responses are delivered in
+      // the fragment component of the redirect URI, not the query string
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.hash =
+        "#error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "User is not authorized"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+
+      // Verify cleanup of OAuth state
+      expect(mockStorage.removeItem).toHaveBeenCalledWith(
+        "cognito_oauth_state"
+      );
+      expect(mockStorage.removeItem).toHaveBeenCalledWith(
+        "cognito_oauth_in_progress"
+      );
+    });
+
+    it("should surface fragment error code when no error_description is present", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=server_error&state=test-state";
+      mockLocation.hash = "#error=server_error&state=test-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "server_error"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should fail with state mismatch (not the fragment text) for fragment errors with a bad state", async () => {
+      // A crafted redirect to the registered sign-in URI must not be able to
+      // surface attacker-chosen error text: state is validated first
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.hash =
+        "#error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should fail with state mismatch (not the fragment text) for fragment errors with no state", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect#error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.hash =
+        "#error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.search = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("surfaces a state-validated query-string error in the implicit flow when the fragment has no tokens", async () => {
+      // Cognito's authorize endpoint is documented to deliver errors in the
+      // query string even for response_type=token (deviating from RFC 6749
+      // §4.2.2.1). When the fragment carries no tokens, surface that error
+      // instead of the misleading generic "Access token missing" message
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=unauthorized_client&error_description=Client+is+not+enabled+for+this+flow&state=test-state";
+      mockLocation.search =
+        "?error=unauthorized_client&error_description=Client+is+not+enabled+for+this+flow&state=test-state";
+      mockLocation.hash = "";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "Client is not enabled for this flow"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("ignores a crafted ?error query on a legitimate implicit-flow callback", async () => {
+      // Mirror of the code-flow case: per RFC 6749 §4.2.2.1 the implicit
+      // flow delivers errors in the FRAGMENT only; the query string is not
+      // an error channel and must not abort a callback whose fragment
+      // carries valid tokens and state
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=Attacker+chosen+text#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.hash =
+        "#access_token=mock-access-token&id_token=mock-id-token&expires_in=3600&state=test-state";
+      mockConfig.hostedUi!.responseType = "token";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+      const processedTokens = {
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      };
+      mockProcessTokens.mockResolvedValue(processedTokens);
+
+      const result = await handleCognitoOAuthCallback();
+
+      expect(result).toEqual(processedTokens);
+      expect(mockProcessTokens).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a crafted #error fragment on a legitimate code-flow callback", async () => {
+      // Per RFC 6749 the code flow delivers errors in the query string only
+      // (§4.1.2.1); the fragment is app-owned. A crafted #error fragment on a
+      // callback with a valid code and state must not abort the sign-in
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?code=test-code&state=test-state#error=access_denied&error_description=Attacker+chosen+text";
+      mockLocation.search = "?code=test-code&state=test-state";
+      mockLocation.hash =
+        "#error=access_denied&error_description=Attacker+chosen+text";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        if (key === "cognito_oauth_pkce")
+          return Promise.resolve("test-verifier");
+        return Promise.resolve(null);
+      });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          access_token: "mock-access-token",
+          id_token: "mock-id-token",
+          refresh_token: "mock-refresh-token",
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+      });
+      const processedTokens = {
+        accessToken: "mock-access-token",
+        idToken: "mock-id-token",
+        refreshToken: "mock-refresh-token",
+        expireAt: new Date(Date.now() + 3600000),
+        username: "test-user",
+        authMethod: "REDIRECT" as const,
+      };
+      mockProcessTokens.mockResolvedValue(processedTokens);
+
+      const result = await handleCognitoOAuthCallback();
+
+      expect(result).toMatchObject({ accessToken: "mock-access-token" });
+      expect(mockProcessTokens).toHaveBeenCalledTimes(1);
+    });
+
+    it("should fail with state mismatch (not the query text) for query errors with a bad state", async () => {
+      // The code-flow (query string) error path must apply the same ordering
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=Attacker+chosen+text&state=attacker-state";
+      mockLocation.hash = "";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "OAuth state mismatch"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
+    it("should surface IdP errors delivered in the query string when state is valid (code flow)", async () => {
+      mockLocation.href =
+        "https://app.example.com/signin-redirect?error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.search =
+        "?error=access_denied&error_description=User+is+not+authorized&state=test-state";
+      mockLocation.hash = "";
+
+      mockStorage.getItem.mockImplementation((key: string) => {
+        if (key === "cognito_oauth_in_progress") return Promise.resolve("true");
+        if (key === "cognito_oauth_state") return Promise.resolve("test-state");
+        return Promise.resolve(null);
+      });
+
+      await expect(handleCognitoOAuthCallback()).rejects.toThrow(
+        "User is not authorized"
+      );
+      expect(mockProcessTokens).not.toHaveBeenCalled();
+    });
+
     it("should return null when no OAuth flow is in progress", async () => {
       mockStorage.getItem.mockResolvedValue("false");
 
