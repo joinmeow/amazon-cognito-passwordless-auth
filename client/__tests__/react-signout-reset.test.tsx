@@ -243,4 +243,73 @@ describe("signOut resets per-user state", () => {
     });
     expect(result.current.mfaStatusReady).toBe(false);
   });
+
+  it("fetches the next user's MFA status immediately after sign-out, without waiting out the previous user's cooldown", async () => {
+    // Regression: sign-out cleared lastFetchedMfaTokenRef but left the
+    // 5s fetch cooldown running, so a different user signing in right
+    // after sign-out had their MFA fetch blocked by the previous user's
+    // cooldown window.
+    const tokensA: TokensFromSignIn = {
+      accessToken: "mock-access-token",
+      idToken: "mock-id-token",
+      refreshToken: "mock-refresh-token",
+      expireAt: new Date(Date.now() + 3600_000),
+      username: "user-a",
+      authMethod: "FIDO2",
+    };
+    const tokensB: TokensFromSignIn = {
+      ...tokensA,
+      accessToken: "mock-access-token-user-b",
+      username: "user-b",
+    };
+
+    let capturedTokensCb:
+      | ((tokens: TokensFromSignIn) => void | Promise<void>)
+      | undefined;
+    mockAuthenticateWithFido2.mockImplementation((props) => {
+      capturedTokensCb = props?.tokensCb;
+      return {
+        signedIn: Promise.resolve(tokensA),
+        abort: jest.fn(),
+      };
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // User A signs in; MFA status fetched
+    act(() => {
+      result.current.authenticateWithFido2({ username: "user-a" });
+    });
+    await act(async () => {
+      await capturedTokensCb!(tokensA);
+    });
+    await waitFor(() => {
+      expect(result.current.mfaStatusReady).toBe(true);
+    });
+    expect(mockGetUser).toHaveBeenCalledTimes(1);
+
+    // Sign out, then user B signs in well within the 5s cooldown
+    await act(async () => {
+      await result.current.signOut().signedOut;
+    });
+    act(() => {
+      result.current.authenticateWithFido2({ username: "user-b" });
+    });
+    await act(async () => {
+      await capturedTokensCb!(tokensB);
+    });
+
+    // User B's MFA fetch must run immediately (no 5s stall)
+    await waitFor(() => {
+      expect(mockGetUser).toHaveBeenCalledTimes(2);
+      expect(result.current.mfaStatusReady).toBe(true);
+    });
+    expect(mockGetUser.mock.calls[1][0]).toMatchObject({
+      accessToken: "mock-access-token-user-b",
+    });
+  });
 });
