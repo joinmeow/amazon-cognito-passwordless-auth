@@ -28,8 +28,11 @@ import {
   redactSecret,
   redactTokensFromObject,
 } from "./util.js";
-import { retrieveDeviceKey } from "./storage.js";
-import { createDeviceSrpAuthHandler } from "./device.js";
+import { getRememberedDevice, clearRememberedDevice } from "./storage.js";
+import {
+  createDeviceSrpAuthHandler,
+  isDeviceNotFoundError,
+} from "./device.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {
@@ -389,13 +392,34 @@ export function authenticateWithSRP({
         `Using USER_ID_FOR_SRP (${userIdForSrp}) for all authentication challenges`
       );
 
-      // Now that we have initiated auth and have userIdForSrp, we can retrieve the device key
-      // for this specific user
-      const actualDeviceKey =
-        deviceKey ?? (await retrieveDeviceKey(userIdForSrp));
+      // Now that we have initiated auth and have userIdForSrp, we can
+      // retrieve the device key for this specific user. Only a COMPLETE
+      // record (with a device password) is usable: placeholder records
+      // created by storeDeviceKey would make Cognito issue a
+      // DEVICE_SRP_AUTH challenge this client cannot answer (same guard as
+      // the plaintext flow).
+      let actualDeviceKey = deviceKey;
+      // The storage key the device key was found under (so we can clear
+      // that exact record if Cognito rejects the key as stale)
+      let deviceKeyUsername: string | undefined;
+      if (!actualDeviceKey) {
+        const record = await getRememberedDevice(userIdForSrp);
+        if (record?.deviceKey && record.password) {
+          actualDeviceKey = record.deviceKey;
+          deviceKeyUsername = userIdForSrp;
+        }
+      } else {
+        // An explicitly passed device key may also live in the user's
+        // stored record; remember where it lives, so a stale rejection
+        // clears that record too (not just the in-memory value)
+        const record = await getRememberedDevice(userIdForSrp);
+        if (record?.deviceKey === actualDeviceKey) {
+          deviceKeyUsername = userIdForSrp;
+        }
+      }
 
       // Pre-create a device SRP handler if we have a device key
-      const deviceHandler = actualDeviceKey
+      let deviceHandler = actualDeviceKey
         ? await createDeviceSrpAuthHandler(userIdForSrp, actualDeviceKey)
         : undefined;
 
@@ -432,13 +456,46 @@ export function authenticateWithSRP({
         challengeResponses.DEVICE_KEY = actualDeviceKey;
       }
 
-      const authResult = await respondToAuthChallenge({
-        challengeName: challenge.ChallengeName,
-        challengeResponses,
-        clientMetadata,
-        session: challenge.Session,
-        abort: abort.signal,
-      });
+      let authResult: Awaited<ReturnType<typeof respondToAuthChallenge>>;
+      try {
+        authResult = await respondToAuthChallenge({
+          challengeName: challenge.ChallengeName,
+          challengeResponses,
+          clientMetadata,
+          session: challenge.Session,
+          abort: abort.signal,
+        });
+      } catch (err) {
+        if (!actualDeviceKey || !isDeviceNotFoundError(err)) {
+          throw err;
+        }
+        // The device key we sent is stale: Cognito no longer knows the
+        // device. Clear the local record it came from and retry ONCE
+        // without the device key — the SRP password proof is unchanged, so
+        // the same signature and session are still valid (mirrors
+        // amazon-cognito-identity-js, which re-sends the PASSWORD_VERIFIER
+        // response with DEVICE_KEY nulled).
+        debug?.(
+          `Cognito rejected the device key (${err.message}), clearing the stale device record and retrying the challenge without it`
+        );
+        if (deviceKeyUsername) {
+          await clearRememberedDevice(deviceKeyUsername);
+        }
+        // Fresh object for the retry: the first request's object was
+        // already handed out and must not be mutated retroactively
+        const retryResponses = { ...challengeResponses };
+        delete retryResponses.DEVICE_KEY;
+        // The device is unknown server-side: no device challenges can
+        // follow, and a handler built around the stale key must not be used
+        deviceHandler = undefined;
+        authResult = await respondToAuthChallenge({
+          challengeName: challenge.ChallengeName,
+          challengeResponses: retryResponses,
+          clientMetadata,
+          session: challenge.Session,
+          abort: abort.signal,
+        });
+      }
       debug?.(
         `Response from respondToAuthChallenge:`,
         redactTokensFromObject(authResult)
