@@ -791,6 +791,27 @@ export async function refreshTokens({
         throw error;
       }
 
+      // The refresh round-trip may have raced a sign-out that proceeded
+      // without the refresh lock (signOut falls back to an unlocked
+      // teardown when lock acquisition times out). Re-validate that the
+      // session still exists in storage before writing anything back:
+      // storing now would resurrect the session the user just signed out
+      // of. (A rotated refresh token, if any, dies with this discard —
+      // RevokeToken revokes the whole token family, so it is unusable.)
+      const sessionStillExists = await retrieveTokensForRefresh();
+      if (
+        !sessionStillExists?.refreshToken ||
+        sessionStillExists.username !== username
+      ) {
+        logDebug(
+          "Session was signed out during the refresh round-trip; discarding refreshed tokens"
+        );
+        await clearRefreshAttemptLock();
+        throw new Error(
+          "Session was signed out during the token refresh; refreshed tokens discarded"
+        );
+      }
+
       let processedTokens: TokensFromRefresh;
       try {
         processedTokens = (await processTokens(
