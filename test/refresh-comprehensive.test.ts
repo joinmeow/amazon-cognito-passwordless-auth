@@ -266,9 +266,12 @@ describe("Refresh System Comprehensive Tests", () => {
         clientId: "testClient",
         cognitoIdpEndpoint: "us-west-2",
         fetch: fetchMock,
-        storage: localStorage as unknown as Parameters<
-          typeof configure
-        >[0]["storage"],
+        // Keep the SAME storage the tokens above were seeded into: the
+        // reuse-recovery re-reads the latest refresh token from storage,
+        // and the post-refresh session re-validation checks the session
+        // still exists there (switching to the global localStorage here
+        // only ever worked via leftovers from earlier tests)
+        storage: mockStorage,
         useGetTokensFromRefreshToken: true,
         debug: (...args: unknown[]) => {
           debugLogs.push(args.map(String).join(" "));
