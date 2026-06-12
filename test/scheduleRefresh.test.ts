@@ -36,44 +36,70 @@ describe("ScheduleRefresh Lock", () => {
     expect(duration).toBeLessThan(100);
   });
 
-  test("should return silently when lock is held by another process", async () => {
-    // First, store minimal user data so scheduleRefresh knows there's a user
-    const { storage } = configure();
-    const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
-    const customKeyPrefix = `Passwordless.testClient`;
+  test("should return silently when lock is held by another (renewing) tab", async () => {
+    // A lock held by a LIVE tab is renewed via heartbeat; scheduleRefresh
+    // waits out its acquisition timeout and then returns silently, assuming
+    // the other tab is handling the refresh. (A lock that is NOT renewed
+    // goes stale after 30s and is taken over instead — that liveness
+    // behavior is covered in lock-liveness.test.ts.)
+    jest.useFakeTimers();
+    try {
+      const { storage } = configure();
+      const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
+      const customKeyPrefix = `Passwordless.testClient`;
 
-    await storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, "testuser");
-    await storage.setItem(
-      `${amplifyKeyPrefix}.testuser.accessToken`,
-      createValidJWT()
-    );
-    await storage.setItem(
-      `${amplifyKeyPrefix}.testuser.refreshToken`,
-      "test-refresh-token"
-    );
-    await storage.setItem(
-      `${customKeyPrefix}.testuser.expireAt`,
-      new Date(Date.now() + 3600000).toISOString()
-    );
+      await storage.setItem(`${amplifyKeyPrefix}.LastAuthUser`, "testuser");
+      await storage.setItem(
+        `${amplifyKeyPrefix}.testuser.accessToken`,
+        createValidJWT()
+      );
+      await storage.setItem(
+        `${amplifyKeyPrefix}.testuser.refreshToken`,
+        "test-refresh-token"
+      );
+      await storage.setItem(
+        `${customKeyPrefix}.testuser.expireAt`,
+        new Date(Date.now() + 3600000).toISOString()
+      );
 
-    // Now block the lock with a non-stale lock to simulate another tab refreshing
-    const userKey = `Passwordless.testClient.testuser.refreshLock`;
-    const lockData = {
-      id: "test-lock-id",
-      timestamp: Date.now(), // Current timestamp so it's not stale
-    };
-    await storage.setItem(userKey, JSON.stringify(lockData));
+      const userKey = `Passwordless.testClient.testuser.refreshLock`;
+      await storage.setItem(
+        userKey,
+        JSON.stringify({ id: "other-tab-lock", timestamp: Date.now() })
+      );
+      // The other tab renews its heartbeat, so the lock never goes stale
+      const renewer = setInterval(() => {
+        void storage.setItem(
+          userKey,
+          JSON.stringify({ id: "other-tab-lock", timestamp: Date.now() })
+        );
+      }, 5_000);
 
-    // scheduleRefresh should wait for lock timeout (15s) then return silently
-    // This is the expected behavior - it assumes another tab is handling the refresh
-    const startTime = Date.now();
-    await expect(scheduleRefresh()).resolves.toBeUndefined();
-    const duration = Date.now() - startTime;
+      try {
+        const outcome: { done: boolean; error?: unknown } = { done: false };
+        scheduleRefresh().then(
+          () => {
+            outcome.done = true;
+          },
+          (error) => {
+            outcome.done = true;
+            outcome.error = error;
+          }
+        );
+        // Drive past the lock acquisition timeout (45s)
+        for (let i = 0; i < 90 && !outcome.done; i++) {
+          await jest.advanceTimersByTimeAsync(1000);
+        }
 
-    // Should have waited approximately 15 seconds before giving up
-    expect(duration).toBeGreaterThan(14000);
-    expect(duration).toBeLessThan(16000);
-  }, 20000); // Increase timeout to handle lock wait
+        expect(outcome.done).toBe(true);
+        expect(outcome.error).toBeUndefined();
+      } finally {
+        clearInterval(renewer);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   test("should honor the per-user lock when the access token is expired", async () => {
     // Regression: scheduleRefresh used to derive the lock user via

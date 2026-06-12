@@ -611,6 +611,9 @@ export async function refreshTokens({
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
 
   const doRefresh = async (): Promise<TokensFromRefresh> => {
+    // A sign-out tombstone newer than this moment means the user signed
+    // out while this refresh was in flight; the result must be discarded
+    const refreshStart = Date.now();
     // Get state for this user
     const state = getRefreshState(userIdentifier);
 
@@ -791,12 +794,35 @@ export async function refreshTokens({
         throw error;
       }
 
+      // The refresh round-trip may have raced a sign-out that proceeded
+      // without the refresh lock (signOut falls back to an unlocked
+      // teardown when lock acquisition times out). Re-validate that the
+      // session still exists in storage before writing anything back:
+      // storing now would resurrect the session the user just signed out
+      // of. (A rotated refresh token, if any, dies with this discard —
+      // RevokeToken revokes the whole token family, so it is unusable.)
+      const sessionStillExists = await retrieveTokensForRefresh();
+      if (
+        !sessionStillExists?.refreshToken ||
+        sessionStillExists.username !== username
+      ) {
+        logDebug(
+          "Session was signed out during the refresh round-trip; discarding refreshed tokens"
+        );
+        await clearRefreshAttemptLock();
+        throw new Error(
+          "Session was signed out during the token refresh; refreshed tokens discarded"
+        );
+      }
+
       let processedTokens: TokensFromRefresh;
       try {
-        processedTokens = (await processTokens(
-          tokensFromRefresh,
-          abort
-        )) as TokensFromRefresh;
+        processedTokens = (await processTokens(tokensFromRefresh, abort, {
+          // The authoritative race guard: processTokens re-validates the
+          // session (and the sign-out tombstone) immediately before AND
+          // after the write, under the auth lock
+          sessionMustExistSince: refreshStart,
+        })) as TokensFromRefresh;
         state.lastRefreshTime = Date.now();
 
         // Call tokensCb first - if it fails, we don't want to mark as completed
