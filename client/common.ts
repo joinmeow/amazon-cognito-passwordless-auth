@@ -527,17 +527,33 @@ export const signOut = (props?: {
     };
     if (lockKey) {
       debug?.("signOut: waiting for lock", lockKey);
-      const result = await withStorageLock(
-        lockKey,
-        async () => {
-          debug?.("signOut: lock acquired", lockKey);
-          return doSignOut();
-        },
-        undefined,
-        abort.signal
-      );
-      debug?.("signOut: lock released", lockKey);
-      return result;
+      try {
+        const result = await withStorageLock(
+          lockKey,
+          async () => {
+            debug?.("signOut: lock acquired", lockKey);
+            return doSignOut();
+          },
+          undefined,
+          abort.signal
+        );
+        debug?.("signOut: lock released", lockKey);
+        return result;
+      } catch (err) {
+        if (!(err instanceof LockTimeoutError)) {
+          throw err;
+        }
+        // Sign-out must eventually win. The holder is most likely a hung or
+        // throttled refresh in another tab (its heartbeat is capped, but we
+        // won't make the user wait that out): proceed without the lock. A
+        // concurrent refresh that loses this race re-validates the session
+        // before acting on its result.
+        debug?.(
+          "signOut: could not acquire lock, signing out without it",
+          lockKey
+        );
+        return doSignOut();
+      }
     }
     debug?.("signOut: no lock key, running unlocked");
     return doSignOut();

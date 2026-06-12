@@ -375,3 +375,103 @@ describe("SignOut revocation ordering", () => {
     expect(revokeCalls).toHaveLength(1);
   });
 });
+
+describe("SignOut lock-timeout fallback", () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test("signs out without the lock when another tab holds it past the timeout", async () => {
+    // Another tab's heartbeat-renewed refresh lock used to make signOut
+    // throw LockTimeoutError: tokens stayed, the click did nothing. Sign-out
+    // must eventually win - after the wait it proceeds without the lock.
+    jest.useFakeTimers();
+    const username = "testuser";
+    const refreshToken = "fallback-refresh-token";
+    const now = Date.now();
+
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    });
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      fetch: fetchMock,
+    });
+    const { storage } = configure();
+
+    await storeTokens({
+      accessToken: createJWT({
+        sub: "user123",
+        username,
+        scope: "openid",
+        exp: Math.floor((now + 3600_000) / 1000),
+        iat: Math.floor(now / 1000),
+      }),
+      idToken: createJWT({
+        sub: "user123",
+        "cognito:username": username,
+        exp: Math.floor((now + 3600_000) / 1000),
+        iat: Math.floor(now / 1000),
+      }),
+      refreshToken,
+      authMethod: "SRP",
+      expireAt: new Date(now + 3600_000),
+    });
+
+    // Simulate another tab holding the refresh lock and renewing its
+    // heartbeat: the lock never goes stale, so signOut cannot acquire it
+    const lockKey = `Passwordless.testClient.${username}.refreshLock`;
+    await storage.setItem(
+      lockKey,
+      JSON.stringify({ id: "other-tab-lock", timestamp: Date.now() })
+    );
+    const renewer = setInterval(() => {
+      void storage.setItem(
+        lockKey,
+        JSON.stringify({ id: "other-tab-lock", timestamp: Date.now() })
+      );
+    }, 5_000);
+
+    try {
+      const { signedOut } = signOut();
+      const outcome: { done: boolean; error?: unknown } = { done: false };
+      signedOut.then(
+        () => {
+          outcome.done = true;
+        },
+        (error) => {
+          outcome.done = true;
+          outcome.error = error;
+        }
+      );
+      // Drive past the lock acquisition timeout (45s) and the fallback
+      for (let i = 0; i < 90 && !outcome.done; i++) {
+        await jest.advanceTimersByTimeAsync(1000);
+      }
+
+      expect(outcome.done).toBe(true);
+      expect(outcome.error).toBeUndefined();
+
+      // Local session is gone despite the held lock
+      const amplifyKeyPrefix = `CognitoIdentityServiceProvider.testClient`;
+      expect(
+        await storage.getItem(`${amplifyKeyPrefix}.LastAuthUser`)
+      ).toBeNull();
+      expect(
+        await storage.getItem(`${amplifyKeyPrefix}.${username}.refreshToken`)
+      ).toBeNull();
+      // And the refresh token was still revoked server-side
+      const revokeCall = fetchMock.mock.calls.find(([, init]) =>
+        (init as { headers?: Record<string, string> })?.headers?.[
+          "x-amz-target"
+        ]?.endsWith("RevokeToken")
+      );
+      expect(revokeCall).toBeDefined();
+    } finally {
+      clearInterval(renewer);
+    }
+  });
+});
