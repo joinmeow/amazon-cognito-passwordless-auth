@@ -33,6 +33,21 @@ import {
 } from "./storage.js";
 import { confirmDevice } from "./cognito-api.js";
 
+/**
+ * Cognito rejects a device key it no longer knows (device forgotten
+ * server-side, user pool migrated, ...) with a ResourceNotFoundException
+ * whose message mentions the device, e.g. "Device does not exist.".
+ * Same detection as amazon-cognito-identity-js uses before it clears its
+ * cached device data and retries without the device key.
+ */
+export function isDeviceNotFoundError(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    err.name === "ResourceNotFoundException" &&
+    err.message.toLowerCase().includes("device")
+  );
+}
+
 // Helper function to get device info for naming
 function getDeviceName(): string {
   if (typeof navigator === "undefined") {
@@ -403,10 +418,19 @@ export async function handleDeviceConfirmation(
     );
     const errorMsg = error instanceof Error ? error.message : String(error);
     debug?.(`❌ [Device Confirmation] Error details: ${errorMsg}`);
-    // If device confirmation fails, we still set the deviceKey on the tokens object
-    // for the current session, but DON'T store it in persistent storage
-    // as it may be invalid for future authentication attempts
-    tokens.deviceKey = deviceKey;
+    // The device was NOT confirmed: drop the key entirely. Setting it on
+    // the tokens object used to leak it into persistent storage via
+    // storeTokens -> storeDeviceKey, creating a placeholder record (no
+    // device password) whose key would be replayed on future sign-ins but
+    // could never complete device auth. Without a confirmed device,
+    // Cognito issues fresh NewDeviceMetadata on a later sign-in and
+    // confirmation is retried cleanly then.
+    debug?.(
+      "❌ [Device Confirmation] Dropping unconfirmed device key (not stored, not set on tokens)"
+    );
+    // The key may already have been set if the failure happened after the
+    // ConfirmDevice call itself (e.g. while persisting the record)
+    delete tokens.deviceKey;
     return tokens;
   }
 }

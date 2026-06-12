@@ -26,24 +26,12 @@ import {
   getRememberedDevice,
   setRememberedDevice,
 } from "./storage.js";
-import { createDeviceSrpAuthHandler } from "./device.js";
+import {
+  createDeviceSrpAuthHandler,
+  isDeviceNotFoundError,
+} from "./device.js";
 import { parseJwtPayload, redactTokensFromObject } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-
-/**
- * Cognito rejects a device key it no longer knows (device forgotten
- * server-side, user pool migrated, ...) with a ResourceNotFoundException
- * whose message mentions the device, e.g. "Device does not exist.".
- * Same detection as amazon-cognito-identity-js uses before it clears its
- * cached device data and retries without the device key.
- */
-function isDeviceNotFoundError(err: unknown): err is Error {
-  return (
-    err instanceof Error &&
-    err.name === "ResourceNotFoundException" &&
-    err.message.toLowerCase().includes("device")
-  );
-}
 
 export function authenticateWithPlaintextPassword({
   username,
