@@ -54,6 +54,45 @@ const activeRefreshSchedules = new Map<
 >();
 
 /**
+ * Storage key of the sign-out tombstone. signOut writes it BEFORE removing
+ * the session keys; the refresh path checks it immediately before and after
+ * writing refreshed tokens back, so a sign-out racing an in-flight refresh
+ * stays signed out in every interleaving. A fresh sign-in clears it.
+ */
+function signedOutTombstoneKey(clientId: string, username: string) {
+  return `Passwordless.${clientId}.${username}.signedOutAt`;
+}
+
+/**
+ * Remove the per-user session keys from storage. Shared by signOut's
+ * teardown and the refresh path's compensating cleanup (when a sign-out
+ * lands inside the refresh's check-to-write window). Deliberately does NOT
+ * remove the sign-out tombstone or the device key.
+ */
+async function removeSessionKeysFromStorage(username: string) {
+  const { clientId, storage } = configure();
+  const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
+  const customKeyPrefix = `Passwordless.${clientId}`;
+  await Promise.all([
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.idToken`),
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.accessToken`),
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.tokenScopesString`),
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.userData`),
+    storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
+    storage.removeItem(`${amplifyKeyPrefix}.${username}.clockDriftMs`),
+    storage.removeItem(`${customKeyPrefix}.${username}.authMethod`),
+    storage.removeItem(`${customKeyPrefix}.${username}.lastRefreshAttempt`),
+    storage.removeItem(`${customKeyPrefix}.${username}.lastRefreshCompleted`),
+    // Legacy keys no longer written by current versions, removed for
+    // migration hygiene
+    storage.removeItem(`${customKeyPrefix}.${username}.expireAt`),
+    storage.removeItem(`${customKeyPrefix}.${username}.refreshingTokens`),
+    // Note: We do NOT remove deviceKey - it should persist between sessions
+  ]);
+}
+
+/**
  * Process tokens after authentication or refresh.
  * This function handles ALL required operations:
  * 1. Device confirmation
@@ -67,7 +106,17 @@ const activeRefreshSchedules = new Map<
  */
 async function processTokensInternal(
   tokens: TokensFromSignIn | TokensFromRefresh,
-  abort?: AbortSignal
+  abort?: AbortSignal,
+  opts?: {
+    /**
+     * Set by the refresh path: the session (same user, refresh token
+     * present, no sign-out tombstone newer than this timestamp) must still
+     * exist in storage immediately before the refreshed tokens are written
+     * back — and is re-checked right after the write — so a refresh racing
+     * a sign-out can never resurrect the signed-out session.
+     */
+    sessionMustExistSince?: number;
+  }
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
   const { debug } = configure();
 
@@ -186,8 +235,68 @@ async function processTokensInternal(
     }
   }
 
+  const {
+    clientId: clientIdForGuard,
+    storage: storageForGuard,
+  } = configure();
+  const tombstoneKey = normalizedTokens.username
+    ? signedOutTombstoneKey(clientIdForGuard, normalizedTokens.username)
+    : undefined;
+  const discardRefreshedTokens = () =>
+    new Error(
+      "Session was signed out during the token refresh; refreshed tokens discarded"
+    );
+  if (opts?.sessionMustExistSince !== undefined && tombstoneKey) {
+    // Authoritative pre-write check, kept immediately before the write so
+    // the remaining race window is the write itself (covered by the
+    // post-write compensation below)
+    const tombstone = Number(
+      (await storageForGuard.getItem(tombstoneKey)) ?? 0
+    );
+    const lastAuthUser = await storageForGuard.getItem(
+      `CognitoIdentityServiceProvider.${clientIdForGuard}.LastAuthUser`
+    );
+    const storedRefreshToken = lastAuthUser
+      ? await storageForGuard.getItem(
+          `CognitoIdentityServiceProvider.${clientIdForGuard}.${lastAuthUser}.refreshToken`
+        )
+      : null;
+    if (
+      tombstone >= opts.sessionMustExistSince ||
+      lastAuthUser !== normalizedTokens.username ||
+      !storedRefreshToken
+    ) {
+      debug?.(
+        "🔄 [Process Tokens] Session was signed out before the refreshed tokens could be stored; discarding"
+      );
+      throw discardRefreshedTokens();
+    }
+  }
+
   // Store the already normalized tokens
   await storeTokens(normalizedTokens);
+
+  if (opts?.sessionMustExistSince !== undefined && tombstoneKey) {
+    // Compensating post-write check: a sign-out that began inside the tiny
+    // pre-check→write window left its tombstone (signOut writes it BEFORE
+    // removing keys). Undo our write so the sign-out stays won.
+    const tombstone = Number(
+      (await storageForGuard.getItem(tombstoneKey)) ?? 0
+    );
+    if (tombstone >= opts.sessionMustExistSince) {
+      debug?.(
+        "🔄 [Process Tokens] Sign-out raced the token write; removing the just-written session"
+      );
+      if (normalizedTokens.username) {
+        await removeSessionKeysFromStorage(normalizedTokens.username);
+      }
+      throw discardRefreshedTokens();
+    }
+  } else if (tombstoneKey) {
+    // Fresh sign-in: clear any stale sign-out tombstone so it cannot
+    // interfere with this session's future refreshes
+    await storageForGuard.removeItem(tombstoneKey);
+  }
   debug?.("🔄 [Process Tokens] After storeTokens, tokens:", {
     hasAccessToken: !!normalizedTokens.accessToken,
     hasIdToken: !!normalizedTokens.idToken,
@@ -317,7 +426,8 @@ async function processTokensInternal(
  */
 export async function processTokens(
   tokens: TokensFromSignIn | TokensFromRefresh,
-  abort?: AbortSignal
+  abort?: AbortSignal,
+  opts?: Parameters<typeof processTokensInternal>[2]
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
   const { clientId, debug } = configure();
 
@@ -347,7 +457,7 @@ export async function processTokens(
   try {
     return await withStorageLock(
       lockKey,
-      async () => processTokensInternal(tokens, abort),
+      async () => processTokensInternal(tokens, abort, opts),
       undefined, // use default timeout
       abort
     );
@@ -487,32 +597,18 @@ export const signOut = (props?: {
           }
         };
 
+        // Tombstone FIRST, before revocation and removals: an in-flight
+        // refresh re-checks it immediately before AND after writing tokens
+        // back, so whichever way the race interleaves, the sign-out wins
+        await storage.setItem(
+          signedOutTombstoneKey(clientId, username),
+          Date.now().toString()
+        );
+
         if (props?.revokeTokensBeforeLocalRemoval) {
           await revokeRefreshTokenOnce();
         }
-        await Promise.all([
-          storage.removeItem(`${amplifyKeyPrefix}.${username}.idToken`),
-          storage.removeItem(`${amplifyKeyPrefix}.${username}.accessToken`),
-          storage.removeItem(`${amplifyKeyPrefix}.${username}.refreshToken`),
-          storage.removeItem(
-            `${amplifyKeyPrefix}.${username}.tokenScopesString`
-          ),
-          storage.removeItem(`${amplifyKeyPrefix}.${username}.userData`),
-          storage.removeItem(`${amplifyKeyPrefix}.LastAuthUser`),
-          storage.removeItem(`${amplifyKeyPrefix}.${username}.clockDriftMs`),
-          storage.removeItem(`${customKeyPrefix}.${username}.authMethod`),
-          storage.removeItem(
-            `${customKeyPrefix}.${username}.lastRefreshAttempt`
-          ),
-          storage.removeItem(
-            `${customKeyPrefix}.${username}.lastRefreshCompleted`
-          ),
-          // Legacy keys no longer written by current versions, removed for
-          // migration hygiene
-          storage.removeItem(`${customKeyPrefix}.${username}.expireAt`),
-          storage.removeItem(`${customKeyPrefix}.${username}.refreshingTokens`),
-          // Note: We do NOT remove deviceKey - it should persist between sessions
-        ]);
+        await removeSessionKeysFromStorage(username);
         props?.tokensRemovedLocallyCb?.();
 
         await revokeRefreshTokenOnce();

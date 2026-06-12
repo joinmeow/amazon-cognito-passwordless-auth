@@ -128,7 +128,12 @@ describe("SignOut Lock", () => {
     const leftoverUserKeys = [...backing.keys()].filter((key) =>
       key.startsWith(`${customKeyPrefix}.testuser.`)
     );
-    expect(leftoverUserKeys).toEqual([]);
+    // The sign-out tombstone is the ONE deliberate survivor: an in-flight
+    // refresh checks it before/after writing tokens back, so a sign-out
+    // racing a refresh stays signed out. A fresh sign-in clears it.
+    expect(leftoverUserKeys).toEqual([
+      `${customKeyPrefix}.testuser.signedOutAt`,
+    ]);
     const leftoverAmplifyKeys = [...backing.keys()].filter((key) =>
       key.startsWith(amplifyKeyPrefix)
     );

@@ -1,7 +1,7 @@
 import { configure } from "../client/config.js";
 import { refreshTokens } from "../client/refresh.js";
 import { storeTokens } from "../client/storage.js";
-import { signOut } from "../client/common.js";
+import { signOut, processTokens } from "../client/common.js";
 
 // Helper to create JWT tokens
 const createJWT = (claims: Record<string, unknown>) => {
@@ -173,4 +173,115 @@ test("a refresh completing after an unlocked sign-out must not resurrect the ses
   expect(
     storage.getItem(`${amplifyKeyPrefix}.${username}.accessToken`)
   ).toBeNull();
+});
+
+describe("sign-out tombstone protocol", () => {
+  const username = "testuser";
+  const TOMBSTONE_KEY = `Passwordless.testClient.${username}.signedOutAt`;
+  const AMPLIFY_PREFIX = `CognitoIdentityServiceProvider.testClient`;
+  const now = () => Date.now();
+
+  const sessionTokens = (refreshToken: string) => ({
+    accessToken: createJWT({
+      sub: "user123",
+      username,
+      exp: Math.floor((now() + 3600_000) / 1000),
+      iat: Math.floor(now() / 1000),
+    }),
+    idToken: createJWT({
+      sub: "user123",
+      "cognito:username": username,
+      exp: Math.floor((now() + 3600_000) / 1000),
+      iat: Math.floor(now() / 1000),
+    }),
+    refreshToken,
+    username,
+    authMethod: "SRP" as const,
+    expireAt: new Date(now() + 3600_000),
+  });
+
+  test("a tombstone planted before the write discards the refreshed tokens", async () => {
+    const storage = createMemoryStorage();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+    });
+    await storeTokens(sessionTokens("original-refresh-token"));
+
+    const since = now();
+    storage.setItem(TOMBSTONE_KEY, String(now()));
+
+    await expect(
+      processTokens(sessionTokens("rotated-refresh-token"), undefined, {
+        sessionMustExistSince: since,
+      })
+    ).rejects.toThrow("signed out during");
+
+    // The write never happened
+    expect(storage.getItem(`${AMPLIFY_PREFIX}.${username}.refreshToken`)).toBe(
+      "original-refresh-token"
+    );
+  });
+
+  test("a sign-out landing inside the check-to-write window is undone by the post-write compensation", async () => {
+    const storage = createMemoryStorage();
+    // Simulate signOut's FIRST action (the tombstone write) landing exactly
+    // while storeTokens is writing the rotated session: the moment the
+    // rotated refresh token hits storage, the tombstone appears
+    const baseSetItem = storage.setItem.bind(storage);
+    storage.setItem = (key: string, value: string) => {
+      baseSetItem(key, value);
+      if (
+        key === `${AMPLIFY_PREFIX}.${username}.refreshToken` &&
+        value === "rotated-refresh-token"
+      ) {
+        baseSetItem(TOMBSTONE_KEY, String(now()));
+      }
+    };
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+    });
+    await storeTokens(sessionTokens("original-refresh-token"));
+
+    const since = now();
+    await expect(
+      processTokens(sessionTokens("rotated-refresh-token"), undefined, {
+        sessionMustExistSince: since,
+      })
+    ).rejects.toThrow("signed out during");
+
+    // The just-written session was compensatingly removed: the sign-out won
+    expect(
+      storage.getItem(`${AMPLIFY_PREFIX}.${username}.refreshToken`)
+    ).toBeNull();
+    expect(
+      storage.getItem(`${AMPLIFY_PREFIX}.${username}.accessToken`)
+    ).toBeNull();
+    expect(storage.getItem(`${AMPLIFY_PREFIX}.LastAuthUser`)).toBeNull();
+    // The tombstone survives the compensation
+    expect(storage.getItem(TOMBSTONE_KEY)).toBeTruthy();
+  });
+
+  test("a fresh sign-in clears a stale tombstone", async () => {
+    const storage = createMemoryStorage();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+    });
+    storage.setItem(TOMBSTONE_KEY, String(now() - 60_000));
+
+    const processed = await processTokens(
+      sessionTokens("fresh-signin-refresh-token")
+    );
+
+    expect(processed.refreshToken).toBe("fresh-signin-refresh-token");
+    expect(storage.getItem(TOMBSTONE_KEY)).toBeNull();
+    expect(storage.getItem(`${AMPLIFY_PREFIX}.${username}.refreshToken`)).toBe(
+      "fresh-signin-refresh-token"
+    );
+  });
 });

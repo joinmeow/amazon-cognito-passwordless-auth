@@ -611,6 +611,9 @@ export async function refreshTokens({
   const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
 
   const doRefresh = async (): Promise<TokensFromRefresh> => {
+    // A sign-out tombstone newer than this moment means the user signed
+    // out while this refresh was in flight; the result must be discarded
+    const refreshStart = Date.now();
     // Get state for this user
     const state = getRefreshState(userIdentifier);
 
@@ -814,10 +817,12 @@ export async function refreshTokens({
 
       let processedTokens: TokensFromRefresh;
       try {
-        processedTokens = (await processTokens(
-          tokensFromRefresh,
-          abort
-        )) as TokensFromRefresh;
+        processedTokens = (await processTokens(tokensFromRefresh, abort, {
+          // The authoritative race guard: processTokens re-validates the
+          // session (and the sign-out tombstone) immediately before AND
+          // after the write, under the auth lock
+          sessionMustExistSince: refreshStart,
+        })) as TokensFromRefresh;
         state.lastRefreshTime = Date.now();
 
         // Call tokensCb first - if it fails, we don't want to mark as completed
