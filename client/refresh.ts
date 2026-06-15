@@ -325,7 +325,7 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        await refreshTokens({
+        await performRefresh({
           abort,
           tokensCb,
           isRefreshingCb,
@@ -584,17 +584,8 @@ async function refreshTokensViaOAuth({
   }
 }
 
-/**
- * Refresh tokens using the refresh token
- */
-export async function refreshTokens({
-  abort,
-  tokensCb,
-  isRefreshingCb,
-  tokens,
-  force = false,
-  skipLock = false,
-}: {
+/** Public options for {@link refreshTokens}. */
+export interface RefreshTokensOptions {
   abort?: AbortSignal;
   tokensCb?: (res: TokensFromRefresh) => void | Promise<void>;
   isRefreshingCb?: (isRefreshing: boolean) => unknown;
@@ -607,12 +598,35 @@ export async function refreshTokens({
    * sign-out and any in-flight scheduled refresh.
    */
   force?: boolean;
-  /**
-   * INTERNAL: the caller already holds the per-user refresh lock, so don't
-   * re-acquire it (storage locks are not reentrant — re-acquiring the same
-   * key from the same tab would self-deadlock until the wait times out).
-   * Only the in-lock immediate-refresh path sets this.
-   */
+}
+
+/**
+ * Refresh tokens using the refresh token. Always goes through the per-user
+ * refresh lock, so it serializes with sign-out and any in-flight refresh.
+ */
+export async function refreshTokens(
+  args: RefreshTokensOptions = {}
+): Promise<TokensFromRefresh> {
+  // skipLock is INTERNAL and deliberately not part of the public options:
+  // exposing it would let a consumer bypass the per-user lock and recreate
+  // the sign-out/refresh resurrection race this path guards against.
+  return performRefresh(args);
+}
+
+/**
+ * Internal refresh implementation. `skipLock` is private to this module: the
+ * in-lock immediate-refresh path already holds the per-user refresh lock on
+ * the same key, so re-acquiring would self-deadlock (storage locks are not
+ * reentrant). No other caller may bypass the lock.
+ */
+async function performRefresh({
+  abort,
+  tokensCb,
+  isRefreshingCb,
+  tokens,
+  force = false,
+  skipLock = false,
+}: RefreshTokensOptions & {
   skipLock?: boolean;
 } = {}): Promise<TokensFromRefresh> {
   const { clientId } = configure();
@@ -984,7 +998,7 @@ export async function refreshTokens({
  * Force an immediate token refresh
  */
 export async function forceRefreshTokens(
-  args?: Omit<Parameters<typeof refreshTokens>[0], "force" | "skipLock">
+  args?: Omit<RefreshTokensOptions, "force">
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
@@ -1009,7 +1023,12 @@ export async function forceRefreshTokens(
     force: true,
   });
 
-  void scheduleRefresh({ ...args });
+  // scheduleRefresh's tokensCb is nullable (scheduling can yield null tokens)
+  // while the forced-refresh tokensCb is not; the spread is behaviourally the
+  // same as before, the cast just bridges that variance difference
+  void scheduleRefresh(
+    { ...args } as Parameters<typeof scheduleRefresh>[0]
+  );
 
   return refreshed;
 }
