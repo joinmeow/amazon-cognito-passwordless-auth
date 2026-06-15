@@ -770,14 +770,22 @@ function _usePasswordless() {
       // Fire for a successful redirect (code / implicit access_token) AND for
       // an error redirect (e.g. the user denied consent), which carries
       // neither but does carry `error` — in the query for the code flow, the
-      // fragment for the implicit flow. Without the error case,
-      // handleCognitoOAuthCallback (which surfaces provider errors) was never
-      // invoked, so a denied sign-in left the page silently stuck.
+      // fragment for the implicit flow (RFC 6749 §4.1.2.1 / §4.2.2.1). Without
+      // the error case, handleCognitoOAuthCallback (which surfaces provider
+      // errors) was never invoked, so a denied sign-in left the page stuck.
+      //
+      // The fragment-error case is gated to the implicit flow: code flow never
+      // delivers errors in the fragment, so a stray `#error=…` on the redirect
+      // path is not our callback. Admitting it would drive the handler to
+      // validate state first, find none (code-flow state lives in the query),
+      // and clear the shared OAuth state (PKCE / state / in-progress) — which
+      // can abort a real code-flow redirect still in flight in another tab.
+      const responseType = configure().hostedUi?.responseType ?? "code";
       if (
         urlParams.has("code") ||
         hashParams.has("access_token") ||
         urlParams.has("error") ||
-        hashParams.has("error")
+        (responseType === "token" && hashParams.has("error"))
       ) {
         // Prevent multiple simultaneous OAuth callback processing
         if (oauthProcessingRef.current) {
