@@ -140,6 +140,10 @@ export interface Config {
      * pool). Make sure the value is a region that actually serves
      * `amazon-cognito-assets.<region>.amazoncognito.com`, otherwise the
      * script 404s and security data is silently omitted.
+     *
+     * Must be a valid AWS region identifier (e.g. `us-east-1`). It is
+     * interpolated into the script host, so a malformed value is rejected
+     * to prevent loading the script from an unexpected host.
      */
     region?: string;
   };

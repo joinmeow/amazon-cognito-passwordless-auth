@@ -204,6 +204,24 @@ describe("CognitoSecurityProvider", () => {
       expect(scripts[0].src).toContain("amazon-cognito-assets.ap-southeast-1");
     });
 
+    it("rejects a malformed explicit region to prevent script-host injection", async () => {
+      // An explicit region is interpolated into the script host. A value
+      // like "us-east-1.evil.com/x" (e.g. from deployment/tenant data) must
+      // not be trusted just because it bypasses the allowlist — it would
+      // load the script from amazon-cognito-assets.us-east-1.evil.com.
+      const provider = loadProvider({
+        clientId: "test-client-id",
+        userPoolId: "us-east-1_abc123",
+        cognitoIdpEndpoint: "us-east-1",
+        advancedSecurity: { region: "us-east-1.evil.com/x" },
+      });
+
+      const data = await provider.getSecurityData("alice");
+
+      expect(data).toBeUndefined();
+      expect(injectedScripts()).toHaveLength(0);
+    });
+
     it("re-attempts injection after a reconfigure supplies a usable region", async () => {
       // A pool in an unsupported region with no override is skipped, but not
       // permanently latched: a later configure() that adds a usable

@@ -46,6 +46,14 @@ const SUPPORTED_SCRIPT_REGIONS = [
   "eu-central-1",
 ];
 
+// A well-formed AWS region identifier, covering partitioned/multi-segment
+// regions (us-gov-west-1, eusc-de-east-1). Two alternatives instead of a
+// nested quantifier to satisfy the security/detect-unsafe-regex lint rule.
+// Crucially this contains no "." or "/", so it cannot express a host other
+// than amazon-cognito-assets.<region>.amazoncognito.com when interpolated
+// into the script URL — a value like "us-east-1.evil.com/x" is rejected.
+const AWS_REGION_FORMAT = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
+
 /**
  * Manages the Amazon Cognito Advanced Security data collection
  */
@@ -122,16 +130,34 @@ export class CognitoSecurityProvider {
     // Prefer the explicitly configured script region (e.g. for custom proxy
     // endpoints), and only fall back to parsing the Cognito IDP endpoint.
     const explicitRegion = advancedSecurity?.region;
+
+    // An explicit region is interpolated into the script host. It must be a
+    // well-formed region token, NOT just any non-empty string: otherwise a
+    // value sourced from deployment/tenant data like "us-east-1.evil.com/x"
+    // would load the script from an attacker-controlled host. Reject a
+    // malformed explicit region outright rather than fall through to the
+    // endpoint-derived region (which would mask the misconfiguration).
+    if (explicitRegion && !AWS_REGION_FORMAT.test(explicitRegion)) {
+      const skipKey = `invalid:${explicitRegion}`;
+      if (this.skippedForRegion !== skipKey) {
+        this.skippedForRegion = skipKey;
+        debug?.(
+          `CognitoSecurityProvider: advancedSecurity.region "${explicitRegion}" is not a valid AWS region identifier, skipping script injection`
+        );
+      }
+      return;
+    }
+
     const region =
       explicitRegion ?? this.resolveScriptRegion(cognitoIdpEndpoint);
 
-    // An explicitly configured advancedSecurity.region is an operator opt-in
-    // and is trusted even if it is not in the (hardcoded, necessarily
-    // incomplete) allowlist — e.g. pointing a pool whose own region does not
-    // host the script at a region that does (us-east-1's script is
-    // region-generic). The allowlist only filters the AUTO-RESOLVED region,
-    // to avoid a guaranteed 404 from loading the script for a region known
-    // not to host it.
+    // A well-formed, explicitly configured advancedSecurity.region is an
+    // operator opt-in and is trusted even if it is not in the (hardcoded,
+    // necessarily incomplete) allowlist — e.g. pointing a pool whose own
+    // region does not host the script at a region that does (us-east-1's
+    // script is region-generic). The allowlist only filters the
+    // AUTO-RESOLVED region, to avoid a guaranteed 404 from loading the
+    // script for a region known not to host it.
     const usable =
       !!region &&
       (!!explicitRegion || SUPPORTED_SCRIPT_REGIONS.includes(region));
