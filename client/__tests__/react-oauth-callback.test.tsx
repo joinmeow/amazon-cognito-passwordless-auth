@@ -43,11 +43,7 @@ const mockOnTokensStored = onTokensStored as jest.MockedFunction<
 // jsdom's location is not configurable, but history.replaceState updates
 // location.search / location.hash / location.href in place.
 const setLocation = (search: string, hash = "") => {
-  globalThis.history.replaceState(
-    {},
-    "",
-    `/signin-redirect${search}${hash}`
-  );
+  globalThis.history.replaceState({}, "", `/signin-redirect${search}${hash}`);
 };
 
 const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -141,5 +137,54 @@ describe("React OAuth callback handling", () => {
     });
 
     expect(mockHandleCallback).not.toHaveBeenCalled();
+  });
+
+  it("ignores a fragment-only error in code flow (does not invoke the handler)", async () => {
+    // Code flow delivers errors in the query, never the fragment. A stray
+    // `#error=…` on the redirect path is not our callback — admitting it would
+    // drive the handler to validate state first, find none (code-flow state is
+    // in the query), and clear the shared OAuth state (PKCE / state /
+    // in-progress), which can abort a real code-flow redirect in another tab.
+    setLocation(
+      "",
+      "#error=access_denied&error_description=User+denied&state=s"
+    );
+    mockHandleCallback.mockResolvedValue(null);
+
+    renderHook(() => usePasswordless(), { wrapper });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    expect(mockHandleCallback).not.toHaveBeenCalled();
+  });
+
+  it("invokes the handler and surfaces a fragment error in implicit flow", async () => {
+    // Implicit flow (responseType "token") legitimately delivers errors in the
+    // fragment, so the gate must admit them and the handler must surface them.
+    mockConfigure.mockReturnValue({
+      clientId: "test-client-id",
+      debug: jest.fn(),
+      hostedUi: { responseType: "token" },
+      storage: {
+        getItem: jest.fn(),
+        setItem: jest.fn(),
+        removeItem: jest.fn(),
+      },
+    } as unknown as ConfigWithDefaults);
+    setLocation(
+      "",
+      "#error=access_denied&error_description=User+denied&state=s"
+    );
+    mockHandleCallback.mockRejectedValue(new Error("User denied"));
+
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await waitFor(() => {
+      expect(mockHandleCallback).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(result.current.lastError?.message).toBe("User denied");
+    });
   });
 });
