@@ -26,9 +26,20 @@ export async function throwIfNot2xx(res: MinimalResponse) {
   const detail = (await res.json()) as { __type: string; message: string };
   let message = detail.message;
   if (detail.__type === "UserLambdaValidationException") {
-    const match = detail.message.match(/^.+failed with error (.+)$/);
-    if (match) {
-      message = match[1];
+    // Replicate /^.+failed with error (.+)$/ without the backtracking regex,
+    // which is polynomial on crafted messages (CodeQL js/polynomial-redos).
+    // The greedy `^.+` makes the regex resolve to the RIGHTMOST "failed with
+    // error " that still has a non-empty suffix (it backtracks past a final
+    // marker that has no text after it), with a non-empty prefix.
+    const marker = "failed with error ";
+    let pos = detail.message.lastIndexOf(marker);
+    while (pos > 0) {
+      if (pos + marker.length < detail.message.length) {
+        message = detail.message.slice(pos + marker.length);
+        break;
+      }
+      // This occurrence has no suffix; look for an earlier one.
+      pos = detail.message.lastIndexOf(marker, pos - 1);
     }
   }
 

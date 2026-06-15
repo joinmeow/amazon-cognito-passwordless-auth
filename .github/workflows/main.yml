@@ -6,6 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Minimal token permissions: the test job only reads the repo and uploads
+# coverage via a dedicated CODECOV_TOKEN secret (not GITHUB_TOKEN).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
