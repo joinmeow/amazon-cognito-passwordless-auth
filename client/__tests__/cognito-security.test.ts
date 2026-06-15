@@ -185,18 +185,81 @@ describe("CognitoSecurityProvider", () => {
       );
     });
 
-    it("does not inject when the configured advancedSecurity.region is not where the script is hosted", async () => {
+    it("trusts an explicit advancedSecurity.region outside the allowlist (operator opt-in)", async () => {
+      // The allowlist is a hardcoded, necessarily-incomplete list. An
+      // explicitly configured region is an opt-in and must be honoured even
+      // if it is not in the allowlist (the operator may know the region
+      // hosts the script, or be using a new region we haven't listed).
       const provider = loadProvider({
         clientId: "test-client-id",
-        userPoolId: "us-east-1_abc123",
-        cognitoIdpEndpoint: "https://auth-proxy.example.com",
+        userPoolId: "ap-southeast-1_abc123",
+        cognitoIdpEndpoint: "ap-southeast-1",
         advancedSecurity: { region: "ap-southeast-1" },
       });
 
-      const data = await provider.getSecurityData("alice");
+      await provider.getSecurityData("alice");
 
-      expect(data).toBeUndefined();
+      const scripts = injectedScripts();
+      expect(scripts).toHaveLength(1);
+      expect(scripts[0].src).toContain("amazon-cognito-assets.ap-southeast-1");
+    });
+
+    it("re-attempts injection after a reconfigure supplies a usable region", async () => {
+      // A pool in an unsupported region with no override is skipped, but not
+      // permanently latched: a later configure() that adds a usable
+      // advancedSecurity.region must re-attempt injection.
+      let provider: CognitoSecurityProvider | undefined;
+      let cfg: typeof configure | undefined;
+      jest.isolateModules(() => {
+        /* eslint-disable @typescript-eslint/no-var-requires, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
+        const configModule = require("../config.js");
+        const securityModule = require("../cognito-security.js");
+        cfg = configModule.configure;
+        configModule.configure({
+          clientId: "test-client-id",
+          userPoolId: "ap-southeast-1_abc123",
+          cognitoIdpEndpoint: "ap-southeast-1",
+        });
+        provider = securityModule.CognitoSecurityProvider.getInstance();
+        /* eslint-enable @typescript-eslint/no-var-requires, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
+      });
+      if (!provider || !cfg) throw new Error("failed to load provider");
+
+      // First call: unsupported region, nothing injected
+      await provider.getSecurityData("alice");
       expect(injectedScripts()).toHaveLength(0);
+
+      // Operator reconfigures with a usable region override
+      cfg({
+        clientId: "test-client-id",
+        userPoolId: "ap-southeast-1_abc123",
+        cognitoIdpEndpoint: "ap-southeast-1",
+        advancedSecurity: { region: "us-east-1" },
+      });
+
+      // Second call now injects (the skip was not permanently latched)
+      await provider.getSecurityData("alice");
+      const scripts = injectedScripts();
+      expect(scripts).toHaveLength(1);
+      expect(scripts[0].src).toContain("amazon-cognito-assets.us-east-1");
+    });
+
+    it("lets an unsupported-region pool opt in to the region-generic us-east-1 script", async () => {
+      // The headline use case the override exists for: a pool in a region
+      // that does not host the script points at us-east-1's region-generic
+      // script instead of silently sending no security data.
+      const provider = loadProvider({
+        clientId: "test-client-id",
+        userPoolId: "ap-southeast-1_abc123",
+        cognitoIdpEndpoint: "ap-southeast-1",
+        advancedSecurity: { region: "us-east-1" },
+      });
+
+      await provider.getSecurityData("alice");
+
+      const scripts = injectedScripts();
+      expect(scripts).toHaveLength(1);
+      expect(scripts[0].src).toContain("amazon-cognito-assets.us-east-1");
     });
   });
 

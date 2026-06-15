@@ -52,6 +52,11 @@ const SUPPORTED_SCRIPT_REGIONS = [
 export class CognitoSecurityProvider {
   private static instance: CognitoSecurityProvider;
   private scriptInjectionAttempted = false;
+  // The region we last declined to inject for (unsupported / undetermined).
+  // Tracked so a later configure() that supplies a usable region re-attempts
+  // injection instead of being permanently latched, while repeated auth
+  // calls for the same skipped region don't re-log.
+  private skippedForRegion: string | undefined;
 
   // Private constructor for singleton
   private constructor() {}
@@ -115,19 +120,39 @@ export class CognitoSecurityProvider {
     }
 
     // Prefer the explicitly configured script region (e.g. for custom proxy
-    // endpoints), and only fall back to parsing the Cognito IDP endpoint
+    // endpoints), and only fall back to parsing the Cognito IDP endpoint.
+    const explicitRegion = advancedSecurity?.region;
     const region =
-      advancedSecurity?.region ?? this.resolveScriptRegion(cognitoIdpEndpoint);
-    if (!region || !SUPPORTED_SCRIPT_REGIONS.includes(region)) {
-      // Final for this page load: don't reattempt on later calls
-      this.scriptInjectionAttempted = true;
-      debug?.(
-        region
-          ? `CognitoSecurityProvider: Security script not hosted in region ${region}, skipping script injection`
-          : `CognitoSecurityProvider: Cannot determine security script region for endpoint ${cognitoIdpEndpoint}, skipping script injection`
-      );
+      explicitRegion ?? this.resolveScriptRegion(cognitoIdpEndpoint);
+
+    // An explicitly configured advancedSecurity.region is an operator opt-in
+    // and is trusted even if it is not in the (hardcoded, necessarily
+    // incomplete) allowlist — e.g. pointing a pool whose own region does not
+    // host the script at a region that does (us-east-1's script is
+    // region-generic). The allowlist only filters the AUTO-RESOLVED region,
+    // to avoid a guaranteed 404 from loading the script for a region known
+    // not to host it.
+    const usable =
+      !!region &&
+      (!!explicitRegion || SUPPORTED_SCRIPT_REGIONS.includes(region));
+
+    if (!usable) {
+      // Do NOT permanently latch scriptInjectionAttempted here: a later
+      // configure() that supplies a usable advancedSecurity.region must be
+      // able to re-attempt injection. Dedupe the log per distinct skipped
+      // region so repeated auth calls don't spam it.
+      const skipKey = region ?? "<undetermined>";
+      if (this.skippedForRegion !== skipKey) {
+        this.skippedForRegion = skipKey;
+        debug?.(
+          region
+            ? `CognitoSecurityProvider: Security script not hosted in region ${region} and no advancedSecurity.region override set, skipping script injection`
+            : `CognitoSecurityProvider: Cannot determine security script region for endpoint ${cognitoIdpEndpoint} (set advancedSecurity.region to override), skipping script injection`
+        );
+      }
       return;
     }
+    this.skippedForRegion = undefined;
 
     const doc = getDocument();
     if (!doc) {
