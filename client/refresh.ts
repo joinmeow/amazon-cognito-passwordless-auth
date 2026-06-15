@@ -331,6 +331,9 @@ async function scheduleRefreshUnlocked({
           isRefreshingCb,
           tokens,
           force: true,
+          // This path runs inside scheduleRefresh's per-user refresh lock
+          // (same lock key), so re-acquiring would self-deadlock
+          skipLock: true,
         });
 
         // Mark as completed
@@ -590,12 +593,27 @@ export async function refreshTokens({
   isRefreshingCb,
   tokens,
   force = false,
+  skipLock = false,
 }: {
   abort?: AbortSignal;
   tokensCb?: (res: TokensFromRefresh) => void | Promise<void>;
   isRefreshingCb?: (isRefreshing: boolean) => unknown;
   tokens?: TokenPayload;
+  /**
+   * Skip the cross-tab `shouldAttemptRefresh()` coordination/dedup check and
+   * the in-process `isRefreshing` guard: the caller wants a refresh NOW
+   * (e.g. after a 401), regardless of the 5s dedup window. Does NOT bypass
+   * the per-user refresh lock — a forced refresh still serializes with
+   * sign-out and any in-flight scheduled refresh.
+   */
   force?: boolean;
+  /**
+   * INTERNAL: the caller already holds the per-user refresh lock, so don't
+   * re-acquire it (storage locks are not reentrant — re-acquiring the same
+   * key from the same tab would self-deadlock until the wait times out).
+   * Only the in-lock immediate-refresh path sets this.
+   */
+  skipLock?: boolean;
 } = {}): Promise<TokensFromRefresh> {
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
@@ -851,8 +869,11 @@ export async function refreshTokens({
   };
 
   const { debug } = configure();
-  if (force) {
-    debug?.("refreshTokens: force=true, bypassing lock", lockKey);
+  if (skipLock) {
+    debug?.(
+      "refreshTokens: skipLock=true, caller already holds the lock",
+      lockKey
+    );
     return doRefresh();
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
@@ -963,7 +984,7 @@ export async function refreshTokens({
  * Force an immediate token refresh
  */
 export async function forceRefreshTokens(
-  args?: Omit<Parameters<typeof refreshTokens>[0], "force">
+  args?: Omit<Parameters<typeof refreshTokens>[0], "force" | "skipLock">
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
@@ -978,6 +999,11 @@ export async function forceRefreshTokens(
     state.refreshTimer = undefined;
   }
 
+  // force: true skips the dedup/coordination check, but the refresh still
+  // goes through the per-user lock (no skipLock) so it serializes with
+  // sign-out and any in-flight scheduled refresh — a forced refresh that
+  // wrote tokens back without the lock could resurrect a session a
+  // concurrent sign-out just removed
   const refreshed = await refreshTokens({
     ...(args ?? {}),
     force: true,
