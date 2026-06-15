@@ -704,6 +704,18 @@ let pendingConditionalGet:
   | undefined = undefined;
 
 /**
+ * Marks a conditional (autofill) sign-in flow as active for its ENTIRE
+ * lifetime — including the gaps between renewal iterations, when the previous
+ * navigator.credentials.get() has been aborted and the next one has not yet
+ * been issued (e.g. while initiating a fresh Cognito challenge). A modal
+ * takeover sets `superseded` here even when no get() is pending, so the
+ * renewal loop stops re-arming instead of running invisibly behind the modal
+ * sign-in forever. `pendingConditionalGet` only covers the narrower window
+ * while a get() is actually pending.
+ */
+let activeConditionalFlow: { superseded: boolean } | undefined = undefined;
+
+/**
  * Serializes the issuance of navigator.credentials.get() requests.
  *
  * Concurrent fido2getCredential calls must not issue overlapping
@@ -848,6 +860,16 @@ export async function fido2getCredential({
   const releaseLock = await acquireCredentialsGetLock();
   let credential;
   try {
+    // A non-conditional (modal / immediate / default) request taking the lock
+    // is a takeover of any active conditional autofill flow: mark that flow
+    // superseded so its renewal loop stops re-arming — even if this lands in
+    // the renewal gap where no get() is pending (so pendingConditionalGet is
+    // momentarily undefined). The flow's own conditional renewal re-arm is
+    // mediation === "conditional" and must NOT self-supersede here.
+    if (mediation !== "conditional" && activeConditionalFlow) {
+      activeConditionalFlow.superseded = true;
+    }
+
     // If a conditional (autofill) request is still pending, abort it first so
     // the browser accepts this new request instead of rejecting it
     if (pendingConditionalGet) {
@@ -1207,59 +1229,132 @@ export async function prepareFido2SignIn({
       // request and restarting it with the fresh challenge. Pending
       // conditional requests show no UI, so renewal is invisible to the user.
       const RENEW_SESSION = Symbol("renew-session");
-      for (;;) {
-        const challenge = await initiateFido2Challenge();
-        const renewalAbort = new AbortController();
-        const forwardAbort = () => renewalAbort.abort();
-        if (signal?.aborted) {
-          renewalAbort.abort();
-        } else {
-          signal?.addEventListener("abort", forwardAbort, { once: true });
-        }
-        let renewalTimer: ReturnType<typeof setTimeout> | undefined;
-        const credentialPromise = getCredentialForChallenge(
-          challenge.fido2options,
-          renewalAbort.signal
-        );
-        try {
-          const raceOutcome = await Promise.race([
-            credentialPromise,
-            new Promise<typeof RENEW_SESSION>((resolve) => {
-              renewalTimer = setTimeout(
-                () => resolve(RENEW_SESSION),
-                COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
-              );
-            }),
-          ]);
-          if (raceOutcome !== RENEW_SESSION) {
-            assertion = raceOutcome;
-            session = challenge.session;
-            break;
-          }
-          debug?.(
-            "🔄 Cognito auth session nearing expiry while conditional request pending - renewing challenge"
+      const SETTLE_TIMEOUT = Symbol("settle-timeout");
+
+      // Mark this conditional flow active for its whole lifetime so a modal
+      // takeover can stop it even during the renewal gap (no get() pending).
+      const flow = { superseded: false };
+      const previousFlow = activeConditionalFlow;
+      activeConditionalFlow = flow;
+
+      // Throw the abort that ends the flow: superseded by a takeover, or a
+      // plain cancellation by the caller's own signal.
+      const abortFlow = (): never => {
+        if (flow.superseded) {
+          throw new Fido2AbortError(
+            "WebAuthn operation was aborted: superseded by a newer credential request",
+            "Passkey verification was cancelled",
+            { superseded: true }
           );
-          renewalAbort.abort();
-          try {
-            // The user may have picked a credential just as the renewal timer
-            // fired - if so, the current session is still valid, use it
-            assertion = await credentialPromise;
-            session = challenge.session;
-            break;
-          } catch (err) {
-            if (!isFido2AbortError(err) || signal?.aborted || err.superseded) {
-              // Not our renewal abort: rethrow. In particular, a superseded
-              // abort means a newer credential request (e.g. a modal passkey
-              // sign-in) took over the pending conditional request — the
-              // autofill flow must end here, not restart with a fresh
-              // challenge behind the newer request's back
-              throw err;
-            }
-            // Aborted by us for renewal - loop around for a fresh challenge
+        }
+        throw new Fido2AbortError();
+      };
+
+      try {
+        for (;;) {
+          // A modal takeover may have superseded this flow during the previous
+          // iteration's renewal gap, including while awaiting initiate below.
+          if (flow.superseded || signal?.aborted) abortFlow();
+
+          const challenge = await initiateFido2Challenge();
+
+          // Re-check: a takeover could have landed during the (awaited)
+          // initiate call — exactly the window pendingConditionalGet misses.
+          if (flow.superseded || signal?.aborted) abortFlow();
+
+          const renewalAbort = new AbortController();
+          const forwardAbort = () => renewalAbort.abort();
+          if (signal?.aborted) {
+            renewalAbort.abort();
+          } else {
+            signal?.addEventListener("abort", forwardAbort, { once: true });
           }
-        } finally {
-          clearTimeout(renewalTimer);
-          signal?.removeEventListener("abort", forwardAbort);
+          let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+          const credentialPromise = getCredentialForChallenge(
+            challenge.fido2options,
+            renewalAbort.signal
+          );
+          try {
+            const raceOutcome = await Promise.race([
+              credentialPromise,
+              new Promise<typeof RENEW_SESSION>((resolve) => {
+                renewalTimer = setTimeout(
+                  () => resolve(RENEW_SESSION),
+                  COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+                );
+              }),
+            ]);
+            if (raceOutcome !== RENEW_SESSION) {
+              // A modal takeover may have set flow.superseded in the same
+              // tick the credential resolved (or for an injected getter the
+              // takeover's abort never reached it): a superseded flow must
+              // not complete with an assertion — the modal flow owns the
+              // sign-in now.
+              if (flow.superseded) abortFlow();
+              assertion = raceOutcome;
+              session = challenge.session;
+              break;
+            }
+            debug?.(
+              "🔄 Cognito auth session nearing expiry while conditional request pending - renewing challenge"
+            );
+            renewalAbort.abort();
+            // A takeover that landed during this iteration ends the flow.
+            if (flow.superseded) abortFlow();
+            let settleTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              // The user may have picked a credential just as the renewal
+              // timer fired - if so, the current session is still valid, use
+              // it. Bound the wait: a non-conforming get() may ignore the
+              // abort and never settle, and the renewal loop must not hang.
+              const settled = await Promise.race([
+                credentialPromise,
+                new Promise<typeof SETTLE_TIMEOUT>((resolve) => {
+                  settleTimer = setTimeout(
+                    () => resolve(SETTLE_TIMEOUT),
+                    SUPERSEDED_SETTLEMENT_TIMEOUT_MS
+                  );
+                }),
+              ]);
+              if (settled === SETTLE_TIMEOUT) {
+                debug?.(
+                  `⚠️ Aborted conditional get() did not settle within ${SUPERSEDED_SETTLEMENT_TIMEOUT_MS}ms during renewal - re-arming with a fresh challenge`
+                );
+                continue;
+              }
+              // As above: a takeover during the settle wait wins over a
+              // late-resolving credential.
+              if (flow.superseded) abortFlow();
+              assertion = settled;
+              session = challenge.session;
+              break;
+            } catch (err) {
+              // A takeover wins over a plain renewal abort regardless of how
+              // the per-get classifier labelled this error (the same-tick
+              // renewal-abort + supersede race can mislabel it).
+              if (flow.superseded) abortFlow();
+              if (
+                !isFido2AbortError(err) ||
+                signal?.aborted ||
+                err.superseded
+              ) {
+                // Not our renewal abort: rethrow. A superseded abort means a
+                // newer credential request took over — end here rather than
+                // restart behind it.
+                throw err;
+              }
+              // Aborted by us for renewal - loop around for a fresh challenge
+            } finally {
+              clearTimeout(settleTimer);
+            }
+          } finally {
+            clearTimeout(renewalTimer);
+            signal?.removeEventListener("abort", forwardAbort);
+          }
+        }
+      } finally {
+        if (activeConditionalFlow === flow) {
+          activeConditionalFlow = previousFlow;
         }
       }
     } else {

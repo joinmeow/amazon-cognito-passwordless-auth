@@ -765,9 +765,91 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(1);
       });
 
+      it("ends the flow when a modal takeover lands during the renewal initiate-challenge window (no get pending)", async () => {
+        // Gap the per-get supersede tracker misses: between renewal
+        // iterations, the previous get() has been aborted and the next has
+        // not been issued (e.g. while initiating a fresh challenge), so
+        // pendingConditionalGet is momentarily undefined. A modal takeover in
+        // that window must still end the conditional flow via the
+        // flow-lifetime marker, instead of the autofill re-arming forever
+        // behind the modal sign-in.
+        jest.useFakeTimers();
+        // Real navigator mock so the modal fido2getCredential can succeed
+        cleanup = setupWebAuthnMock({ credential: MOCK_ASSERTION_CREDENTIAL });
+
+        let modalCompleted = false;
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1))
+          .mockImplementationOnce(async () => {
+            // A modal passkey sign-in completes WHILE we are initiating the
+            // renewal challenge — exactly the no-get-pending window. It must
+            // supersede the active conditional flow.
+            await fido2getCredential({ challenge: TEST_CHALLENGES.basic });
+            modalCompleted = true;
+            return challengeResponse(2);
+          });
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        expect((err as Fido2AbortError).superseded).toBe(true);
+        expect(modalCompleted).toBe(true);
+        // The autofill flow did NOT re-arm behind the modal: its credential
+        // getter ran exactly once (the first, aborted iteration).
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not complete a superseded flow when the conditional credential resolves in the same tick as a takeover", async () => {
+        // Race: a modal takeover marks the flow superseded (via the lock) at
+        // the same time the conditional getter resolves with a valid
+        // credential — e.g. an injected getter the takeover's abort never
+        // reaches. The success branch must honour the superseded marker and
+        // end the flow, not complete the (superseded) conditional sign-in.
+        jest.useFakeTimers();
+        cleanup = setupWebAuthnMock({ credential: MOCK_ASSERTION_CREDENTIAL });
+
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+
+        // The conditional getter performs a modal takeover and THEN resolves
+        // with a credential, in that order, without ever observing its abort
+        // signal — exactly the same-tick success-vs-supersede race.
+        const credentialGetter = jest.fn().mockImplementationOnce(async () => {
+          await fido2getCredential({ challenge: TEST_CHALLENGES.basic });
+          return parsedAssertion;
+        });
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+        await jest.advanceTimersByTimeAsync(0);
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        expect((err as Fido2AbortError).superseded).toBe(true);
+      });
+
       it("ends the flow instead of renewing when the conditional request was superseded by a newer request", async () => {
-        // Regression: a modal passkey sign-in taking over the pending
-        // conditional request rejects it with a superseded Fido2AbortError.
+        // Belt-and-suspenders: even relying only on the per-get error's
+        // superseded flag (the flow-lifetime marker aside), a superseded
+        // abort landing at the renewal boundary must end the flow, not
+        // restart it.
         // If that rejection lands at the renewal boundary (after the renewal
         // timer aborts the pending get()), the renewal loop must NOT treat it
         // as its own renewal abort and restart the autofill flow behind the
