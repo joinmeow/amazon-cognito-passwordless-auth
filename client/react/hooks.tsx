@@ -768,6 +768,17 @@ function _usePasswordless() {
     // Initial load
     void loadTokens();
 
+    // After a page reload the tokens come from storage, not a fresh
+    // sign-in/refresh, so processTokens (the only scheduler) never ran and
+    // nothing has armed the next refresh — leaving the session unrefreshed
+    // until the +5-minute watchdog, which with short (e.g. 5-minute) access
+    // tokens flickers the user to signed-out at expiry. Kick off scheduling
+    // once on mount. scheduleRefresh reads storage itself (including an
+    // expired-but-refreshable session via retrieveTokensForRefresh),
+    // self-gates to a no-op when there is no session, and dedups against any
+    // in-memory schedule, so it is idempotent with the sign-in path.
+    void scheduleRefresh({ abort: abortController.signal });
+
     // Check for OAuth callback
     const checkOAuthCallback = async () => {
       const urlParams = new URLSearchParams(globalThis.location.search);
