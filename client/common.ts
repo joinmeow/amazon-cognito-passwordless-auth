@@ -50,6 +50,9 @@ const activeRefreshSchedules = new Map<
     abortController: AbortController;
     refreshToken: string;
     accessToken: string;
+    /** Handle for the fresh-login deferral timer, so it can be cancelled if
+     * the schedule is replaced or the user signs out before it fires */
+    deferralTimer?: ReturnType<typeof setTimeout>;
   }
 >();
 
@@ -349,6 +352,11 @@ async function processTokensInternal(
       if (existingSchedule.abortController.signal !== abort) {
         existingSchedule.abortController.abort();
       }
+      // Cancel a still-pending fresh-login deferral so a replaced schedule's
+      // timer can't fire and schedule a refresh for stale tokens
+      if (existingSchedule.deferralTimer) {
+        clearTimeout(existingSchedule.deferralTimer);
+      }
       activeRefreshSchedules.delete(normalizedTokens.username);
     }
 
@@ -360,9 +368,16 @@ async function processTokensInternal(
         "abort",
         () => {
           scheduleAbort.abort();
-          // Clean up the schedule tracking when aborted
+          // Clean up the schedule tracking when aborted, but only if it is
+          // still OUR entry — a newer processTokens may have replaced it.
           if (normalizedTokens.username) {
-            activeRefreshSchedules.delete(normalizedTokens.username);
+            const current = activeRefreshSchedules.get(
+              normalizedTokens.username
+            );
+            if (current?.abortController === scheduleAbort) {
+              if (current.deferralTimer) clearTimeout(current.deferralTimer);
+              activeRefreshSchedules.delete(normalizedTokens.username);
+            }
           }
         },
         { once: true }
@@ -377,15 +392,26 @@ async function processTokensInternal(
       accessToken: normalizedTokens.accessToken,
     });
 
+    // Delete the schedule entry only if it is still the one this scheduleFn
+    // registered. A completed refresh runs its nested processTokens (which
+    // registers the NEXT schedule for the new tokens) BEFORE this tokensCb
+    // fires, so an unconditional delete would wipe the replacement entry —
+    // leaving the dedup map empty while a timer is armed, and making
+    // signOut's targeted abort a no-op for it.
+    const clearOwnSchedule = () => {
+      if (!normalizedTokens.username) return;
+      const current = activeRefreshSchedules.get(normalizedTokens.username);
+      if (current?.abortController === scheduleAbort) {
+        activeRefreshSchedules.delete(normalizedTokens.username);
+      }
+    };
+
     const scheduleFn = () => {
       debug?.("🔄 [Process Tokens] Scheduling token refresh");
       scheduleRefresh({
         abort: scheduleAbort.signal,
         tokensCb: (newTokens) => {
-          // Always clear the schedule tracking when refresh completes (success or no tokens)
-          if (normalizedTokens.username) {
-            activeRefreshSchedules.delete(normalizedTokens.username);
-          }
+          clearOwnSchedule();
           if (!newTokens) return;
           // We don't need to store tokens here because processTokens will be called
           // for the refresh tokens too, and it will store them.
@@ -393,22 +419,33 @@ async function processTokensInternal(
         },
       }).catch((err) => {
         debug?.("❌ [Process Tokens] Failed to schedule token refresh:", err);
-        // Clear the schedule tracking on error
-        if (normalizedTokens.username) {
-          activeRefreshSchedules.delete(normalizedTokens.username);
-        }
+        clearOwnSchedule();
       });
     };
 
-    if (!("newDeviceMetadata" in normalizedTokens)) {
-      // Not a fresh login, schedule immediately
+    // Defer scheduling only for a genuine fresh login WITH a new device
+    // (newDeviceMetadata carrying a deviceKey). The previous `"key" in obj`
+    // check was true whenever the property merely existed — including the
+    // FIDO2 / hosted-OAuth token objects that set newDeviceMetadata to
+    // undefined — so every flow got the 2-minute deferral.
+    const freshDeviceKey =
+      "newDeviceMetadata" in normalizedTokens
+        ? normalizedTokens.newDeviceMetadata?.deviceKey
+        : undefined;
+    if (!freshDeviceKey) {
+      // Not a fresh login with a new device, schedule immediately
       scheduleFn();
     } else {
-      // Fresh login, delay by 2 minutes
+      // Fresh login with a new device, delay by 2 minutes. Track the timer
+      // so a sign-out / replacement within the window can cancel it.
       debug?.(
         "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
       );
-      setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
+      const deferralTimer = setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
+      const entry = activeRefreshSchedules.get(normalizedTokens.username);
+      if (entry?.abortController === scheduleAbort) {
+        entry.deferralTimer = deferralTimer;
+      }
     }
   } else {
     debug?.(
@@ -552,6 +589,11 @@ export const signOut = (props?: {
           if (activeSchedule) {
             debug?.("signOut: cancelling active refresh schedule for user");
             activeSchedule.abortController.abort();
+            // Also cancel a pending fresh-login deferral so it can't fire
+            // and schedule a refresh for the session we are signing out of
+            if (activeSchedule.deferralTimer) {
+              clearTimeout(activeSchedule.deferralTimer);
+            }
             activeRefreshSchedules.delete(userIdentifier);
           }
 
