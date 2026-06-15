@@ -654,6 +654,14 @@ function _usePasswordless() {
   const mfaRetryTimeoutRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >();
+  // How many silent MFA-fetch retries have been scheduled for the CURRENT
+  // access token, so a persistently failing getUser stops retrying instead
+  // of polling every ~7s forever. The retry path clears
+  // lastFetchedMfaTokenRef (to force a re-fetch of the same token), so the
+  // budget is tracked against its own token ref rather than that one.
+  const mfaRetryCountRef = useRef<number>(0);
+  const mfaRetryForTokenRef = useRef<string | undefined>();
+  const MAX_MFA_FETCH_RETRIES = 3;
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -1111,6 +1119,14 @@ function _usePasswordless() {
       };
     }
 
+    // A genuinely new access token resets the retry budget (a fresh session
+    // deserves a fresh set of retries). A retry of the SAME token does not
+    // (the retry path cleared lastFetchedMfaTokenRef, so that ref can't be
+    // used to tell the two apart).
+    if (tokens.accessToken !== mfaRetryForTokenRef.current) {
+      mfaRetryCountRef.current = 0;
+      mfaRetryForTokenRef.current = tokens.accessToken;
+    }
     lastFetchedMfaTokenRef.current = tokens.accessToken;
     lastMfaFetchTimeRef.current = now;
 
@@ -1146,11 +1162,13 @@ function _usePasswordless() {
             },
           });
           dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
-          // Successful fetch – cancel any scheduled retry
+          // Successful fetch – cancel any scheduled retry and reset the
+          // per-token retry budget
           if (mfaRetryTimeoutRef.current) {
             clearTimeout(mfaRetryTimeoutRef.current);
             mfaRetryTimeoutRef.current = undefined;
           }
+          mfaRetryCountRef.current = 0;
         } else {
           // Default to no MFA
           dispatch({
@@ -1166,6 +1184,7 @@ function _usePasswordless() {
             clearTimeout(mfaRetryTimeoutRef.current);
             mfaRetryTimeoutRef.current = undefined;
           }
+          mfaRetryCountRef.current = 0;
         }
       })
       .catch(() => {
@@ -1177,11 +1196,22 @@ function _usePasswordless() {
         debug?.("getUser failed; retaining previous TOTP MFA status");
         // Ensure UI never hangs behind a loader due to a transient failure
         dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
-        // Schedule a simple early silent retry with jitter (6–8s)
+        // Schedule a simple early silent retry with jitter (6–8s), but cap
+        // the number of retries per token so a persistently failing getUser
+        // (e.g. a network outage, or a backend that keeps erroring) does not
+        // poll forever. mfaStatusReady is already true, so the UI is not
+        // blocked while we stop retrying.
         if (mfaRetryTimeoutRef.current) {
           clearTimeout(mfaRetryTimeoutRef.current);
           mfaRetryTimeoutRef.current = undefined;
         }
+        if (mfaRetryCountRef.current >= MAX_MFA_FETCH_RETRIES) {
+          debug?.(
+            `getUser failed ${mfaRetryCountRef.current} times for this token; giving up MFA-status retries until the next sign-in / token refresh`
+          );
+          return;
+        }
+        mfaRetryCountRef.current += 1;
         const jitterMs = 6000 + Math.floor(Math.random() * 2000);
         mfaRetryTimeoutRef.current = setTimeout(() => {
           // Clear token guard so the effect can try again

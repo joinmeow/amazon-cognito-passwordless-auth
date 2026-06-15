@@ -158,4 +158,49 @@ describe("MFA status fetch cooldown", () => {
     });
     expect(mockGetUser).toHaveBeenCalledTimes(2);
   });
+
+  it("stops retrying MFA status fetch after the cap when getUser keeps failing", async () => {
+    mockRetrieveTokens.mockResolvedValue(makeTokens("initial"));
+    // getUser fails every time (e.g. a network outage or a backend erroring)
+    mockGetUser.mockRejectedValue(new Error("network down"));
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    // Initial attempt
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    expect(mockGetUser).toHaveBeenCalledTimes(1);
+    // Even on failure the UI is unblocked (last-known status retained)
+    expect(result.current.mfaStatusReady).toBe(true);
+
+    // Drive well past many retry windows (each retry is 6–8s jittered).
+    // The cap is 3 retries, so a total of 1 initial + 3 retries = 4 fetches,
+    // after which it must stop — not poll forever.
+    for (let i = 0; i < 12; i++) {
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(8_000);
+      });
+    }
+
+    expect(mockGetUser).toHaveBeenCalledTimes(4);
+
+    // A genuinely new token resets the budget and fetches again
+    mockGetUser.mockClear();
+    mockGetUser.mockRejectedValue(new Error("still down"));
+    const rotated = makeTokens("rotated") as TokensFromRefresh;
+    mockRefreshTokens.mockImplementation(async (args) => {
+      await args?.tokensCb?.(rotated);
+      return rotated;
+    });
+    await act(async () => {
+      await result.current.refreshTokens();
+    });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    // The new token gets its own first fetch (budget reset)
+    expect(mockGetUser).toHaveBeenCalled();
+  });
 });
