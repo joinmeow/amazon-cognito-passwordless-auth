@@ -25,9 +25,22 @@ export class LockTimeoutError extends Error {
 }
 
 const DEFAULT_RETRY_DELAY_MS = 50;
-const DEFAULT_TIMEOUT_MS = 15000; // 15 seconds to accommodate worst-case refresh (9s) + buffer
 const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds without a heartbeat renewal
+// The default acquisition timeout MUST exceed the stale threshold (plus a
+// takeover margin): a lock orphaned by an abruptly closed page keeps its
+// last timestamp forever, and a waiter that gives up before the orphan CAN
+// go stale is guaranteed a LockTimeoutError — worst case the OAuth
+// callback's token exchange right after a redirect, when the one-time
+// authorization code is already spent.
+const DEFAULT_TIMEOUT_MS = STALE_LOCK_TIMEOUT_MS + 15000;
 const LOCK_HEARTBEAT_INTERVAL_MS = 10000; // renew held locks well within the stale timeout
+// Stop renewing the heartbeat after this long. A hung critical section
+// (e.g. a refresh fetch stuck on a dead connection) must not hold the lock
+// forever: once renewals stop, the lock goes stale within
+// STALE_LOCK_TIMEOUT_MS and other tabs (e.g. a user signing out) can take
+// over. Generous compared to the worst-case legitimate hold (a refresh
+// with retries and slow networks is tens of seconds).
+const MAX_LOCK_HOLD_MS = 120000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -241,12 +254,26 @@ export async function withStorageLock<T>(
   // stale and taken over by other tabs. If we ever detect that we no longer
   // (safely) hold the lock, stop renewing for good rather than risk
   // clobbering another tab's legitimate takeover
+  const holdStart = Date.now();
   let released = false;
   let lockLost = false;
   let heartbeatInFlight: Promise<void> = Promise.resolve();
   const renewLock = async () => {
     try {
       if (released || lockLost) {
+        return;
+      }
+      if (Date.now() - holdStart > MAX_LOCK_HOLD_MS) {
+        // The critical section has been running implausibly long (hung
+        // fetch, suspended tab, ...). Stop renewing so the lock can go
+        // stale and be taken over; if fn() does eventually finish, release
+        // below still removes the lock if it is still ours.
+        clearInterval(heartbeat);
+        debug?.(
+          "withStorageLock: max lock hold time reached, heartbeat stopped so the lock can go stale",
+          key,
+          { heldMs: Date.now() - holdStart }
+        );
         return;
       }
       const currentValue = await storage.getItem(key);
