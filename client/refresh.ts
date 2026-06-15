@@ -325,12 +325,15 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        await refreshTokens({
+        await performRefresh({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens,
           force: true,
+          // This path runs inside scheduleRefresh's per-user refresh lock
+          // (same lock key), so re-acquiring would self-deadlock
+          skipLock: true,
         });
 
         // Mark as completed
@@ -581,21 +584,50 @@ async function refreshTokensViaOAuth({
   }
 }
 
+/** Public options for {@link refreshTokens}. */
+export interface RefreshTokensOptions {
+  abort?: AbortSignal;
+  tokensCb?: (res: TokensFromRefresh) => void | Promise<void>;
+  isRefreshingCb?: (isRefreshing: boolean) => unknown;
+  tokens?: TokenPayload;
+  /**
+   * Skip the cross-tab `shouldAttemptRefresh()` coordination/dedup check and
+   * the in-process `isRefreshing` guard: the caller wants a refresh NOW
+   * (e.g. after a 401), regardless of the 5s dedup window. Does NOT bypass
+   * the per-user refresh lock — a forced refresh still serializes with
+   * sign-out and any in-flight scheduled refresh.
+   */
+  force?: boolean;
+}
+
 /**
- * Refresh tokens using the refresh token
+ * Refresh tokens using the refresh token. Always goes through the per-user
+ * refresh lock, so it serializes with sign-out and any in-flight refresh.
  */
-export async function refreshTokens({
+export async function refreshTokens(
+  args: RefreshTokensOptions = {}
+): Promise<TokensFromRefresh> {
+  // skipLock is INTERNAL and deliberately not part of the public options:
+  // exposing it would let a consumer bypass the per-user lock and recreate
+  // the sign-out/refresh resurrection race this path guards against.
+  return performRefresh(args);
+}
+
+/**
+ * Internal refresh implementation. `skipLock` is private to this module: the
+ * in-lock immediate-refresh path already holds the per-user refresh lock on
+ * the same key, so re-acquiring would self-deadlock (storage locks are not
+ * reentrant). No other caller may bypass the lock.
+ */
+async function performRefresh({
   abort,
   tokensCb,
   isRefreshingCb,
   tokens,
   force = false,
-}: {
-  abort?: AbortSignal;
-  tokensCb?: (res: TokensFromRefresh) => void | Promise<void>;
-  isRefreshingCb?: (isRefreshing: boolean) => unknown;
-  tokens?: TokenPayload;
-  force?: boolean;
+  skipLock = false,
+}: RefreshTokensOptions & {
+  skipLock?: boolean;
 } = {}): Promise<TokensFromRefresh> {
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
@@ -851,8 +883,11 @@ export async function refreshTokens({
   };
 
   const { debug } = configure();
-  if (force) {
-    debug?.("refreshTokens: force=true, bypassing lock", lockKey);
+  if (skipLock) {
+    debug?.(
+      "refreshTokens: skipLock=true, caller already holds the lock",
+      lockKey
+    );
     return doRefresh();
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
@@ -963,7 +998,7 @@ export async function refreshTokens({
  * Force an immediate token refresh
  */
 export async function forceRefreshTokens(
-  args?: Omit<Parameters<typeof refreshTokens>[0], "force">
+  args?: Omit<RefreshTokensOptions, "force">
 ): Promise<TokensFromRefresh> {
   logDebug("Forcing immediate token refresh");
 
@@ -978,12 +1013,22 @@ export async function forceRefreshTokens(
     state.refreshTimer = undefined;
   }
 
+  // force: true skips the dedup/coordination check, but the refresh still
+  // goes through the per-user lock (no skipLock) so it serializes with
+  // sign-out and any in-flight scheduled refresh — a forced refresh that
+  // wrote tokens back without the lock could resurrect a session a
+  // concurrent sign-out just removed
   const refreshed = await refreshTokens({
     ...(args ?? {}),
     force: true,
   });
 
-  void scheduleRefresh({ ...args });
+  // scheduleRefresh's tokensCb is nullable (scheduling can yield null tokens)
+  // while the forced-refresh tokensCb is not; the spread is behaviourally the
+  // same as before, the cast just bridges that variance difference
+  void scheduleRefresh(
+    { ...args } as Parameters<typeof scheduleRefresh>[0]
+  );
 
   return refreshed;
 }
