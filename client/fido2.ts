@@ -1285,6 +1285,12 @@ export async function prepareFido2SignIn({
               }),
             ]);
             if (raceOutcome !== RENEW_SESSION) {
+              // A modal takeover may have set flow.superseded in the same
+              // tick the credential resolved (or for an injected getter the
+              // takeover's abort never reached it): a superseded flow must
+              // not complete with an assertion — the modal flow owns the
+              // sign-in now.
+              if (flow.superseded) abortFlow();
               assertion = raceOutcome;
               session = challenge.session;
               break;
@@ -1316,6 +1322,9 @@ export async function prepareFido2SignIn({
                 );
                 continue;
               }
+              // As above: a takeover during the settle wait wins over a
+              // late-resolving credential.
+              if (flow.superseded) abortFlow();
               assertion = settled;
               session = challenge.session;
               break;

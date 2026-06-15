@@ -813,6 +813,38 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(1);
       });
 
+      it("does not complete a superseded flow when the conditional credential resolves in the same tick as a takeover", async () => {
+        // Race: a modal takeover marks the flow superseded (via the lock) at
+        // the same time the conditional getter resolves with a valid
+        // credential — e.g. an injected getter the takeover's abort never
+        // reaches. The success branch must honour the superseded marker and
+        // end the flow, not complete the (superseded) conditional sign-in.
+        jest.useFakeTimers();
+        cleanup = setupWebAuthnMock({ credential: MOCK_ASSERTION_CREDENTIAL });
+
+        mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
+
+        // The conditional getter performs a modal takeover and THEN resolves
+        // with a credential, in that order, without ever observing its abort
+        // signal — exactly the same-tick success-vs-supersede race.
+        const credentialGetter = jest.fn().mockImplementationOnce(async () => {
+          await fido2getCredential({ challenge: TEST_CHALLENGES.basic });
+          return parsedAssertion;
+        });
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+        await jest.advanceTimersByTimeAsync(0);
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        expect((err as Fido2AbortError).superseded).toBe(true);
+      });
+
       it("ends the flow instead of renewing when the conditional request was superseded by a newer request", async () => {
         // Belt-and-suspenders: even relying only on the per-get error's
         // superseded flag (the flow-lifetime marker aside), a superseded
