@@ -129,7 +129,22 @@ export interface Config {
     };
     /** Automatically inject the Amazon Cognito Advanced Security script if not already present */
     autoInject?: boolean;
-    /** Custom region for the security script (defaults to the region from cognitoIdpEndpoint) */
+    /**
+     * Region to load the Advanced Security script from. Defaults to the
+     * region parsed from `cognitoIdpEndpoint`.
+     *
+     * Setting this is an explicit opt-in that BYPASSES the built-in
+     * allowlist of regions known to host the script: use it for a user pool
+     * whose own region does not host the script by pointing at one that
+     * does (the `us-east-1` script is region-generic and works for any
+     * pool). Make sure the value is a region that actually serves
+     * `amazon-cognito-assets.<region>.amazoncognito.com`, otherwise the
+     * script 404s and security data is silently omitted.
+     *
+     * Must be a valid AWS region identifier (e.g. `us-east-1`). It is
+     * interpolated into the script host, so a malformed value is rejected
+     * to prevent loading the script from an unexpected host.
+     */
     region?: string;
   };
   /**
