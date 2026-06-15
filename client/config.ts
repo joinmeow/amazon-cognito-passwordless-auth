@@ -368,7 +368,13 @@ function normalizeEndpoint(endpoint: string): string {
   const withProtocol = endpoint.startsWith("http")
     ? endpoint
     : `https://${endpoint}`;
-  return withProtocol.replace(/\/+$/, ""); // trim trailing slashes
+  // Trim trailing slashes with a linear scan rather than /\/+$/, whose
+  // backtracking is polynomial on long runs of "/" (CodeQL js/polynomial-redos)
+  let end = withProtocol.length;
+  while (end > 0 && withProtocol.charCodeAt(end - 1) === 47 /* "/" */) {
+    end--;
+  }
+  return withProtocol.slice(0, end);
 }
 
 /**

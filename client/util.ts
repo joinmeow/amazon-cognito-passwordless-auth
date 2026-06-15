@@ -26,9 +26,14 @@ export async function throwIfNot2xx(res: MinimalResponse) {
   const detail = (await res.json()) as { __type: string; message: string };
   let message = detail.message;
   if (detail.__type === "UserLambdaValidationException") {
-    const match = detail.message.match(/^.+failed with error (.+)$/);
-    if (match) {
-      message = match[1];
+    // Extract the text after the last "failed with error " without the
+    // backtracking regex /^.+failed with error (.+)$/, which is polynomial
+    // on crafted messages (CodeQL js/polynomial-redos). Mirrors the regex:
+    // a non-empty prefix (idx > 0) and a non-empty captured suffix.
+    const marker = "failed with error ";
+    const idx = detail.message.lastIndexOf(marker);
+    if (idx > 0 && idx + marker.length < detail.message.length) {
+      message = detail.message.slice(idx + marker.length);
     }
   }
 
