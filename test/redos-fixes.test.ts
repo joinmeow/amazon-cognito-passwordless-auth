@@ -32,6 +32,14 @@ describe("throwIfNot2xx UserLambdaValidationException message extraction", () =>
     );
   });
 
+  test("uses an earlier marker when the rightmost one has no suffix (matches the greedy regex)", async () => {
+    // The greedy /^.+failed with error (.+)$/ backtracks past the final
+    // (suffix-less) marker to the previous one that does have text after it.
+    expect(
+      await extract("X failed with error Y failed with error ")
+    ).toBe("Y failed with error ");
+  });
+
   test("leaves the message unchanged when there is no prefix or no suffix", async () => {
     // No prefix (marker at start) → unchanged
     expect(await extract("failed with error X")).toBe("failed with error X");
