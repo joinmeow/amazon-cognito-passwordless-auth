@@ -306,6 +306,7 @@ type PasswordlessAction =
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
   | { type: "SET_MFA_STATUS_READY"; payload: boolean }
+  | { type: "RESET_REDIRECT_SIGNIN_STATUS" }
   | { type: "SIGN_OUT" };
 
 // Initial state
@@ -331,6 +332,17 @@ function passwordlessReducer(
   switch (action.type) {
     case "SET_SIGNING_STATUS":
       return { ...state, signingInStatus: action.payload };
+
+    case "RESET_REDIRECT_SIGNIN_STATUS":
+      // Leave the optimistic busy state only if it's still ours: when the
+      // OAuth callback handler turns out to have nothing to process (not our
+      // redirect), the status must not stay stuck at the busy
+      // STARTING_SIGN_IN_WITH_REDIRECT. Guarded so it never clobbers a status
+      // that loadTokens (or anything else) set in the meantime.
+      if (state.signingInStatus === "STARTING_SIGN_IN_WITH_REDIRECT") {
+        return { ...state, signingInStatus: "SIGNED_OUT" };
+      }
+      return state;
 
     case "SET_INITIAL_LOADING":
       return { ...state, initiallyRetrievingTokensFromStorage: action.payload };
@@ -755,7 +767,18 @@ function _usePasswordless() {
         globalThis.location.hash.substring(1)
       );
 
-      if (urlParams.has("code") || hashParams.has("access_token")) {
+      // Fire for a successful redirect (code / implicit access_token) AND for
+      // an error redirect (e.g. the user denied consent), which carries
+      // neither but does carry `error` — in the query for the code flow, the
+      // fragment for the implicit flow. Without the error case,
+      // handleCognitoOAuthCallback (which surfaces provider errors) was never
+      // invoked, so a denied sign-in left the page silently stuck.
+      if (
+        urlParams.has("code") ||
+        hashParams.has("access_token") ||
+        urlParams.has("error") ||
+        hashParams.has("error")
+      ) {
         // Prevent multiple simultaneous OAuth callback processing
         if (oauthProcessingRef.current) {
           debug?.("OAuth callback already being processed, skipping...");
@@ -773,6 +796,14 @@ function _usePasswordless() {
             updateTokens(oauthTokens);
             setSigninInStatus("SIGNED_IN_WITH_REDIRECT");
             debug?.("OAuth callback processed successfully");
+          } else {
+            // Not our redirect / nothing to process: don't leave the UI
+            // stuck in the busy STARTING_SIGN_IN_WITH_REDIRECT state. The
+            // reset is guarded so it can't clobber a status loadTokens set.
+            debug?.(
+              "OAuth callback produced no tokens; clearing optimistic redirect status"
+            );
+            dispatch({ type: "RESET_REDIRECT_SIGNIN_STATUS" });
           }
         } catch (error) {
           debug?.("OAuth callback processing failed:", error);
@@ -780,6 +811,11 @@ function _usePasswordless() {
             error instanceof Error ? error : new Error(String(error))
           );
           setSigninInStatus("SIGNIN_WITH_REDIRECT_FAILED");
+        } finally {
+          // Allow a later callback in this mount to be processed (e.g. a
+          // retry after a transient failure); the in-progress storage flag
+          // and URL params still gate real work.
+          oauthProcessingRef.current = false;
         }
       }
     };
