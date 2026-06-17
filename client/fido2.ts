@@ -234,6 +234,30 @@ export interface PreparedFido2SignIn {
  */
 export const COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS = 150_000; // 2.5 minutes
 
+/**
+ * How many times to attempt the per-iteration `initiateFido2Challenge()` call
+ * that refreshes the Cognito CUSTOM_AUTH session during a pending conditional
+ * (autofill) request, before giving up and ending the flow.
+ *
+ * A conditional request can stay pending for a long time, so a single
+ * transient network failure of the renewal initiate must not end passkey
+ * autofill — the pending request could keep waiting. Retrying a bounded number
+ * of times rides out brief blips; once the budget is exhausted the failure
+ * propagates and ends the flow, as before.
+ */
+export const RENEWAL_INITIATE_MAX_ATTEMPTS = 3;
+
+/**
+ * Base backoff between retries of a failed renewal `initiateFido2Challenge()`.
+ * Backoff grows linearly per attempt (1s, 2s, ...) and is capped by
+ * {@link RENEWAL_INITIATE_BACKOFF_CAP_MS}. A supersede/abort during the backoff
+ * ends the flow rather than waiting it out.
+ */
+export const RENEWAL_INITIATE_BACKOFF_BASE_MS = 1000;
+
+/** Upper bound on the per-retry renewal-initiate backoff. */
+export const RENEWAL_INITIATE_BACKOFF_CAP_MS = 4000;
+
 type AuthenticatorAttestationResponseWithOptionalMembers =
   AuthenticatorAttestationResponse & {
     getTransports?: () => "" | string[];
@@ -704,16 +728,41 @@ let pendingConditionalGet:
   | undefined = undefined;
 
 /**
- * Marks a conditional (autofill) sign-in flow as active for its ENTIRE
- * lifetime — including the gaps between renewal iterations, when the previous
+ * A conditional (autofill) sign-in flow, tracked for its ENTIRE lifetime —
+ * including the gaps between renewal iterations, when the previous
  * navigator.credentials.get() has been aborted and the next one has not yet
  * been issued (e.g. while initiating a fresh Cognito challenge). A modal
- * takeover sets `superseded` here even when no get() is pending, so the
+ * takeover marks `superseded` here even when no get() is pending, so the
  * renewal loop stops re-arming instead of running invisibly behind the modal
  * sign-in forever. `pendingConditionalGet` only covers the narrower window
  * while a get() is actually pending.
  */
-let activeConditionalFlow: { superseded: boolean } | undefined = undefined;
+type ActiveConditionalFlow = {
+  superseded: boolean;
+  /**
+   * Aborted in lockstep with `superseded` (see {@link supersedeConditionalFlow})
+   * so code blocked on an AbortSignal between renewal iterations — the
+   * initiate-retry backoff — wakes immediately on a takeover instead of waiting
+   * out the full backoff. A modal takeover marks the flow superseded but does
+   * NOT abort the caller's own signal, so the boolean alone is invisible to
+   * anything sleeping on a signal.
+   */
+  supersededAbort: AbortController;
+};
+
+let activeConditionalFlow: ActiveConditionalFlow | undefined = undefined;
+
+/**
+ * Supersede a conditional flow: mark it AND wake anything waiting on it. The
+ * `superseded` boolean is polled at renewal-loop boundaries, but the
+ * initiate-retry backoff blocks on an AbortSignal — and a takeover never aborts
+ * the caller's signal — so without this the backoff is waited out in full (up
+ * to {@link RENEWAL_INITIATE_BACKOFF_CAP_MS}) before the flow notices.
+ */
+function supersedeConditionalFlow(flow: ActiveConditionalFlow): void {
+  flow.superseded = true;
+  flow.supersededAbort.abort();
+}
 
 /**
  * Serializes the issuance of navigator.credentials.get() requests.
@@ -867,7 +916,7 @@ export async function fido2getCredential({
     // momentarily undefined). The flow's own conditional renewal re-arm is
     // mediation === "conditional" and must NOT self-supersede here.
     if (mediation !== "conditional" && activeConditionalFlow) {
-      activeConditionalFlow.superseded = true;
+      supersedeConditionalFlow(activeConditionalFlow);
     }
 
     // If a conditional (autofill) request is still pending, abort it first so
@@ -1233,8 +1282,18 @@ export async function prepareFido2SignIn({
 
       // Mark this conditional flow active for its whole lifetime so a modal
       // takeover can stop it even during the renewal gap (no get() pending).
-      const flow = { superseded: false };
+      const flow: ActiveConditionalFlow = {
+        superseded: false,
+        supersededAbort: new AbortController(),
+      };
       const previousFlow = activeConditionalFlow;
+      // A newer conditional flow taking over supersedes any still-active older
+      // one, so an older flow paused in its initiate-retry backoff ends promptly
+      // instead of waking later to re-arm and abort this newer flow's get(). A
+      // pending older get() is already aborted via pendingConditionalGet; this
+      // covers the renewal gap, where none is pending and the takeover path's
+      // `mediation !== "conditional"` guard would otherwise skip it.
+      if (previousFlow) supersedeConditionalFlow(previousFlow);
       activeConditionalFlow = flow;
 
       // Throw the abort that ends the flow: superseded by a takeover, or a
@@ -1250,13 +1309,65 @@ export async function prepareFido2SignIn({
         throw new Fido2AbortError();
       };
 
+      // Backoff that wakes promptly on either a caller abort OR a takeover
+      // (which marks flow.superseded and aborts flow.supersededAbort but never
+      // the caller's signal), so a supersede/abort during the wait ends the
+      // flow immediately instead of being waited out for the full backoff.
+      const backoffSleep = (ms: number) =>
+        new Promise<void>((resolve) => {
+          const supersededSignal = flow.supersededAbort.signal;
+          if (signal?.aborted || supersededSignal.aborted) {
+            resolve();
+            return;
+          }
+          const done = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            supersededSignal.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, ms);
+          signal?.addEventListener("abort", done, { once: true });
+          supersededSignal.addEventListener("abort", done, { once: true });
+        });
+
+      // Refresh the Cognito CUSTOM_AUTH challenge for a renewal iteration,
+      // riding out transient failures of initiateFido2Challenge(): a single
+      // network blip must not end an otherwise-pending autofill request. A
+      // supersede/abort is never retried — it ends the flow promptly.
+      const initiateRenewalChallenge = async () => {
+        for (let attempt = 1; ; attempt++) {
+          // A takeover/abort that landed before (or while) initiating must end
+          // the flow, not be swallowed as a transient failure and retried.
+          if (flow.superseded || signal?.aborted) abortFlow();
+          try {
+            return await initiateFido2Challenge();
+          } catch (err) {
+            // Supersede/abort wins over any retry: end the flow now.
+            if (flow.superseded || signal?.aborted) abortFlow();
+            if (attempt >= RENEWAL_INITIATE_MAX_ATTEMPTS) {
+              // Budget exhausted: propagate, ending the flow as before.
+              throw err;
+            }
+            const backoff = Math.min(
+              RENEWAL_INITIATE_BACKOFF_BASE_MS * attempt,
+              RENEWAL_INITIATE_BACKOFF_CAP_MS
+            );
+            debug?.(
+              `⚠️ Renewal initiateFido2Challenge() failed (attempt ${attempt}/${RENEWAL_INITIATE_MAX_ATTEMPTS}) - retrying in ${backoff}ms`
+            );
+            await backoffSleep(backoff);
+          }
+        }
+      };
+
       try {
         for (;;) {
           // A modal takeover may have superseded this flow during the previous
           // iteration's renewal gap, including while awaiting initiate below.
           if (flow.superseded || signal?.aborted) abortFlow();
 
-          const challenge = await initiateFido2Challenge();
+          const challenge = await initiateRenewalChallenge();
 
           // Re-check: a takeover could have landed during the (awaited)
           // initiate call — exactly the window pendingConditionalGet misses.
@@ -1354,7 +1465,12 @@ export async function prepareFido2SignIn({
         }
       } finally {
         if (activeConditionalFlow === flow) {
-          activeConditionalFlow = previousFlow;
+          // This flow superseded previousFlow at setup, so by here previousFlow
+          // is dead; restoring it would leave activeConditionalFlow pointing at
+          // a superseded flow instead of "no live conditional flow". Restore
+          // only a still-live previous flow, else clear to undefined.
+          activeConditionalFlow =
+            previousFlow && !previousFlow.superseded ? previousFlow : undefined;
         }
       }
     } else {
