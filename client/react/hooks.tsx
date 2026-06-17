@@ -462,7 +462,22 @@ function _usePasswordless() {
     dispatch({ type: "SET_ERROR", payload: error });
   }, []);
 
+  // Username of the sign-in that owns the current session, kept in lockstep
+  // with the tokens on EVERY write below (fresh sign-in, refresh, OAuth
+  // callback, cross-tab/page load, and sign-out → undefined). The deviceKey
+  // rehydrate awaits a getRememberedDevice() lookup after the session is
+  // already visible; reading this ref after the await lets that async path
+  // detect a sign-out or a different/newer sign-in that landed during the
+  // lookup and skip a late SET_DEVICE_KEY that would otherwise repopulate
+  // deviceKey for an ended or different session.
+  const currentSignInUserRef = useRef<string | undefined>();
+
   const _setTokens = useCallback((tokens: TokensFromStorage | undefined) => {
+    // _setTokens is the single sink for every token change, so updating the
+    // session marker here keeps it authoritative for all paths (not just the
+    // sign-in tokensCb): a cross-tab sign-out / OAuth callback / refresh that
+    // does not go through a tokensCb still moves the marker.
+    currentSignInUserRef.current = tokens?.username;
     dispatch({ type: "SET_TOKENS", payload: tokens });
   }, []);
 
@@ -1287,6 +1302,38 @@ function _usePasswordless() {
     [tokens, parseAndSetTokens, _setTokens]
   );
 
+  // Apply the device key from a fresh sign-in: use the key the tokens carry,
+  // or rehydrate it from the remembered-device record when they don't (e.g. a
+  // re-sign-in after the SIGN_OUT reset nulled state.deviceKey, or the plaintext
+  // flow which never carries one). Shared by the FIDO2 / SRP / plaintext
+  // tokensCb so the three stay in lockstep — they diverged once, which is the
+  // bug this consolidates. Call AFTER updateTokens(newTokens) so the session
+  // marker (currentSignInUserRef, set in _setTokens) already reflects this
+  // sign-in before the async lookup below.
+  const rehydrateDeviceKey = useCallback(
+    async (newTokens: TokensFromSignIn) => {
+      if (newTokens.deviceKey) {
+        dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
+        return;
+      }
+      try {
+        const existing = await getRememberedDevice(newTokens.username);
+        // Skip a late dispatch if a sign-out (marker → undefined) or a
+        // different/newer sign-in (marker → other username) changed the current
+        // session while the lookup was in flight.
+        if (
+          existing?.deviceKey &&
+          currentSignInUserRef.current === newTokens.username
+        ) {
+          dispatch({ type: "SET_DEVICE_KEY", payload: existing.deviceKey });
+        }
+      } catch {
+        // ignore
+      }
+    },
+    []
+  );
+
   return {
     /** The (raw) tokens: ID token, Access token and Refresh Token */
     tokens,
@@ -1666,21 +1713,7 @@ function _usePasswordless() {
         tokensCb: async (newTokens) => {
           // 1) Update tokens in state and deviceKey
           updateTokens(newTokens);
-          if (newTokens.deviceKey) {
-            dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
-          } else {
-            try {
-              const existing = await getRememberedDevice(newTokens.username);
-              if (existing?.deviceKey) {
-                dispatch({
-                  type: "SET_DEVICE_KEY",
-                  payload: existing.deviceKey,
-                });
-              }
-            } catch {
-              // ignore
-            }
-          }
+          await rehydrateDeviceKey(newTokens);
           // 2) If a rememberDevice callback is provided and user confirmation is needed, prompt
           if (newTokens.userConfirmationNecessary) {
             try {
@@ -1798,10 +1831,9 @@ function _usePasswordless() {
           dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
           // Don't clear credentials here - auth method controls visibility
 
-          // Ensure device key is updated if present
-          if (newTokens.deviceKey) {
-            dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
-          }
+          // Update the device key from the new tokens, or rehydrate it from
+          // the remembered-device record when the tokens don't carry one.
+          await rehydrateDeviceKey(newTokens);
 
           // Force sign-in status update after setting tokens
           // For SRP auth, always use "SRP" to maintain consistency
@@ -1895,6 +1927,11 @@ function _usePasswordless() {
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens: TokensFromSignIn) => {
           updateTokens(newTokens);
+
+          // Update the device key from the new tokens, or rehydrate it from
+          // the remembered-device record when the tokens don't carry one (the
+          // plaintext flow never carries one).
+          await rehydrateDeviceKey(newTokens);
 
           // If rememberDevice callback requested and Cognito needs confirmation
           if (
