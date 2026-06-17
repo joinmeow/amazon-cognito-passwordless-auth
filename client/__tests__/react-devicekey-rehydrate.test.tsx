@@ -270,4 +270,88 @@ describe("deviceKey rehydration in SRP / plaintext tokensCb", () => {
 
     expect(result.current.deviceKey).toBe("us-west-2_device-key-user-b");
   });
+
+  it("does not rehydrate deviceKey after a cross-tab sign-out clears the session mid-lookup", async () => {
+    // A cross-tab sign-out reaches THIS tab via a 'storage' event →
+    // loadTokens() → retrieveTokens() returns undefined → _setTokens(undefined),
+    // which moves the session marker to undefined. An in-flight rehydrate
+    // lookup must then skip its late SET_DEVICE_KEY. This teardown path does
+    // NOT go through the signOut callback, so it is only covered because the
+    // marker is maintained in _setTokens (not just the sign-in/sign-out cbs).
+    let resolveLookup!: (rec: {
+      deviceKey: string;
+      groupKey: string;
+      password: string;
+      remembered: boolean;
+    }) => void;
+    mockGetRememberedDevice.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLookup = resolve;
+        })
+    );
+    // retrieveTokens() returns undefined (beforeEach), so the cross-tab reload
+    // sees a signed-out storage.
+
+    let capturedTokensCb:
+      | ((tokens: TokensFromSignIn) => void | Promise<void>)
+      | undefined;
+    mockAuthSRP.mockImplementation(((props: {
+      tokensCb?: typeof capturedTokensCb;
+    }) => {
+      capturedTokensCb = props?.tokensCb;
+      return {
+        signedIn: Promise.resolve(tokensWithoutDeviceKey),
+        abort: jest.fn(),
+      };
+    }) as never);
+
+    const { result } = renderHook(() => usePasswordless(), {
+      wrapper: makeWrapper(),
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    act(() => {
+      result.current.authenticateWithSRP({
+        username: "user-a",
+        password: "pw",
+      });
+    });
+    expect(capturedTokensCb).toBeDefined();
+
+    let tokensCbDone!: Promise<void>;
+    await act(async () => {
+      tokensCbDone = Promise.resolve(capturedTokensCb!(tokensWithoutDeviceKey));
+      await Promise.resolve();
+    });
+    expect(mockGetRememberedDevice).toHaveBeenCalledWith("user-a");
+
+    // Cross-tab sign-out: a token key changes in another tab → loadTokens()
+    // re-reads storage (now empty) and clears tokens via _setTokens(undefined).
+    await act(async () => {
+      globalThis.dispatchEvent(
+        new StorageEvent("storage", {
+          key: "CognitoIdentityServiceProvider.test-client-id.user-a.accessToken",
+          newValue: null,
+        })
+      );
+      // let the async loadTokens() run to _setTokens(undefined)
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // The lookup resolves after the cross-tab teardown: the guard must skip it.
+    await act(async () => {
+      resolveLookup({
+        deviceKey: "us-west-2_remembered-device",
+        groupKey: "grp",
+        password: "pw",
+        remembered: true,
+      });
+      await tokensCbDone;
+    });
+
+    expect(result.current.deviceKey).toBeNull();
+  });
 });
