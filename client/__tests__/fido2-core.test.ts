@@ -875,6 +875,75 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(1);
       });
 
+      it("ends the flow promptly when a modal takeover supersedes it during the renewal-initiate backoff", async () => {
+        // The harder supersede case: a modal "sign in with passkey" takeover
+        // marks the conditional flow superseded but does NOT abort the
+        // conditional caller's own signal (only a non-conditional request taking
+        // the credentials.get() lock sets activeConditionalFlow.superseded). The
+        // initiate-retry backoff therefore cannot rely on the caller signal — it
+        // must wake on the supersede itself and end the flow at once, instead of
+        // sleeping out the full backoff behind the now-foreground modal sign-in.
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1)) // conditional first challenge
+          .mockRejectedValue(new Error("network blip")); // renewals keep failing
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        // The modal takeover goes through the REAL fido2getCredential, which
+        // takes the lock and marks the active conditional flow superseded. A
+        // direct challenge is supplied, so it issues navigator.credentials.get
+        // without an initiateAuth round-trip of its own.
+        const modalGet = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+        cleanup = setupWebAuthnMock({
+          customCredentials: { get: modalGet, create: jest.fn() } as never,
+        });
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        let settled: { value: unknown } | { error: unknown } | undefined;
+        void prepared.then(
+          (value) => (settled = { value }),
+          (error: unknown) => (settled = { error })
+        );
+
+        // Reach the renewal boundary: the first renewal initiate fails and the
+        // flow enters its (1s) backoff. It must NOT have ended yet.
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        expect(settled).toBeUndefined();
+
+        // Modal takeover mid-backoff: marks the conditional flow superseded.
+        const modal = fido2getCredential({
+          challenge: TEST_CHALLENGES.basic,
+        }).catch((err: unknown) => err);
+
+        // Flush microtasks ONLY — do NOT advance the 1s backoff. With the
+        // supersede-driven wake the flow has already ended; without it (the bug)
+        // it would still be sleeping and `settled` would remain undefined.
+        await jest.advanceTimersByTimeAsync(0);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(settled).toBeDefined();
+        const { error } = settled as { error: unknown };
+        expect(error).toBeInstanceOf(Fido2AbortError);
+        expect((error as Fido2AbortError).superseded).toBe(true);
+
+        // The takeover itself proceeded, and the backoff was cut short: only the
+        // first challenge + the single failed renewal initiate ran (no further
+        // renewal attempts were consumed waiting out the backoff).
+        await modal;
+        expect(modalGet).toHaveBeenCalledTimes(1);
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+      });
+
       it("does not renew when the credential resolves before the renewal interval", async () => {
         mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
         const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
