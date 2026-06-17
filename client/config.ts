@@ -286,6 +286,15 @@ export function configure(config?: ConfigInput) {
         "Invalid configuration: hostedUi.domain is required. Amazon Cognito serves the OAuth2 endpoints (/oauth2/authorize, /oauth2/token) only on your user pool domain, e.g. example.auth.eu-west-1.amazoncognito.com or a custom domain. It may only be omitted if cognitoIdpEndpoint is a full https:// URL (e.g. a proxy you control) that also serves the OAuth2 endpoints — an AWS region (e.g. eu-west-1) is not such a URL, and plaintext http:// is not allowed because OAuth2 authorization codes and tokens travel to that origin"
       );
     }
+    // Reject a plaintext http:// hostedUi.domain: it becomes the OAuth2 base
+    // (where authorization codes and tokens travel), so it must be https://.
+    // A bare domain is fine (https:// is assumed by normalizeEndpoint). This
+    // mirrors the http:// rejection already applied to cognitoIdpEndpoint.
+    if (config.hostedUi?.domain?.startsWith("http://")) {
+      throw new Error(
+        "Invalid configuration: hostedUi.domain must not use plaintext http:// — it is the OAuth2 base that authorization codes and tokens travel to. Use https:// or a bare domain (https:// is assumed)."
+      );
+    }
 
     // Wrap the user-provided or default fetch in retry logic (pass debug callback)
     const baseFetch = (config.fetch ?? Defaults.fetch).bind(globalThis);

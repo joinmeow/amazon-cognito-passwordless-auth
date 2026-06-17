@@ -35,6 +35,35 @@ describe("OAuth2 endpoints (Hosted UI domain)", () => {
       ).toThrow("hostedUi.domain is required");
     });
 
+    it("throws when hostedUi.domain uses plaintext http://", () => {
+      // The domain becomes the OAuth2 base that codes/tokens travel to, so
+      // it must be https:// (mirrors the cognitoIdpEndpoint http:// rejection)
+      expect(() =>
+        configure({
+          cognitoIdpEndpoint: "eu-west-1",
+          clientId: "test-client-id",
+          hostedUi: {
+            domain: "http://auth.example.com",
+            redirectSignIn,
+          },
+        })
+      ).toThrow("hostedUi.domain must not use plaintext http://");
+    });
+
+    it("accepts a bare hostedUi.domain (https:// is assumed)", () => {
+      configure({
+        cognitoIdpEndpoint: "eu-west-1",
+        clientId: "test-client-id",
+        hostedUi: {
+          domain: "example.auth.eu-west-1.amazoncognito.com",
+          redirectSignIn,
+        },
+      });
+      expect(getAuthorizeEndpoint()).toBe(
+        "https://example.auth.eu-west-1.amazoncognito.com/oauth2/authorize"
+      );
+    });
+
     it("throws when hostedUi is configured without domain and cognitoIdpEndpoint is an https:// prefixed region", () => {
       // https://eu-west-1 is not a usable OAuth2 origin: it is just the bare
       // AWS region with a scheme glued on, not a real custom URL

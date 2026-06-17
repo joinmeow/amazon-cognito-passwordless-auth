@@ -297,11 +297,15 @@ export async function storeTokens(tokens: TokensToStore) {
 }
 
 /**
- * The username of the user that last signed in on this device (tracked under
- * the Amplify-compatible LastAuthUser storage key). This is the CANONICAL
- * user id (not an alias), so it can be used to locate per-user records (e.g.
- * remembered devices) before authentication, when the user may have entered
- * an alias (e-mail, phone number).
+ * The username of the user that last signed in on this device (the
+ * Amplify-compatible LastAuthUser storage key) — the canonical user id, e.g.
+ * to pre-fill a sign-in form.
+ *
+ * Do NOT use this to attribute per-user records (remembered devices, etc.)
+ * to a user BEFORE authentication: on a shared browser LastAuthUser may
+ * belong to a different user, so a record keyed by it could be
+ * mis-attributed (the plaintext device-key flow deliberately keys by the
+ * username as entered for exactly this reason).
  */
 export async function getLastAuthUsername(): Promise<string | undefined> {
   const { clientId, storage } = configure();

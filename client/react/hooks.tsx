@@ -792,7 +792,17 @@ function _usePasswordless() {
     // expired-but-refreshable session via retrieveTokensForRefresh),
     // self-gates to a no-op when there is no session, and dedups against any
     // in-memory schedule, so it is idempotent with the sign-in path.
-    void scheduleRefresh({ abort: abortController.signal });
+    // Promise.resolve wrap: fire-and-forget, and resilient if scheduleRefresh
+    // is stubbed to a non-promise in tests.
+    void Promise.resolve(
+      scheduleRefresh({ abort: abortController.signal })
+    ).catch((err) => {
+      // An abort (the component unmounted mid-acquisition) is expected and
+      // must not surface as an unhandled rejection. Log anything else.
+      if (!abortController.signal.aborted) {
+        debug?.("Failed to schedule refresh on mount:", err);
+      }
+    });
 
     // Check for OAuth callback
     const checkOAuthCallback = async () => {

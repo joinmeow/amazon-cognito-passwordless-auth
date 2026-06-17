@@ -276,18 +276,20 @@ export async function initiateAuth<
     }
   }
 
-  // Add device key to auth parameters if provided and it's a valid authentication flow for device
-  if (
-    deviceKey &&
+  // Add device key to auth parameters if provided and it's a valid
+  // authentication flow for device. Do NOT mutate the caller's
+  // authParameters object — callers reuse it across retry attempts, so it is
+  // merged into the request body below instead.
+  const includeDeviceKey =
+    !!deviceKey &&
     (authflow === "REFRESH_TOKEN" ||
       authflow === "USER_PASSWORD_AUTH" ||
       authflow === "USER_SRP_AUTH" ||
-      authflow === "CUSTOM_AUTH")
-  ) {
+      authflow === "CUSTOM_AUTH");
+  if (includeDeviceKey) {
     debug?.(
       `Including device key ${redactSecret(deviceKey)} in ${authflow} flow`
     );
-    authParameters.DEVICE_KEY = deviceKey;
   }
 
   return fetch(
@@ -307,6 +309,7 @@ export async function initiateAuth<
         ClientId: clientId,
         AuthParameters: {
           ...authParameters,
+          ...(includeDeviceKey && { DEVICE_KEY: deviceKey }),
           ...(clientSecret && {
             SECRET_HASH: await calculateSecretHash(authParameters.USERNAME),
           }),
