@@ -858,14 +858,35 @@ function _usePasswordless() {
         clientId &&
         e.key.includes(`CognitoIdentityServiceProvider.${clientId}`)
       ) {
-        // Check if it's a token key (accessToken, idToken, or refreshToken)
-        if (
+        const isTokenKey =
           e.key.includes(".accessToken") ||
           e.key.includes(".idToken") ||
-          e.key.includes(".refreshToken")
-        ) {
+          e.key.includes(".refreshToken");
+        const isLastAuthUserKey = e.key.includes(".LastAuthUser");
+
+        // A removal (newValue === null) of a token key or the LastAuthUser key
+        // means another tab signed the user out. A change (newValue present)
+        // — e.g. a token refresh in another tab — must NOT trigger a sign-out,
+        // only a token reload to pick up the rotated values.
+        const isSessionRemoved =
+          (isTokenKey || isLastAuthUserKey) && e.newValue == null;
+
+        if (isSessionRemoved) {
+          debug?.(`Detected cross-tab sign-out in storage for key: ${e.key}`);
+          // Mirror the same-tab signOut reset: clear all per-user React state
+          // via the SIGN_OUT reducer action and reset the per-user refs so a
+          // stale getUser response or fetch cooldown cannot bleed across into
+          // the next user's session (the same class of bug PR #64 fixed for
+          // the same tab). The reducer is idempotent, so receiving this for
+          // each removed key (separate storage events) is harmless.
+          lastActivityAtRef.current = Date.now();
+          lastFetchedMfaTokenRef.current = undefined;
+          lastMfaFetchTimeRef.current = 0;
+          dispatch({ type: "SIGN_OUT" });
+          void loadTokens();
+        } else if (isTokenKey) {
+          // Token CHANGED in another tab (e.g. a refresh) — reload tokens.
           debug?.(`Detected token change in storage for key: ${e.key}`);
-          // Reload tokens from storage
           void loadTokens();
         }
       }
