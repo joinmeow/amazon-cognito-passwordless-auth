@@ -322,6 +322,14 @@ async function scheduleRefreshUnlocked({
         state.refreshTimer = undefined;
         state.nextRefreshTime = undefined;
       }
+      // A fresh schedule supersedes any pending failure-backoff retry: cancel
+      // it too, otherwise a stale retry from a prior failure fires an extra
+      // refresh after we re-arm. (The other re-entry points — abort,
+      // cleanupUserRefreshState, forceRefreshTokens — already cancel it.)
+      if (state.retryTimer) {
+        state.retryTimer();
+        state.retryTimer = undefined;
+      }
     };
     clearExistingTimer();
 
@@ -423,14 +431,17 @@ async function scheduleRefreshUnlocked({
         // this closure. The abort listener and cleanup only cancel a retry that
         // is already armed; a teardown landing before this catch leaves nothing
         // to cancel. Arming a retry on a torn-down state would resurrect refresh
-        // scheduling for whatever session is in storage, so bail out here
-        // without touching the stale state.
+        // scheduling for whatever session is in storage, so bail out without
+        // touching the stale state. Also bail when there is no username: a
+        // no-username refresh runs on a throwaway state never stored in
+        // refreshStateMap, so a retry armed on it could never be cancelled.
         if (
           abort?.aborted ||
-          (username && refreshStateMap.get(username) !== state)
+          !username ||
+          refreshStateMap.get(username) !== state
         ) {
           logDebug(
-            "Session torn down during the failed refresh; not scheduling a retry"
+            "Session torn down (or no user) during the failed refresh; not scheduling a retry"
           );
           return;
         }

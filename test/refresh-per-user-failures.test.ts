@@ -302,6 +302,36 @@ describe("Per-user scheduled-refresh failure backoff", () => {
     expect(retriesAfter).toBe(retriesBefore);
   }, TEST_TIMEOUT_MS);
 
+  test("a fresh (re)schedule cancels a pending failure-backoff retry timer", async () => {
+    // A failure-backoff retry is armed, then a fresh scheduleRefresh re-arms a
+    // normal refresh. clearExistingTimer must cancel the stale retry too,
+    // otherwise it later fires a redundant extra refresh on top of the fresh
+    // schedule. (The cleanup/abort/forceRefresh re-entry points already cancel
+    // it; the normal re-schedule path is the gap this covers.)
+    const recordsBase = timerRecords.length;
+
+    await storeTokens(shortDelayTokens("alice"));
+    await scheduleRefresh();
+    await waitFor(() =>
+      debugLogs.some((l) => l.includes("Scheduling retry 1/5"))
+    );
+
+    const retryTimers = timerRecords
+      .slice(recordsBase)
+      .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
+    expect(retryTimers.length).toBe(1);
+    const retryTimer = retryTimers[0];
+    expect(retryTimer.cancel).not.toHaveBeenCalled();
+
+    // A fresh schedule (e.g. watchdog / page reload / visibility change) for the
+    // same user re-arms a normal refresh; the stale backoff retry must be
+    // cancelled as part of clearing existing timers.
+    await storeTokens(shortDelayTokens("alice"));
+    await scheduleRefresh();
+
+    expect(retryTimer.cancel).toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
   test("the scheduled-refresh delay used is the short-lived path (sanity)", async () => {
     // Guards the token tuning above: if the delay drifted to <=60s the
     // immediate path would run and the retry-path tests would silently stop
@@ -385,9 +415,7 @@ describe("Per-user scheduled-refresh failure backoff", () => {
 
     // And the guard logged its bail-out instead.
     expect(
-      debugLogs.some((l) =>
-        l.includes("Session torn down during the failed refresh")
-      )
+      debugLogs.some((l) => l.includes("Session torn down"))
     ).toBe(true);
   }, TEST_TIMEOUT_MS);
 });
