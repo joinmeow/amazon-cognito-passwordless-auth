@@ -1798,9 +1798,25 @@ function _usePasswordless() {
           dispatch({ type: "SET_AUTH_METHOD", payload: "SRP" });
           // Don't clear credentials here - auth method controls visibility
 
-          // Ensure device key is updated if present
+          // Update the device key from the new tokens, or rehydrate it from
+          // the remembered-device record when the tokens don't carry one
+          // (e.g. a re-sign-in after the SIGN_OUT reset nulled
+          // state.deviceKey) — mirrors the FIDO2 tokensCb, so confirmDevice()
+          // and the device UI see the key.
           if (newTokens.deviceKey) {
             dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
+          } else {
+            try {
+              const existing = await getRememberedDevice(newTokens.username);
+              if (existing?.deviceKey) {
+                dispatch({
+                  type: "SET_DEVICE_KEY",
+                  payload: existing.deviceKey,
+                });
+              }
+            } catch {
+              // ignore
+            }
           }
 
           // Force sign-in status update after setting tokens
@@ -1895,6 +1911,27 @@ function _usePasswordless() {
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens: TokensFromSignIn) => {
           updateTokens(newTokens);
+
+          // Update the device key from the new tokens, or rehydrate it from
+          // the remembered-device record when the tokens don't carry one
+          // (the plaintext tokensCb did not set deviceKey in state at all) —
+          // mirrors the FIDO2 tokensCb so confirmDevice() and the device UI
+          // see the key.
+          if (newTokens.deviceKey) {
+            dispatch({ type: "SET_DEVICE_KEY", payload: newTokens.deviceKey });
+          } else {
+            try {
+              const existing = await getRememberedDevice(newTokens.username);
+              if (existing?.deviceKey) {
+                dispatch({
+                  type: "SET_DEVICE_KEY",
+                  payload: existing.deviceKey,
+                });
+              }
+            } catch {
+              // ignore
+            }
+          }
 
           // If rememberDevice callback requested and Cognito needs confirmation
           if (
