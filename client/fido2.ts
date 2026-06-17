@@ -1465,7 +1465,12 @@ export async function prepareFido2SignIn({
         }
       } finally {
         if (activeConditionalFlow === flow) {
-          activeConditionalFlow = previousFlow;
+          // This flow superseded previousFlow at setup, so by here previousFlow
+          // is dead; restoring it would leave activeConditionalFlow pointing at
+          // a superseded flow instead of "no live conditional flow". Restore
+          // only a still-live previous flow, else clear to undefined.
+          activeConditionalFlow =
+            previousFlow && !previousFlow.superseded ? previousFlow : undefined;
         }
       }
     } else {
