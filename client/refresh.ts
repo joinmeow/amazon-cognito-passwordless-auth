@@ -31,6 +31,21 @@ type RefreshState = {
   lastRefreshTime?: number;
   /** Wall-clock timestamp (ms) when refresh was last scheduled */
   lastScheduleTime?: number;
+  /**
+   * Per-user count of consecutive scheduled-refresh failures, driving the
+   * failure backoff. Per-user (not module-global) so one user's repeated
+   * failures don't throttle another user's backoff after a user switch.
+   * Reset to 0 on a successful refresh, on hitting the failure cap, and on
+   * user teardown (cleanupUserRefreshState).
+   */
+  consecutiveFailures: number;
+  /**
+   * Cancel handle for the failure-backoff retry timer armed after a failed
+   * scheduled refresh. Tracked per-user so cleanupUserRefreshState, the
+   * schedule abort, and forceRefreshTokens can cancel it — otherwise it can
+   * fire for a session that has already been signed out / torn down.
+   */
+  retryTimer?: ReturnType<typeof setTimeoutWallClock>;
 };
 
 // Per-user refresh state to prevent conflicts
@@ -41,12 +56,12 @@ function getRefreshState(username?: string): RefreshState {
   if (!username) {
     // For operations without a username (like initial page load),
     // create a temporary state that won't interfere with user-specific states
-    return { isRefreshing: false };
+    return { isRefreshing: false, consecutiveFailures: 0 };
   }
 
   let state = refreshStateMap.get(username);
   if (!state) {
-    state = { isRefreshing: false };
+    state = { isRefreshing: false, consecutiveFailures: 0 };
     refreshStateMap.set(username, state);
   }
   return state;
@@ -65,7 +80,6 @@ let autoCleanupHandler: (() => void) | undefined;
 
 // Max consecutive refresh failures before giving up
 const MAX_CONSECUTIVE_REFRESH_FAILURES = 5;
-let consecutiveRefreshFailures = 0;
 
 // Generate unique tab ID for this tab
 const TAB_ID =
@@ -401,26 +415,30 @@ async function scheduleRefreshUnlocked({
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
-        consecutiveRefreshFailures++;
+        state.consecutiveFailures++;
 
-        if (consecutiveRefreshFailures >= MAX_CONSECUTIVE_REFRESH_FAILURES) {
+        if (state.consecutiveFailures >= MAX_CONSECUTIVE_REFRESH_FAILURES) {
           logDebug(
             `Max refresh failures (${MAX_CONSECUTIVE_REFRESH_FAILURES}) reached, giving up`
           );
-          consecutiveRefreshFailures = 0; // Reset for next time
+          state.consecutiveFailures = 0; // Reset for next time
           return;
         }
 
         // Exponential backoff: 30s, 60s, 120s, 240s
         const backoffMs = Math.min(
-          30000 * Math.pow(2, consecutiveRefreshFailures - 1),
+          30000 * Math.pow(2, state.consecutiveFailures - 1),
           240000
         );
         logDebug(
-          `Scheduling retry ${consecutiveRefreshFailures}/${MAX_CONSECUTIVE_REFRESH_FAILURES} in ${backoffMs / 1000}s`
+          `Scheduling retry ${state.consecutiveFailures}/${MAX_CONSECUTIVE_REFRESH_FAILURES} in ${backoffMs / 1000}s`
         );
 
-        setTimeoutWallClock(() => {
+        // Track the retry timer in the per-user state so it can be cancelled
+        // (cleanupUserRefreshState, the schedule abort, forceRefreshTokens):
+        // otherwise it fires for a session that may already be torn down.
+        state.retryTimer = setTimeoutWallClock(() => {
+          state.retryTimer = undefined;
           void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
         }, backoffMs);
       }
@@ -433,6 +451,12 @@ async function scheduleRefreshUnlocked({
           state.refreshTimer();
           state.refreshTimer = undefined;
           logDebug("Refresh scheduling aborted");
+        }
+        // Also cancel any pending failure-backoff retry timer so an aborted
+        // schedule can't resurrect itself after sign-out/teardown.
+        if (state.retryTimer) {
+          state.retryTimer();
+          state.retryTimer = undefined;
         }
       },
       { once: true }
@@ -865,8 +889,8 @@ async function performRefresh({
         // Only mark as completed after everything succeeds
         await markRefreshCompleted();
 
-        // Reset failure counter on success
-        consecutiveRefreshFailures = 0;
+        // Reset this user's failure counter on success
+        state.consecutiveFailures = 0;
       } catch (error) {
         // If anything fails after we got new tokens, we need to clear the attempt lock
         // so other tabs can retry
@@ -1012,6 +1036,12 @@ export async function forceRefreshTokens(
     state.refreshTimer();
     state.refreshTimer = undefined;
   }
+  // Cancel any pending failure-backoff retry timer too: we are about to
+  // refresh now, so a stale backoff retry must not fire afterwards.
+  if (state.retryTimer) {
+    state.retryTimer();
+    state.retryTimer = undefined;
+  }
 
   // force: true skips the dedup/coordination check, but the refresh still
   // goes through the per-user lock (no skipLock) so it serializes with
@@ -1119,9 +1149,17 @@ export function cleanupUserRefreshState(username?: string): void {
     state.nextRefreshTime = undefined;
   }
 
+  // Cancel any pending failure-backoff retry timer so it can't fire (and
+  // re-schedule a refresh) for a session that has just been signed out.
+  if (state.retryTimer) {
+    state.retryTimer();
+    state.retryTimer = undefined;
+  }
+
   // Reset refresh state
   state.isRefreshing = false;
   state.lastRefreshTime = undefined;
+  state.consecutiveFailures = 0;
 
   // Clear user-specific state from the map
   if (username) {
