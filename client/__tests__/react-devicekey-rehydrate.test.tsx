@@ -181,4 +181,93 @@ describe("deviceKey rehydration in SRP / plaintext tokensCb", () => {
     });
     expect(result.current.deviceKey).toBeNull();
   });
+
+  it("does not let a stale rehydrate lookup overwrite a newer sign-in's deviceKey", async () => {
+    // The rehydrate awaits getRememberedDevice() after the session is already
+    // visible. If a newer sign-in (different user, carrying its own deviceKey)
+    // lands while user A's lookup is in flight, A's late resolution must NOT
+    // overwrite the newer user's deviceKey.
+    const tokensA: TokensFromSignIn = {
+      ...tokensWithoutDeviceKey,
+      username: "user-a",
+    };
+    const tokensB: TokensFromSignIn = {
+      ...tokensWithoutDeviceKey,
+      username: "user-b",
+      deviceKey: "us-west-2_device-key-user-b",
+    };
+
+    // A's remembered-device lookup is deferred so we can complete B's sign-in
+    // before it resolves.
+    let resolveLookupA!: (rec: {
+      deviceKey: string;
+      groupKey: string;
+      password: string;
+      remembered: boolean;
+    }) => void;
+    mockGetRememberedDevice.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLookupA = resolve;
+        })
+    );
+
+    let capturedTokensCb:
+      | ((tokens: TokensFromSignIn) => void | Promise<void>)
+      | undefined;
+    mockAuthSRP.mockImplementation(((props: {
+      tokensCb?: typeof capturedTokensCb;
+    }) => {
+      capturedTokensCb = props?.tokensCb;
+      return {
+        signedIn: Promise.resolve(tokensA),
+        abort: jest.fn(),
+      };
+    }) as never);
+
+    const { result } = renderHook(() => usePasswordless(), {
+      wrapper: makeWrapper(),
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    act(() => {
+      result.current.authenticateWithSRP({
+        username: "user-a",
+        password: "pw",
+      });
+    });
+    expect(capturedTokensCb).toBeDefined();
+
+    // Drive user A's tokensCb but do NOT await it: it marks the session
+    // current (user-a), then suspends on the deferred lookup.
+    let tokensADone!: Promise<void>;
+    await act(async () => {
+      tokensADone = Promise.resolve(capturedTokensCb!(tokensA));
+      await Promise.resolve();
+    });
+    expect(mockGetRememberedDevice).toHaveBeenCalledWith("user-a");
+
+    // A newer sign-in for user B completes (it carries its own deviceKey, so
+    // it takes the synchronous path and overwrites the current-session marker).
+    await act(async () => {
+      await capturedTokensCb!(tokensB);
+    });
+    expect(result.current.deviceKey).toBe("us-west-2_device-key-user-b");
+
+    // A's lookup resolves too late: the current session is now user B, so the
+    // guard must skip A's SET_DEVICE_KEY and leave B's deviceKey untouched.
+    await act(async () => {
+      resolveLookupA({
+        deviceKey: "us-west-2_remembered-device-a",
+        groupKey: "grp",
+        password: "pw",
+        remembered: true,
+      });
+      await tokensADone;
+    });
+
+    expect(result.current.deviceKey).toBe("us-west-2_device-key-user-b");
+  });
 });
