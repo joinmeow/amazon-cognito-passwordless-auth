@@ -234,6 +234,30 @@ export interface PreparedFido2SignIn {
  */
 export const COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS = 150_000; // 2.5 minutes
 
+/**
+ * How many times to attempt the per-iteration `initiateFido2Challenge()` call
+ * that refreshes the Cognito CUSTOM_AUTH session during a pending conditional
+ * (autofill) request, before giving up and ending the flow.
+ *
+ * A conditional request can stay pending for a long time, so a single
+ * transient network failure of the renewal initiate must not end passkey
+ * autofill — the pending request could keep waiting. Retrying a bounded number
+ * of times rides out brief blips; once the budget is exhausted the failure
+ * propagates and ends the flow, as before.
+ */
+export const RENEWAL_INITIATE_MAX_ATTEMPTS = 3;
+
+/**
+ * Base backoff between retries of a failed renewal `initiateFido2Challenge()`.
+ * Backoff grows linearly per attempt (1s, 2s, ...) and is capped by
+ * {@link RENEWAL_INITIATE_BACKOFF_CAP_MS}. A supersede/abort during the backoff
+ * ends the flow rather than waiting it out.
+ */
+export const RENEWAL_INITIATE_BACKOFF_BASE_MS = 1000;
+
+/** Upper bound on the per-retry renewal-initiate backoff. */
+export const RENEWAL_INITIATE_BACKOFF_CAP_MS = 4000;
+
 type AuthenticatorAttestationResponseWithOptionalMembers =
   AuthenticatorAttestationResponse & {
     getTransports?: () => "" | string[];
@@ -1250,13 +1274,58 @@ export async function prepareFido2SignIn({
         throw new Fido2AbortError();
       };
 
+      // Backoff that wakes promptly on a caller abort so a supersede/abort
+      // during the wait ends the flow instead of being waited out.
+      const backoffSleep = (ms: number) =>
+        new Promise<void>((resolve) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, ms);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+
+      // Refresh the Cognito CUSTOM_AUTH challenge for a renewal iteration,
+      // riding out transient failures of initiateFido2Challenge(): a single
+      // network blip must not end an otherwise-pending autofill request. A
+      // supersede/abort is never retried — it ends the flow promptly.
+      const initiateRenewalChallenge = async () => {
+        for (let attempt = 1; ; attempt++) {
+          // A takeover/abort that landed before (or while) initiating must end
+          // the flow, not be swallowed as a transient failure and retried.
+          if (flow.superseded || signal?.aborted) abortFlow();
+          try {
+            return await initiateFido2Challenge();
+          } catch (err) {
+            // Supersede/abort wins over any retry: end the flow now.
+            if (flow.superseded || signal?.aborted) abortFlow();
+            if (attempt >= RENEWAL_INITIATE_MAX_ATTEMPTS) {
+              // Budget exhausted: propagate, ending the flow as before.
+              throw err;
+            }
+            const backoff = Math.min(
+              RENEWAL_INITIATE_BACKOFF_BASE_MS * attempt,
+              RENEWAL_INITIATE_BACKOFF_CAP_MS
+            );
+            debug?.(
+              `⚠️ Renewal initiateFido2Challenge() failed (attempt ${attempt}/${RENEWAL_INITIATE_MAX_ATTEMPTS}) - retrying in ${backoff}ms`
+            );
+            await backoffSleep(backoff);
+          }
+        }
+      };
+
       try {
         for (;;) {
           // A modal takeover may have superseded this flow during the previous
           // iteration's renewal gap, including while awaiting initiate below.
           if (flow.superseded || signal?.aborted) abortFlow();
 
-          const challenge = await initiateFido2Challenge();
+          const challenge = await initiateRenewalChallenge();
 
           // Re-check: a takeover could have landed during the (awaited)
           // initiate call — exactly the window pendingConditionalGet misses.

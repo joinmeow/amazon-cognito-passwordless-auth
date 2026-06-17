@@ -750,6 +750,131 @@ describe("FIDO2 Core Functionality", () => {
         expect(credentialGetter).toHaveBeenCalledTimes(3);
       });
 
+      it("rides out a transient renewal-initiate failure (retries then succeeds) without ending the flow", async () => {
+        // A network blip on the per-renewal initiateFido2Challenge() must not
+        // kill the still-pending autofill request: the renewal retries with
+        // backoff and the flow ultimately resolves with the assertion.
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1)) // first challenge
+          .mockRejectedValueOnce(new Error("network blip 1")) // renewal try 1
+          .mockRejectedValueOnce(new Error("network blip 2")) // renewal try 2
+          .mockResolvedValueOnce(challengeResponse(2)); // renewal try 3 OK
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const settled = prepared.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error })
+        );
+
+        // Reach the renewal boundary: the pending get() is aborted and the
+        // renewal initiate begins (and fails transiently).
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        // Advance through both retry backoffs (1s then 2s).
+        await jest.advanceTimersByTimeAsync(1000);
+        await jest.advanceTimersByTimeAsync(2000);
+
+        const outcome = await settled;
+        expect(outcome).toEqual({
+          value: {
+            username: "alice",
+            credential: parsedAssertion,
+            session: "session-2",
+            existingDeviceKey: undefined,
+          },
+        });
+        // 4 initiate calls: 1 first challenge + 3 renewal attempts (2 fail, 1 ok)
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(4);
+        expect(credentialGetter).toHaveBeenCalledTimes(2);
+      });
+
+      it("ends the flow when renewal-initiate fails more than the retry budget", async () => {
+        // Retries are bounded: once the budget is exhausted the failure
+        // propagates and ends the prepared flow (it rejects), rather than
+        // retrying forever.
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1)) // first challenge
+          .mockRejectedValue(new Error("persistent network failure")); // all renewals
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        // Exhaust both backoffs between the 3 attempts.
+        await jest.advanceTimersByTimeAsync(1000);
+        await jest.advanceTimersByTimeAsync(2000);
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toBe("persistent network failure");
+        // 1 first challenge + exactly RENEWAL_INITIATE_MAX_ATTEMPTS (3) renewals
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(4);
+        // The second get() never ran: the flow ended on exhausted retries
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
+      it("ends the flow promptly on a caller abort during the renewal-initiate backoff", async () => {
+        // A supersede/abort during the retry backoff must end the flow
+        // immediately, not after the retry budget is exhausted.
+        jest.useFakeTimers();
+        mockInitiateAuth
+          .mockResolvedValueOnce(challengeResponse(1)) // first challenge
+          .mockRejectedValue(new Error("network blip")); // renewals keep failing
+
+        const credentialGetter = jest
+          .fn()
+          .mockImplementationOnce(pendingUntilAborted)
+          .mockResolvedValueOnce(parsedAssertion);
+        const abortController = new AbortController();
+
+        const prepared = prepareFido2SignIn({
+          username: "alice",
+          mediation: "conditional",
+          credentialGetter,
+          signal: abortController.signal,
+        });
+        const outcome = prepared.catch((err: unknown) => err);
+
+        // Reach the renewal boundary; the first renewal attempt fails and we
+        // enter the (1s) backoff.
+        await jest.advanceTimersByTimeAsync(
+          COGNITO_AUTH_SESSION_RENEWAL_INTERVAL_MS
+        );
+        // Abort mid-backoff (before the 1s elapses): the flow must end now,
+        // without consuming the remaining retry attempts.
+        abortController.abort();
+        await jest.advanceTimersByTimeAsync(0);
+
+        const err = await outcome;
+        expect(err).toBeInstanceOf(Fido2AbortError);
+        // 1 first challenge + only 1 renewal attempt before the abort ended it
+        expect(mockInitiateAuth).toHaveBeenCalledTimes(2);
+        expect(credentialGetter).toHaveBeenCalledTimes(1);
+      });
+
       it("does not renew when the credential resolves before the renewal interval", async () => {
         mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
         const credentialGetter = jest.fn().mockResolvedValue(parsedAssertion);
