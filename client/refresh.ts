@@ -415,6 +415,26 @@ async function scheduleRefreshUnlocked({
         });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
+
+        // The scheduled refresh ran and failed, but the session may have been
+        // torn down WHILE refreshTokens() was in flight: the abort could have
+        // fired, or cleanupUserRefreshState()/signOut() could have deleted this
+        // user's state from refreshStateMap, orphaning the `state` captured in
+        // this closure. The abort listener and cleanup only cancel a retry that
+        // is already armed; a teardown landing before this catch leaves nothing
+        // to cancel. Arming a retry on a torn-down state would resurrect refresh
+        // scheduling for whatever session is in storage, so bail out here
+        // without touching the stale state.
+        if (
+          abort?.aborted ||
+          (username && refreshStateMap.get(username) !== state)
+        ) {
+          logDebug(
+            "Session torn down during the failed refresh; not scheduling a retry"
+          );
+          return;
+        }
+
         state.consecutiveFailures++;
 
         if (state.consecutiveFailures >= MAX_CONSECUTIVE_REFRESH_FAILURES) {

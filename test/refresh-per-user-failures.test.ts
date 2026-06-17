@@ -318,4 +318,76 @@ describe("Per-user scheduled-refresh failure backoff", () => {
       debugLogs.some((l) => l.includes("Scheduling token refresh"))
     ).toBe(true);
   });
+
+  test("a scheduled refresh that fails AFTER the session is torn down does not arm a retry", async () => {
+    // Race window the guard covers: the scheduled timer has fired and the
+    // refresh round-trip is in flight, then a sign-out tears the user down,
+    // and only THEN does the refresh reject. cleanupUserRefreshState had no
+    // armed retry timer to cancel (the failure hadn't happened yet) and the
+    // abort listener, if any, already ran; without the guard the catch would
+    // arm a fresh backoff retry on the orphaned state, resurrecting refresh
+    // scheduling for a dead session.
+    const recordsBase = timerRecords.length;
+
+    // A fetch we hold pending and reject on command, so we can tear the session
+    // down strictly BETWEEN the timer firing and the refresh rejecting.
+    let rejectFetch!: (err: Error) => void;
+    let fetchCalled = false;
+    const fetchGate = new Promise<never>((_, reject) => {
+      rejectFetch = reject;
+    });
+    fetchMock.mockImplementation(() => {
+      fetchCalled = true;
+      // A non-network message keeps getTokensFromRefreshToken from doing its
+      // own internal retry, so fetch is hit exactly once.
+      return fetchGate;
+    });
+
+    await storeTokens(shortDelayTokens("alice"));
+    await scheduleRefresh();
+
+    // Wait until the scheduled timer fired and the refresh is in flight.
+    await waitFor(() => fetchCalled);
+
+    // Sign out mid-flight: deletes alice's state from refreshStateMap.
+    cleanupUserRefreshState("alice");
+
+    const retriesBefore = debugLogs.filter((l) =>
+      l.includes("Scheduling retry")
+    ).length;
+
+    // Now let the in-flight refresh fail. The catch must observe the torn-down
+    // state and bail WITHOUT arming a backoff retry.
+    rejectFetch(new Error("Simulated refresh failure"));
+
+    // Deterministically wait until the scheduled-refresh catch has actually run
+    // (it logs this at the top, before deciding whether to arm a retry). Once
+    // it appears, the arm-or-bail decision has been made synchronously, so the
+    // assertions below see the final state rather than racing the propagation.
+    await waitFor(() =>
+      debugLogs.some((l) => l.includes("Error during scheduled refresh"))
+    );
+
+    // The substantive behavior: no first-backoff (30s) retry timer was armed
+    // after the teardown, and no new retry was logged. (Without the guard, the
+    // catch increments the orphaned state's counter, logs "Scheduling retry
+    // 1/5", and arms a 30s retry — both fire synchronously inside the same
+    // catch that logged the message we just awaited, so they are already
+    // visible here if they happened.)
+    const retryTimers = timerRecords
+      .slice(recordsBase)
+      .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
+    expect(retryTimers.length).toBe(0);
+    const retriesAfter = debugLogs.filter((l) =>
+      l.includes("Scheduling retry")
+    ).length;
+    expect(retriesAfter).toBe(retriesBefore);
+
+    // And the guard logged its bail-out instead.
+    expect(
+      debugLogs.some((l) =>
+        l.includes("Session torn down during the failed refresh")
+      )
+    ).toBe(true);
+  }, TEST_TIMEOUT_MS);
 });
