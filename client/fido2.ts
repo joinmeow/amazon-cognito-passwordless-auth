@@ -619,6 +619,177 @@ export async function fido2UpdateCredential({
   }).then(throwIfNot2xx);
 }
 
+/**
+ * The WebAuthn Signal API (https://w3c.github.io/webauthn/#sctn-signalMethods)
+ * lets the relying party tell the browser/credential manager which credentials
+ * it still accepts, so revoked or renamed passkeys stop being offered. These
+ * static methods are recent and not yet in the TS DOM lib, so we type them here.
+ */
+interface SignalAllAcceptedCredentialsOptions {
+  rpId: string;
+  userId: string;
+  allAcceptedCredentialIds: string[];
+}
+
+interface SignalUnknownCredentialOptions {
+  rpId: string;
+  credentialId: string;
+}
+
+interface SignalCurrentUserDetailsOptions {
+  rpId: string;
+  userId: string;
+  name: string;
+  displayName: string;
+}
+
+interface PublicKeyCredentialWithSignal {
+  signalAllAcceptedCredentials(
+    options: SignalAllAcceptedCredentialsOptions
+  ): Promise<void>;
+  signalUnknownCredential(
+    options: SignalUnknownCredentialOptions
+  ): Promise<void>;
+  signalCurrentUserDetails(
+    options: SignalCurrentUserDetailsOptions
+  ): Promise<void>;
+}
+
+/**
+ * Resolve the rpId a signal should target. Unlike the start/list requests
+ * (which send rpId to the server), signals must match the rpId the credential
+ * was bound to at registration. Use an explicit rpId or the configured
+ * fido2.rp.id; do not fall back to location.hostname, which may differ from the
+ * registrable domain the passkey was bound to. Returns undefined when neither is
+ * available, in which case the caller no-ops rather than signalling a guess.
+ */
+function getSignalRpId(rpId?: string): string | undefined {
+  return rpId ?? configure().fido2?.rp?.id;
+}
+
+/**
+ * Encode a relying-party WebAuthn user handle to the base64url form the Signal
+ * API expects. The caller passes the same handle the server used as `user.id`
+ * in the start-registration response; we run it through the same encodeUserHandle
+ * the library applies at registration so the value matches stored passkeys
+ * byte-for-byte. We intentionally do not assume the handle equals the Cognito
+ * `sub` — that only holds when the backend uses the raw sub as the handle.
+ */
+function encodeSignalUserId(userId: string): string {
+  return bufferToBase64Url(encodeUserHandle(userId).buffer as ArrayBuffer);
+}
+
+/**
+ * Signal the full set of credential IDs the relying party still accepts so the
+ * browser/password manager drops revoked passkeys from autofill. Call after a
+ * passkey is deleted (or on sign-in). No-op where the Signal API is unsupported.
+ */
+export async function signalAllAcceptedCredentials({
+  allAcceptedCredentialIds,
+  userId,
+  rpId,
+}: {
+  allAcceptedCredentialIds: string[];
+  /**
+   * The relying party's WebAuthn user handle — the same value used as `user.id`
+   * at registration. For Cognito backends that key passkeys by the raw `sub`,
+   * pass the user's `sub`. Encoded internally so it matches stored passkeys.
+   */
+  userId: string;
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalAllAcceptedCredentials) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalAllAcceptedCredentials !== "function") {
+    return;
+  }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
+  await pkc.signalAllAcceptedCredentials({
+    rpId: resolvedRpId,
+    userId: encodeSignalUserId(userId),
+    allAcceptedCredentialIds,
+  });
+}
+
+/**
+ * Signal that a credential the relying party no longer recognizes should stop
+ * being offered. Call when a sign-in is rejected for an unknown credential.
+ * No-op where the Signal API is unsupported.
+ */
+export async function signalUnknownCredential({
+  credentialId,
+  rpId,
+}: {
+  credentialId: string;
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalUnknownCredential) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalUnknownCredential !== "function") {
+    return;
+  }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
+  await pkc.signalUnknownCredential({
+    rpId: resolvedRpId,
+    credentialId,
+  });
+}
+
+/**
+ * Signal the user's current account name and display name so stored passkeys
+ * show up-to-date details. No-op where the Signal API is unsupported.
+ */
+export async function signalCurrentUserDetails({
+  name,
+  displayName,
+  userId,
+  rpId,
+}: {
+  name: string;
+  displayName: string;
+  /**
+   * The relying party's WebAuthn user handle — the same value used as `user.id`
+   * at registration. For Cognito backends that key passkeys by the raw `sub`,
+   * pass the user's `sub`. Encoded internally so it matches stored passkeys.
+   */
+  userId: string;
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalCurrentUserDetails) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalCurrentUserDetails !== "function") {
+    return;
+  }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
+  await pkc.signalCurrentUserDetails({
+    rpId: resolvedRpId,
+    userId: encodeSignalUserId(userId),
+    name,
+    displayName,
+  });
+}
+
 interface Fido2Options {
   challenge: string;
   timeout?: number;
