@@ -156,4 +156,29 @@ describe("WebAuthn Signal API wrappers", () => {
     expect(signalUnknownSpy).not.toHaveBeenCalled();
     expect(signalUserDetailsSpy).not.toHaveBeenCalled();
   });
+
+  it("no-ops when no rpId is configured or passed (never guesses from hostname)", async () => {
+    armPublicKeyCredential(ALL_SUPPORTED);
+    mockConfigure.mockReturnValue({
+      debug: jest.fn(),
+      fetch: jest.fn(),
+      location: { hostname: "localhost", href: "https://localhost/" },
+      fido2: {},
+    } as unknown as ReturnType<typeof configure>);
+
+    await signalAllAcceptedCredentials({
+      allAcceptedCredentialIds: ["c"],
+      userId: USER_HANDLE,
+    });
+    await signalUnknownCredential({ credentialId: "c" });
+    await signalCurrentUserDetails({
+      name: "n",
+      displayName: "d",
+      userId: USER_HANDLE,
+    });
+
+    expect(signalAllSpy).not.toHaveBeenCalled();
+    expect(signalUnknownSpy).not.toHaveBeenCalled();
+    expect(signalUserDetailsSpy).not.toHaveBeenCalled();
+  });
 });

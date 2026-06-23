@@ -655,9 +655,16 @@ interface PublicKeyCredentialWithSignal {
   ): Promise<void>;
 }
 
-function getSignalRpId(rpId?: string): string {
-  const { fido2, location } = configure();
-  return rpId ?? fido2?.rp?.id ?? location.hostname;
+/**
+ * Resolve the rpId a signal should target. Unlike the start/list requests
+ * (which send rpId to the server), signals must match the rpId the credential
+ * was bound to at registration. Use an explicit rpId or the configured
+ * fido2.rp.id; do not fall back to location.hostname, which may differ from the
+ * registrable domain the passkey was bound to. Returns undefined when neither is
+ * available, in which case the caller no-ops rather than signalling a guess.
+ */
+function getSignalRpId(rpId?: string): string | undefined {
+  return rpId ?? configure().fido2?.rp?.id;
 }
 
 /**
@@ -700,8 +707,12 @@ export async function signalAllAcceptedCredentials({
   if (typeof pkc.signalAllAcceptedCredentials !== "function") {
     return;
   }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
   await pkc.signalAllAcceptedCredentials({
-    rpId: getSignalRpId(rpId),
+    rpId: resolvedRpId,
     userId: encodeSignalUserId(userId),
     allAcceptedCredentialIds,
   });
@@ -728,8 +739,12 @@ export async function signalUnknownCredential({
   if (typeof pkc.signalUnknownCredential !== "function") {
     return;
   }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
   await pkc.signalUnknownCredential({
-    rpId: getSignalRpId(rpId),
+    rpId: resolvedRpId,
     credentialId,
   });
 }
@@ -763,8 +778,12 @@ export async function signalCurrentUserDetails({
   if (typeof pkc.signalCurrentUserDetails !== "function") {
     return;
   }
+  const resolvedRpId = getSignalRpId(rpId);
+  if (!resolvedRpId) {
+    return;
+  }
   await pkc.signalCurrentUserDetails({
-    rpId: getSignalRpId(rpId),
+    rpId: resolvedRpId,
     userId: encodeSignalUserId(userId),
     name,
     displayName,
