@@ -619,6 +619,157 @@ export async function fido2UpdateCredential({
   }).then(throwIfNot2xx);
 }
 
+/**
+ * The WebAuthn Signal API (https://w3c.github.io/webauthn/#sctn-signalMethods)
+ * lets the relying party tell the browser/credential manager which credentials
+ * it still accepts, so revoked or renamed passkeys stop being offered. These
+ * static methods are recent and not yet in the TS DOM lib, so we type them here.
+ */
+interface SignalAllAcceptedCredentialsOptions {
+  rpId: string;
+  userId: string;
+  allAcceptedCredentialIds: string[];
+}
+
+interface SignalUnknownCredentialOptions {
+  rpId: string;
+  credentialId: string;
+}
+
+interface SignalCurrentUserDetailsOptions {
+  rpId: string;
+  userId: string;
+  name: string;
+  displayName: string;
+}
+
+interface PublicKeyCredentialWithSignal {
+  signalAllAcceptedCredentials(
+    options: SignalAllAcceptedCredentialsOptions
+  ): Promise<void>;
+  signalUnknownCredential(
+    options: SignalUnknownCredentialOptions
+  ): Promise<void>;
+  signalCurrentUserDetails(
+    options: SignalCurrentUserDetailsOptions
+  ): Promise<void>;
+}
+
+function getSignalRpId(rpId?: string): string {
+  const { fido2, location } = configure();
+  return rpId ?? fido2?.rp?.id ?? location.hostname;
+}
+
+/**
+ * Resolve the WebAuthn user handle (base64url) for the signed-in user. The
+ * handle is the raw Cognito user id encoded exactly as at registration via
+ * encodeUserHandle, so the browser matches it against stored passkeys.
+ */
+async function getSignalUserId(): Promise<string | null> {
+  const { idToken } = (await retrieveTokens()) ?? {};
+  if (!idToken) {
+    return null;
+  }
+  const { sub } = parseJwtPayload<CognitoIdTokenPayload>(idToken);
+  if (!sub) {
+    return null;
+  }
+  return bufferToBase64Url(encodeUserHandle(sub).buffer as ArrayBuffer);
+}
+
+/**
+ * Signal the full set of credential IDs the relying party still accepts so the
+ * browser/password manager drops revoked passkeys from autofill. Call after a
+ * passkey is deleted (or on sign-in). No-op where the Signal API is unsupported.
+ */
+export async function signalAllAcceptedCredentials({
+  allAcceptedCredentialIds,
+  rpId,
+}: {
+  allAcceptedCredentialIds: string[];
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalAllAcceptedCredentials) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalAllAcceptedCredentials !== "function") {
+    return;
+  }
+  const userId = await getSignalUserId();
+  if (!userId) {
+    return;
+  }
+  await pkc.signalAllAcceptedCredentials({
+    rpId: getSignalRpId(rpId),
+    userId,
+    allAcceptedCredentialIds,
+  });
+}
+
+/**
+ * Signal that a credential the relying party no longer recognizes should stop
+ * being offered. Call when a sign-in is rejected for an unknown credential.
+ * No-op where the Signal API is unsupported.
+ */
+export async function signalUnknownCredential({
+  credentialId,
+  rpId,
+}: {
+  credentialId: string;
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalUnknownCredential) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalUnknownCredential !== "function") {
+    return;
+  }
+  await pkc.signalUnknownCredential({
+    rpId: getSignalRpId(rpId),
+    credentialId,
+  });
+}
+
+/**
+ * Signal the user's current account name and display name so stored passkeys
+ * show up-to-date details. No-op where the Signal API is unsupported.
+ */
+export async function signalCurrentUserDetails({
+  name,
+  displayName,
+  rpId,
+}: {
+  name: string;
+  displayName: string;
+  rpId?: string;
+}): Promise<void> {
+  const capabilities = await getClientCapabilities();
+  if (!capabilities?.signalCurrentUserDetails) {
+    return;
+  }
+  const pkc = PublicKeyCredential as typeof PublicKeyCredential &
+    Partial<PublicKeyCredentialWithSignal>;
+  if (typeof pkc.signalCurrentUserDetails !== "function") {
+    return;
+  }
+  const userId = await getSignalUserId();
+  if (!userId) {
+    return;
+  }
+  await pkc.signalCurrentUserDetails({
+    rpId: getSignalRpId(rpId),
+    userId,
+    name,
+    displayName,
+  });
+}
+
 interface Fido2Options {
   challenge: string;
   timeout?: number;
