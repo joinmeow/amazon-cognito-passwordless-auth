@@ -14,7 +14,6 @@
  */
 
 import { configure } from "../config.js";
-import { retrieveTokens } from "../storage.js";
 import { bufferToBase64Url } from "../util.js";
 import {
   signalAllAcceptedCredentials,
@@ -23,30 +22,18 @@ import {
 } from "../fido2.js";
 
 jest.mock("../config");
-jest.mock("../storage");
 
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
-const mockRetrieveTokens = retrieveTokens as jest.MockedFunction<
-  typeof retrieveTokens
->;
 
 const RP_ID = "meow.com";
-const SUB = "user-sub-abc";
-// The Signal API userId must equal base64url(UTF-8 bytes of the raw Cognito sub),
-// i.e. the exact handle encodeUserHandle produces at registration.
+// The caller passes the relying party's user handle (the server's user.id); for
+// Cognito with a raw-sub handle that is the user's sub.
+const USER_HANDLE = "user-sub-abc";
+// The Signal API userId must equal base64url(UTF-8 bytes of the user handle) —
+// the exact value encodeUserHandle produces at registration.
 const EXPECTED_USER_ID = bufferToBase64Url(
-  new TextEncoder().encode(SUB).buffer as ArrayBuffer
+  new TextEncoder().encode(USER_HANDLE).buffer as ArrayBuffer
 );
-
-function base64urlSegment(obj: object): string {
-  return bufferToBase64Url(
-    new TextEncoder().encode(JSON.stringify(obj)).buffer as ArrayBuffer
-  );
-}
-
-function makeIdToken(sub: string): string {
-  return `${base64urlSegment({ alg: "RS256" })}.${base64urlSegment({ sub })}.sig`;
-}
 
 const ALL_SUPPORTED = {
   signalAllAcceptedCredentials: true,
@@ -85,9 +72,6 @@ describe("WebAuthn Signal API wrappers", () => {
       location: { hostname: "localhost", href: "https://localhost/" },
       fido2: { rp: { id: RP_ID } },
     } as unknown as ReturnType<typeof configure>);
-    mockRetrieveTokens.mockResolvedValue({
-      idToken: makeIdToken(SUB),
-    } as Awaited<ReturnType<typeof retrieveTokens>>);
   });
 
   afterEach(() => {
@@ -96,11 +80,12 @@ describe("WebAuthn Signal API wrappers", () => {
     ).PublicKeyCredential = originalPublicKeyCredential;
   });
 
-  it("signalAllAcceptedCredentials sends the encoded handle, rpId and credential ids", async () => {
+  it("signalAllAcceptedCredentials encodes the handle the same way registration does", async () => {
     armPublicKeyCredential(ALL_SUPPORTED);
 
     await signalAllAcceptedCredentials({
       allAcceptedCredentialIds: ["credA", "credB"],
+      userId: USER_HANDLE,
     });
 
     expect(signalAllSpy).toHaveBeenCalledWith({
@@ -127,6 +112,7 @@ describe("WebAuthn Signal API wrappers", () => {
     await signalCurrentUserDetails({
       name: "user@meow.com",
       displayName: "User",
+      userId: USER_HANDLE,
     });
 
     expect(signalUserDetailsSpy).toHaveBeenCalledWith({
@@ -155,23 +141,19 @@ describe("WebAuthn Signal API wrappers", () => {
       signalCurrentUserDetails: false,
     });
 
-    await signalAllAcceptedCredentials({ allAcceptedCredentialIds: ["c"] });
+    await signalAllAcceptedCredentials({
+      allAcceptedCredentialIds: ["c"],
+      userId: USER_HANDLE,
+    });
     await signalUnknownCredential({ credentialId: "c" });
-    await signalCurrentUserDetails({ name: "n", displayName: "d" });
+    await signalCurrentUserDetails({
+      name: "n",
+      displayName: "d",
+      userId: USER_HANDLE,
+    });
 
     expect(signalAllSpy).not.toHaveBeenCalled();
     expect(signalUnknownSpy).not.toHaveBeenCalled();
-    expect(signalUserDetailsSpy).not.toHaveBeenCalled();
-  });
-
-  it("no-ops the user-scoped signals when no one is signed in", async () => {
-    armPublicKeyCredential(ALL_SUPPORTED);
-    mockRetrieveTokens.mockResolvedValue(undefined);
-
-    await signalAllAcceptedCredentials({ allAcceptedCredentialIds: ["c"] });
-    await signalCurrentUserDetails({ name: "n", displayName: "d" });
-
-    expect(signalAllSpy).not.toHaveBeenCalled();
     expect(signalUserDetailsSpy).not.toHaveBeenCalled();
   });
 });

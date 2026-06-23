@@ -661,20 +661,15 @@ function getSignalRpId(rpId?: string): string {
 }
 
 /**
- * Resolve the WebAuthn user handle (base64url) for the signed-in user. The
- * handle is the raw Cognito user id encoded exactly as at registration via
- * encodeUserHandle, so the browser matches it against stored passkeys.
+ * Encode a relying-party WebAuthn user handle to the base64url form the Signal
+ * API expects. The caller passes the same handle the server used as `user.id`
+ * in the start-registration response; we run it through the same encodeUserHandle
+ * the library applies at registration so the value matches stored passkeys
+ * byte-for-byte. We intentionally do not assume the handle equals the Cognito
+ * `sub` — that only holds when the backend uses the raw sub as the handle.
  */
-async function getSignalUserId(): Promise<string | null> {
-  const { idToken } = (await retrieveTokens()) ?? {};
-  if (!idToken) {
-    return null;
-  }
-  const { sub } = parseJwtPayload<CognitoIdTokenPayload>(idToken);
-  if (!sub) {
-    return null;
-  }
-  return bufferToBase64Url(encodeUserHandle(sub).buffer as ArrayBuffer);
+function encodeSignalUserId(userId: string): string {
+  return bufferToBase64Url(encodeUserHandle(userId).buffer as ArrayBuffer);
 }
 
 /**
@@ -684,9 +679,16 @@ async function getSignalUserId(): Promise<string | null> {
  */
 export async function signalAllAcceptedCredentials({
   allAcceptedCredentialIds,
+  userId,
   rpId,
 }: {
   allAcceptedCredentialIds: string[];
+  /**
+   * The relying party's WebAuthn user handle — the same value used as `user.id`
+   * at registration. For Cognito backends that key passkeys by the raw `sub`,
+   * pass the user's `sub`. Encoded internally so it matches stored passkeys.
+   */
+  userId: string;
   rpId?: string;
 }): Promise<void> {
   const capabilities = await getClientCapabilities();
@@ -698,13 +700,9 @@ export async function signalAllAcceptedCredentials({
   if (typeof pkc.signalAllAcceptedCredentials !== "function") {
     return;
   }
-  const userId = await getSignalUserId();
-  if (!userId) {
-    return;
-  }
   await pkc.signalAllAcceptedCredentials({
     rpId: getSignalRpId(rpId),
-    userId,
+    userId: encodeSignalUserId(userId),
     allAcceptedCredentialIds,
   });
 }
@@ -743,10 +741,17 @@ export async function signalUnknownCredential({
 export async function signalCurrentUserDetails({
   name,
   displayName,
+  userId,
   rpId,
 }: {
   name: string;
   displayName: string;
+  /**
+   * The relying party's WebAuthn user handle — the same value used as `user.id`
+   * at registration. For Cognito backends that key passkeys by the raw `sub`,
+   * pass the user's `sub`. Encoded internally so it matches stored passkeys.
+   */
+  userId: string;
   rpId?: string;
 }): Promise<void> {
   const capabilities = await getClientCapabilities();
@@ -758,13 +763,9 @@ export async function signalCurrentUserDetails({
   if (typeof pkc.signalCurrentUserDetails !== "function") {
     return;
   }
-  const userId = await getSignalUserId();
-  if (!userId) {
-    return;
-  }
   await pkc.signalCurrentUserDetails({
     rpId: getSignalRpId(rpId),
-    userId,
+    userId: encodeSignalUserId(userId),
     name,
     displayName,
   });
