@@ -103,6 +103,45 @@ export class Fido2CredentialError extends Fido2Error {
 }
 
 /**
+ * Thrown when the relying party authoritatively rejects a sign-in because it
+ * does not recognize the presented credential — e.g. a discoverable passkey
+ * that was revoked server-side but is still offered by the platform
+ * authenticator at the login screen.
+ *
+ * Distinct from a cancelled or otherwise-failed ceremony: this is raised ONLY
+ * when the WebAuthn assertion succeeded (so `credentialIdB64` is known) and the
+ * server returned an explicit "unknown credential" verdict. That lets the
+ * caller safely prune the stale credential from autofill via the WebAuthn
+ * Signal API (`signalUnknownCredential`) without risking a valid passkey on a
+ * cancel/network/throttle failure, which keep the generic failure path.
+ */
+export class Fido2CredentialRejectedError extends Fido2Error {
+  /** Machine-readable verdict from the server, e.g. "unknown_credential". */
+  public readonly reason: string;
+  /** base64url id of the credential the server rejected (from this ceremony). */
+  public readonly credentialIdB64?: string;
+
+  constructor(
+    message: string,
+    {
+      reason,
+      credentialIdB64,
+      cause,
+    }: { reason: string; credentialIdB64?: string; cause?: unknown }
+  ) {
+    super(
+      message,
+      "CREDENTIAL_REJECTED",
+      "This passkey is no longer registered. Please try another way to sign in.",
+      cause
+    );
+    this.name = "Fido2CredentialRejectedError";
+    this.reason = reason;
+    this.credentialIdB64 = credentialIdB64;
+  }
+}
+
+/**
  * Thrown when FIDO2 configuration is missing or invalid
  *
  * Examples:
@@ -234,6 +273,18 @@ export function isFido2NotAllowedError(
 }
 
 /**
+ * Type guard for a server "unknown credential" rejection. When true, the
+ * relying party authoritatively did not recognize the presented credential and
+ * `error.credentialIdB64` is safe to pass to `signalUnknownCredential` so the
+ * platform authenticator prunes the stale passkey from autofill.
+ */
+export function isFido2CredentialRejectedError(
+  error: unknown
+): error is Fido2CredentialRejectedError {
+  return error instanceof Fido2CredentialRejectedError;
+}
+
+/**
  * Helper to convert DOMException (from WebAuthn API) to appropriate Fido2Error
  *
  * Based on WebAuthn Level 2 specification:
@@ -320,7 +371,6 @@ export function fromDOMException(error: DOMException): Fido2Error {
         "Something went wrong with your passkey",
         error
       );
-
   }
 
   // Catch any other DOMExceptions not in spec
