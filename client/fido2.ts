@@ -34,6 +34,7 @@ import { CognitoIdTokenPayload } from "./jwt-model.js";
 import { createDeviceSrpAuthHandler } from "./device.js";
 import {
   Fido2CredentialError,
+  Fido2CredentialRejectedError,
   Fido2ConfigError,
   Fido2ValidationError,
   Fido2AuthError,
@@ -1738,6 +1739,31 @@ export async function prepareFido2SignIn({
   };
 }
 
+/**
+ * Extract a server "unknown credential" verdict from a failed sign-in error.
+ *
+ * The Verify-Auth-Challenge Lambda raises a JSON verdict that Cognito surfaces
+ * as a UserLambdaValidationException; throwIfNot2xx may leave wrapping text (a
+ * trailing period, an unwrapped envelope on some runtimes), so we pull the
+ * first `{...}` object out of the message rather than parsing the whole string.
+ * Returns the reason only for the explicit "unknown_credential" verdict, so no
+ * other failure (cancel, network, throttle, bad signature) is ever re-tagged.
+ * The `[^{}]*` scan is linear — no ReDoS.
+ */
+function getUnknownCredentialReason(error: Error): string | undefined {
+  if (error.name !== "UserLambdaValidationException") return undefined;
+  const jsonMatch = error.message.match(/\{[^{}]*\}/);
+  if (!jsonMatch) return undefined;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as { reason?: unknown };
+    return parsed.reason === "unknown_credential"
+      ? "unknown_credential"
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function authenticateWithFido2({
   username,
   credentials,
@@ -1876,6 +1902,10 @@ export function authenticateWithFido2({
       });
     }
 
+    // Captured once the WebAuthn ceremony produces an assertion, so the catch
+    // block (a separate scope from the try's `const preparedSignIn`) can attach
+    // it to an unknown-credential rejection for the Signal API.
+    let assertedCredentialIdB64: string | undefined;
     try {
       const preparedSignIn =
         prepared ??
@@ -1886,6 +1916,7 @@ export function authenticateWithFido2({
           mediation,
           signal: abort.signal,
         }));
+      assertedCredentialIdB64 = preparedSignIn.credential.credentialIdB64;
 
       if (username && username !== preparedSignIn.username) {
         throw new Fido2ValidationError(
@@ -2008,6 +2039,21 @@ export function authenticateWithFido2({
         statusCb?.("SIGNED_OUT");
       } else {
         statusCb?.("FIDO2_SIGNIN_FAILED");
+        // The relying party authoritatively rejected the presented credential
+        // (an unknown/revoked discoverable passkey). Re-tag so the caller can
+        // prune it from autofill via signalUnknownCredential. Gated on an
+        // assertion having been produced AND the explicit server verdict, so a
+        // cancel/network/throttle failure never re-tags.
+        if (assertedCredentialIdB64 && err instanceof Error) {
+          const rejectedReason = getUnknownCredentialReason(err);
+          if (rejectedReason) {
+            throw new Fido2CredentialRejectedError(err.message, {
+              reason: rejectedReason,
+              credentialIdB64: assertedCredentialIdB64,
+              cause: err,
+            });
+          }
+        }
       }
       throw err;
     }
