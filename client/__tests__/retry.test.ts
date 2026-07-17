@@ -45,14 +45,15 @@ describe("createFetchWithRetry", () => {
     expect(res).toBe(okResponse);
     expect(fetchFn).toHaveBeenCalledTimes(3);
 
-    // Every "abort" listener added during a backoff wait must be removed
-    // again once the timer fires, so a long-lived signal doesn't
-    // accumulate dead listeners across retries.
+    // "abort" listeners are registered on the caller signal both for each
+    // backoff wait and for each attempt's per-attempt-timeout controller. Every
+    // one must be removed again (on timer fire / in the attempt's finally), so a
+    // long-lived signal never accumulates dead listeners across retries.
     const abortAdds = addSpy.mock.calls.filter(([type]) => type === "abort");
     const abortRemoves = removeSpy.mock.calls.filter(
       ([type]) => type === "abort"
     );
-    expect(abortAdds.length).toBe(2);
+    expect(abortAdds.length).toBeGreaterThanOrEqual(2);
     expect(abortRemoves.length).toBe(abortAdds.length);
   });
 

@@ -15,10 +15,32 @@
 import type { MinimalFetch, MinimalResponse } from "./config.js";
 
 /**
+ * Per-attempt request timeout. A black-holed connection (TLS established, no
+ * response, no error) makes `await fetch` hang forever, which — because auth
+ * requests run on the critical sign-in/refresh path — wedges the whole flow
+ * (e.g. a hung ConfirmDevice leaves signInStatus stuck "SIGNING_IN" and the
+ * app spinning). Bounding each attempt turns a hang into a retryable timeout.
+ */
+export const DEFAULT_FETCH_ATTEMPT_TIMEOUT_MS = 25000;
+
+/** Thrown when every attempt exceeded `perAttemptTimeoutMs`. */
+export class FetchAttemptTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = "FetchAttemptTimeoutError";
+  }
+}
+
+/**
  * Return a fetch function that will retry on network errors, HTTP 5xx,
  * and specific retryable 400 errors (TooManyRequestsException,
  * LimitExceededException, CodeDeliveryFailureException), up to `maxRetries`
  * times with exponential backoff.
+ *
+ * Each attempt is bounded by `perAttemptTimeoutMs`: a request that never
+ * settles is aborted and retried (or, on the last attempt, surfaced as a
+ * `FetchAttemptTimeoutError`) rather than hanging forever. A caller-provided
+ * `signal` abort is always propagated and never retried.
  *
  * Uses `Response.clone()` to inspect 400 error bodies without consuming the
  * original response body.
@@ -27,7 +49,8 @@ export function createFetchWithRetry(
   fetchFn: MinimalFetch,
   debugFn?: (...args: unknown[]) => unknown,
   maxRetries = 3,
-  baseDelayMs = 1000
+  baseDelayMs = 1000,
+  perAttemptTimeoutMs = DEFAULT_FETCH_ATTEMPT_TIMEOUT_MS
 ): MinimalFetch {
   const retryableErrors = new Set([
     "TooManyRequestsException",
@@ -69,8 +92,25 @@ export function createFetchWithRetry(
         throw new DOMException("Aborted", "AbortError");
       }
 
+      // Bound this attempt: abort it if the caller aborts OR the per-attempt
+      // timeout fires. A timeout is retryable; a caller abort propagates.
+      const attemptController = new AbortController();
+      let timedOut = false;
+      const onCallerAbort = () => attemptController.abort();
+      const callerSignal = init?.signal;
+      if (callerSignal) {
+        callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      const timeoutId = setTimeout(() => {
+        timedOut = true;
+        attemptController.abort();
+      }, perAttemptTimeoutMs);
+
       try {
-        const res = await fetchFn(input, init);
+        const res = await fetchFn(input, {
+          ...init,
+          signal: attemptController.signal,
+        });
         if (res.ok) {
           return res;
         }
@@ -117,13 +157,24 @@ export function createFetchWithRetry(
         }
         return res;
       } catch (error: unknown) {
-        if (
-          init?.signal?.aborted ||
-          (error instanceof Error && error.name === "AbortError")
-        ) {
+        // A caller-initiated abort always propagates and is never retried.
+        if (callerSignal?.aborted) {
           throw error;
         }
-        if (attempt === maxRetries) {
+        // Our own per-attempt timeout is a transient failure: retry it, or on
+        // the last attempt surface a clear timeout instead of a raw AbortError.
+        if (timedOut) {
+          debugFn?.(
+            `fetchWithRetry attempt ${attempt}/${maxRetries} timed out after ${perAttemptTimeoutMs}ms`
+          );
+          if (attempt === maxRetries) {
+            throw new FetchAttemptTimeoutError(perAttemptTimeoutMs);
+          }
+        } else if (error instanceof Error && error.name === "AbortError") {
+          // An AbortError that is neither a caller abort nor our timeout is
+          // unexpected; do not silently retry it.
+          throw error;
+        } else if (attempt === maxRetries) {
           throw error;
         }
         debugFn?.(
@@ -134,6 +185,9 @@ export function createFetchWithRetry(
         const backoff = baseDelayMs * Math.pow(2, attempt - 1);
         debugFn?.(`Retrying in ${backoff}ms...`);
         await wait(backoff);
+      } finally {
+        clearTimeout(timeoutId);
+        callerSignal?.removeEventListener("abort", onCallerAbort);
       }
     }
     // Fallback
