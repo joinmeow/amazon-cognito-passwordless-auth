@@ -1136,6 +1136,22 @@ function _usePasswordless() {
   // Track OAuth callback processing to prevent multiple executions
   const oauthProcessingRef = useRef(false);
 
+  // GetUser only works with tokens that carry this scope. Native sign-ins
+  // (SRP / FIDO2 / plaintext) get it implicitly; hosted-UI OAuth tokens only
+  // get it when it was explicitly requested. Fail open on parse errors so an
+  // unparseable token keeps the previous behavior (attempt the call).
+  const accessTokenHasUserAdminScope = (accessToken: string) => {
+    try {
+      const { scope } = parseJwtPayload<CognitoAccessTokenPayload>(accessToken);
+      return (
+        typeof scope === "string" &&
+        scope.split(" ").includes("aws.cognito.signin.user.admin")
+      );
+    } catch {
+      return true;
+    }
+  };
+
   // Fetch TOTP MFA status when the user is signed in – with rate limiting
   useEffect(() => {
     // Early return if not signed in or no token
@@ -1146,6 +1162,24 @@ function _usePasswordless() {
 
     // Skip if we've already fetched MFA status for this token value
     if (tokens.accessToken === lastFetchedMfaTokenRef.current) return;
+
+    // Hosted-UI / OAuth access tokens only carry the OAuth scopes that were
+    // requested, and GetUser requires aws.cognito.signin.user.admin — without
+    // it the call fails deterministically, so don't make (and retry) it.
+    // MFA for such sessions is the IdP's concern anyway.
+    if (!accessTokenHasUserAdminScope(tokens.accessToken)) {
+      const { debug } = configure();
+      debug?.(
+        "Access token lacks aws.cognito.signin.user.admin scope; skipping getUser MFA-status fetch"
+      );
+      lastFetchedMfaTokenRef.current = tokens.accessToken;
+      dispatch({
+        type: "SET_TOTP_MFA_STATUS",
+        payload: { enabled: false, preferred: false, availableMfaTypes: [] },
+      });
+      dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+      return;
+    }
 
     // Skip if we fetched recently (within cooldown period)
     if (timeSinceLastFetch < MFA_FETCH_COOLDOWN) {
@@ -2015,6 +2049,15 @@ function _usePasswordless() {
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
       if (!tokens?.accessToken) return;
+
+      if (!accessTokenHasUserAdminScope(tokens.accessToken)) {
+        dispatch({
+          type: "SET_TOTP_MFA_STATUS",
+          payload: { enabled: false, preferred: false, availableMfaTypes: [] },
+        });
+        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        return;
+      }
 
       try {
         const user = await getUser({ accessToken: tokens.accessToken });

@@ -63,6 +63,7 @@ const makeTokens = (suffix: string): TokensFromStorage => {
       exp: Math.floor(expireAt.valueOf() / 1000),
       iat: Math.floor(Date.now() / 1000),
       jti: suffix,
+      scope: "aws.cognito.signin.user.admin",
     }),
     idToken: undefined,
     refreshToken: `refresh-token-${suffix}`,
