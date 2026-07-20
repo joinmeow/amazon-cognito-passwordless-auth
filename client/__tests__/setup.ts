@@ -53,6 +53,7 @@ jest.mock("../util.js", () => {
           return {
             username: "test-user",
             exp: Math.floor(Date.now() / 1000) + 3600,
+            scope: "aws.cognito.signin.user.admin",
           };
         }
 
