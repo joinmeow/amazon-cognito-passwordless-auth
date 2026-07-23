@@ -295,6 +295,16 @@ export function configure(config?: ConfigInput) {
         "Invalid configuration: hostedUi.domain must not use plaintext http:// — it is the OAuth2 base that authorization codes and tokens travel to. Use https:// or a bare domain (https:// is assumed)."
       );
     }
+    // Reject a plaintext http:// fido2.baseUrl: the user's ID token is sent as
+    // an `Authorization: Bearer <idToken>` credential to this URL for every
+    // FIDO2 backend call (register passkey, list/delete credentials), so it
+    // must be https://. This mirrors the http:// rejection applied to
+    // hostedUi.domain above.
+    if (config.fido2?.baseUrl?.startsWith("http://")) {
+      throw new Error(
+        "Invalid configuration: fido2.baseUrl must not use plaintext http:// — your ID token is sent as a Bearer credential to this URL, so it must be https://."
+      );
+    }
 
     // Wrap the user-provided or default fetch in retry logic (pass debug callback)
     const baseFetch = (config.fetch ?? Defaults.fetch).bind(globalThis);
