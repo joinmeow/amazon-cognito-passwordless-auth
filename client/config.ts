@@ -275,6 +275,20 @@ export function configure(config?: ConfigInput) {
       cognitoIdpEndpoint = `https://${cognitoIdpEndpoint}`;
     }
 
+    // Reject a plaintext http:// cognitoIdpEndpoint: every cognito-idp API call
+    // (InitiateAuth, RespondToAuthChallenge, GetTokensFromRefreshToken,
+    // RevokeToken, GetUser, SignUp, ChangePassword, ...) is POSTed here, so
+    // passwords (USER_PASSWORD_AUTH), SRP parameters, refresh/access tokens and
+    // any clientSecret travel to this origin — it must be https://. A bare AWS
+    // region (e.g. eu-west-1) is handled by the auto-prefix above and never
+    // reaches here as http://. This mirrors the http:// rejection already
+    // applied to hostedUi.domain.
+    if (cognitoIdpEndpoint.startsWith("http://")) {
+      throw new Error(
+        "Invalid configuration: cognitoIdpEndpoint must not use plaintext http:// — passwords, SRP parameters and refresh/access tokens are sent to this endpoint, so it must be https://. Use https:// or a bare AWS region (e.g. eu-west-1)."
+      );
+    }
+
     // Validate before assigning config_, so that a failed configure() is
     // atomic and leaves any previously loaded configuration unchanged
     if (

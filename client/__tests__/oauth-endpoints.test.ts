@@ -121,7 +121,10 @@ describe("OAuth2 endpoints (Hosted UI domain)", () => {
       expect(config.hostedUi?.domain).toBeUndefined();
     });
 
-    it("throws when hostedUi is configured without domain and cognitoIdpEndpoint is a plaintext http:// URL", () => {
+    it("throws when cognitoIdpEndpoint is a plaintext http:// URL", () => {
+      // Passwords, SRP parameters and refresh/access tokens are POSTed to this
+      // endpoint, so a plaintext http:// endpoint is rejected outright at
+      // configure() time — before any hostedUi.domain validation is reached
       expect(() =>
         configure({
           cognitoIdpEndpoint: "http://cognito-proxy.example.com",
@@ -130,7 +133,25 @@ describe("OAuth2 endpoints (Hosted UI domain)", () => {
             redirectSignIn,
           },
         })
-      ).toThrow("hostedUi.domain is required");
+      ).toThrow("cognitoIdpEndpoint must not use plaintext http://");
+    });
+
+    it("accepts an https:// cognitoIdpEndpoint", () => {
+      const config = configure({
+        cognitoIdpEndpoint: "https://cognito-proxy.example.com",
+        clientId: "test-client-id",
+      });
+      expect(config.cognitoIdpEndpoint).toBe(
+        "https://cognito-proxy.example.com"
+      );
+    });
+
+    it("accepts a bare AWS region cognitoIdpEndpoint (not rejected as http://)", () => {
+      const config = configure({
+        cognitoIdpEndpoint: "eu-west-1",
+        clientId: "test-client-id",
+      });
+      expect(config.cognitoIdpEndpoint).toBe("eu-west-1");
     });
 
     it("leaves the previous configuration intact when configure() throws", () => {
@@ -217,20 +238,16 @@ describe("OAuth2 endpoints (Hosted UI domain)", () => {
       );
     });
 
-    it("refuses to build OAuth2 endpoints on a plaintext http:// cognitoIdpEndpoint", () => {
-      // Without hostedUi, configure() accepts a custom http:// IDP endpoint,
-      // but the OAuth2 endpoints must never be built on a non-TLS origin
-      // because authorization codes and tokens travel to it
-      configure({
-        cognitoIdpEndpoint: "http://cognito-proxy.example.com",
-        clientId: "test-client-id",
-      });
-      expect(() => getAuthorizeEndpoint()).toThrow(
-        "Cannot determine OAuth2 endpoint"
-      );
-      expect(() => getTokenEndpoint()).toThrow(
-        "Cannot determine OAuth2 endpoint"
-      );
+    it("refuses a plaintext http:// cognitoIdpEndpoint at configure() time", () => {
+      // A non-TLS origin is rejected outright by configure(), so the OAuth2
+      // endpoints can never be built on it — authorization codes, tokens,
+      // passwords and SRP parameters all travel to this origin
+      expect(() =>
+        configure({
+          cognitoIdpEndpoint: "http://cognito-proxy.example.com",
+          clientId: "test-client-id",
+        })
+      ).toThrow("cognitoIdpEndpoint must not use plaintext http://");
     });
 
     it("never produces https://<region>/oauth2/... for a region-only cognitoIdpEndpoint", () => {

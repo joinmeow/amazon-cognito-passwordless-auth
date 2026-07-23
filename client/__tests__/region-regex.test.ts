@@ -58,14 +58,28 @@ describe("AWS region detection in cognitoIdpEndpoint", () => {
       expect(config.cognitoIdpEndpoint).toBe(`https://${hostname}`);
     });
 
-    test.each(["https://example.com", "http://localhost:3000"])(
-      "leaves URL with protocol %s untouched",
+    test.each(["https://example.com", "https://localhost:3000"])(
+      "leaves https:// URL with protocol %s untouched",
       (url) => {
         const config = configure({
           cognitoIdpEndpoint: url,
           clientId: "test-client-id",
         });
         expect(config.cognitoIdpEndpoint).toBe(url);
+      }
+    );
+
+    // Passwords, SRP parameters and tokens are POSTed to cognitoIdpEndpoint,
+    // so a plaintext http:// endpoint is rejected outright at configure() time.
+    test.each(["http://example.com", "http://localhost:3000"])(
+      "rejects plaintext http:// URL %s",
+      (url) => {
+        expect(() =>
+          configure({
+            cognitoIdpEndpoint: url,
+            clientId: "test-client-id",
+          })
+        ).toThrow("cognitoIdpEndpoint must not use plaintext http://");
       }
     );
   });
