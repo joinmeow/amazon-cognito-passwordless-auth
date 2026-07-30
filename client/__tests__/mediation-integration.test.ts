@@ -273,7 +273,7 @@ describe("Mediation Integration Tests", () => {
       ).rejects.toThrow(Fido2ConfigError);
     });
 
-    it("uses immediate mediation without parameter overrides with known values", async () => {
+    it("maps immediate mediation to uiMode without parameter overrides", async () => {
       const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
 
       cleanup = setupWebAuthnMock({
@@ -293,15 +293,17 @@ describe("Mediation Integration Tests", () => {
         timeout: knownTimeout,
       });
 
-      expect(getSpy).toHaveBeenCalledWith(
+      const request = getSpy.mock.calls[0][0];
+      expect(request).toEqual(
         expect.objectContaining({
           publicKey: expect.objectContaining({
-            userVerification: knownUserVerification, // Not overridden for immediate
-            timeout: knownTimeout, // Not removed for immediate
+            userVerification: knownUserVerification,
+            timeout: knownTimeout,
           }),
-          mediation: "immediate",
+          uiMode: "immediate",
         })
       );
+      expect(request).not.toHaveProperty("mediation");
     });
 
     it("logs debug message for immediate mediation", async () => {
@@ -717,8 +719,7 @@ describe("Mediation Integration Tests", () => {
 
         // The conditional request was asked to abort (but won't comply)
         await jest.advanceTimersByTimeAsync(0);
-        const conditionalSignal = getSpy.mock.calls[0][0]
-          .signal as AbortSignal;
+        const conditionalSignal = getSpy.mock.calls[0][0].signal as AbortSignal;
         expect(conditionalSignal.aborted).toBe(true);
 
         // Just before the settlement timeout: still waiting

@@ -51,6 +51,10 @@ export type MediationMode =
   | "required"
   | "silent";
 
+interface CredentialRequestOptionsWithUiMode extends CredentialRequestOptions {
+  uiMode?: "immediate";
+}
+
 /**
  * WebAuthn Client Capabilities as defined in the W3C spec.
  * @see https://w3c.github.io/webauthn/#sctn-client-capabilities
@@ -74,7 +78,7 @@ export interface WebAuthnClientCapabilities {
   signalCurrentUserDetails?: boolean;
   /** Client supports signalUnknownCredential() */
   signalUnknownCredential?: boolean;
-  /** Chrome-specific: immediate mediation support (Chrome 139+, origin trial) */
+  /** Client supports immediate UI mode for credential requests */
   immediateGet?: boolean;
   /** Extension support: prefixed with 'extension:' */
   [key: `extension:${string}`]: boolean | undefined;
@@ -181,7 +185,7 @@ export async function detectMediationCapabilities(): Promise<{
   // Check immediate mediation support using new getClientCapabilities API
   const capabilities = await getClientCapabilities();
   if (capabilities) {
-    // immediateGet is Chrome 139+ specific capability
+    // immediateGet indicates support for the immediate UI request mode
     immediate = capabilities.immediateGet === true;
 
     // Fallback: conditionalGet also indicates conditional mediation support
@@ -1158,13 +1162,14 @@ export async function fido2getCredential({
 
     let conditionalTracker: typeof pendingConditionalGet = undefined;
     try {
-      // Type assertion needed: 'immediate' mediation not yet in TS lib definitions (CredentialMediationRequirement)
-      // Runtime support: Chrome 139+, see https://developer.chrome.com/blog/webauthn-immediate-mediation
-      const getCredential = navigator.credentials.get({
+      const credentialRequestOptions: CredentialRequestOptionsWithUiMode = {
         publicKey,
         signal: effectiveSignal,
-        mediation: mediation as CredentialMediationRequirement,
-      });
+        ...(mediation === "immediate"
+          ? { uiMode: "immediate" }
+          : { mediation }),
+      };
+      const getCredential = navigator.credentials.get(credentialRequestOptions);
       if (conditionalAbort) {
         // Track this conditional request at module level, and clear the
         // tracker once it settles (for any reason)
@@ -1848,7 +1853,7 @@ export function authenticateWithFido2({
    * ```
    *
    * @see https://passkeys.dev/docs/use-cases/bootstrapping (conditional)
-   * @see https://developer.chrome.com/blog/webauthn-immediate-mediation (immediate)
+   * @see https://developer.chrome.com/docs/identity/immediate-ui-mode (immediate)
    */
   mediation?: MediationMode;
   /**

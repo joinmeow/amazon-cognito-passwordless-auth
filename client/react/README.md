@@ -169,7 +169,8 @@ function AutofillSignInButton() {
 `detectMediationCapabilities()` safely determines whether the browser supports
 conditional (autofill) or immediate (fast fail) mediation modes. Import
 `getClientCapabilities()` from the core package if you need the full WebAuthn
-capability matrix.
+capability matrix. The library maps `mediation: "immediate"` to the browser's
+standards-compliant `uiMode: "immediate"` request field.
 
 ### 3.2 SRP Password
 
