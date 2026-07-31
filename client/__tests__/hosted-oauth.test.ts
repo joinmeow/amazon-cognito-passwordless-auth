@@ -31,7 +31,13 @@ import type { ConfigWithDefaults } from "../config.js";
 // Mock dependencies
 jest.mock("../config");
 jest.mock("../common");
-jest.mock("../lock");
+// Partial mock: withLock is stubbed per-test, but LockTimeoutError and
+// isLockTimeoutError stay real so the code under test can recognize the
+// timeout errors these tests throw.
+jest.mock("../lock", () => ({
+  ...jest.requireActual<typeof import("../lock.js")>("../lock"),
+  withLock: jest.fn(),
+}));
 jest.mock("../storage");
 
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;

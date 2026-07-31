@@ -47,4 +47,8 @@ export * from "./storage.js";
 export * from "./util.js";
 export * from "./jwt-model.js";
 export * from "./hosted-oauth.js";
-export { activeLockBackend } from "./lock.js";
+export {
+  activeLockBackend,
+  isLockTimeoutError,
+  LockTimeoutError,
+} from "./lock.js";

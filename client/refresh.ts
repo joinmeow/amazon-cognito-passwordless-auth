@@ -20,7 +20,7 @@ import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -424,6 +424,15 @@ export async function scheduleRefresh({
           isRefreshingCb,
           tokens: latestTokens,
         });
+
+        // refreshTokens can succeed WITHOUT this tab having refreshed —
+        // adopting another tab's result, or returning the still-valid cached
+        // token when the lock was contended. Those paths never reach
+        // processTokens, so no next timer is armed and the chain would stall
+        // until the watchdog. Re-arm here: when this tab DID refresh,
+        // processTokens already registered the next timer and scheduleRefresh
+        // dedups against it, so this is a no-op on that path.
+        void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
 
@@ -892,19 +901,25 @@ export async function refreshTokens({
         debug?.("refreshTokens: lock acquired", lockKey);
         return doRefresh();
       },
-      undefined,
+      // A non-forced (background/scheduled) refresh is best-effort: if the
+      // lock is held, whoever holds it IS refreshing this user's tokens, so
+      // skip straight to the recovery below (adopt their result, or return
+      // the still-valid cached token) instead of queueing behind them.
+      // A forced refresh (e.g. after a 401) needs a fresh token and must
+      // wait its turn.
+      force ? undefined : 0,
       abort
     );
     debug?.("refreshTokens: lock released", lockKey);
     return result;
   } catch (err) {
     if (
-      err instanceof LockTimeoutError ||
+      isLockTimeoutError(err) ||
       (err instanceof Error &&
         err.message === "Another tab is handling refresh")
     ) {
       debug?.(
-        err instanceof LockTimeoutError
+        isLockTimeoutError(err)
           ? "refreshTokens: could not acquire lock, another process is refreshing"
           : "refreshTokens: another tab is handling refresh (coordination check)"
       );
@@ -976,6 +991,41 @@ export async function refreshTokens({
           );
         }
       } else {
+        // The holder didn't finish within the wait. For a background refresh,
+        // a still-valid cached token beats an error: retrieveTokens() already
+        // returned undefined if the access token were expired (skew-corrected),
+        // so a non-null result here IS valid. Surfacing an error instead would
+        // let a spurious lock timeout (e.g. a timer that fired while the event
+        // loop was parked through laptop sleep) look like an auth failure.
+        // tokensCb is deliberately NOT called: these are the tokens the caller
+        // already has, not a state change to propagate.
+        if (
+          !force &&
+          currentTokens?.accessToken &&
+          currentTokens.expireAt &&
+          currentTokens.refreshToken &&
+          currentTokens.username
+        ) {
+          debug?.(
+            "refreshTokens: lock unavailable but cached access token is still valid; returning it"
+          );
+          return {
+            accessToken: currentTokens.accessToken,
+            ...(currentTokens.idToken && { idToken: currentTokens.idToken }),
+            expireAt: currentTokens.expireAt,
+            username: currentTokens.username,
+            refreshToken: currentTokens.refreshToken,
+            ...(currentTokens.deviceKey && {
+              deviceKey: currentTokens.deviceKey,
+            }),
+            ...(currentTokens.authMethod && {
+              authMethod: currentTokens.authMethod,
+            }),
+            ...(currentTokens.clockDriftMs !== undefined && {
+              clockDriftMs: currentTokens.clockDriftMs,
+            }),
+          };
+        }
         debug?.(
           "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
         );

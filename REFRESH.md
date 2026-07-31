@@ -206,6 +206,24 @@ sign-out takes no lock at all, and a doubly-run refresh is bounded by the
 `lastRefreshAttempt` window, the refresh-token-reuse retry, and the sign-out
 tombstone re-validation.
 
+### Lock Acquisition Policy
+
+- **Forced refreshes** (`force: true`, e.g. after a 401) need a genuinely fresh
+  token, so they queue on the lock for up to the 45s acquisition timeout.
+- **Background/scheduled refreshes** are best-effort and use **try-immediate**
+  acquisition (`timeoutMs: 0` → Web Locks `ifAvailable`, or a single storage
+  attempt): if the lock is held, whoever holds it is refreshing this same
+  user's tokens, so the caller skips to recovery instead of queueing — it waits
+  2s, adopts the holder's refreshed tokens if they landed, and otherwise
+  **returns the still-valid cached token** rather than surfacing an error. A
+  spurious lock timeout (timers firing before the event loop resumes after
+  laptop sleep) must never masquerade as an auth failure while the session is
+  healthy. Only when the cached token is genuinely expired does the caller see
+  an error (and the scheduled path then retries with backoff).
+- **Detecting a lock timeout**: use the exported `isLockTimeoutError()` type
+  guard, not `instanceof LockTimeoutError` — a bundler can duplicate the
+  module, and an instance of one copy's class is not `instanceof` the other's.
+
 ### What Is and Isn't Locked
 
 Only the refresh round-trip itself takes the per-user refresh lock, via

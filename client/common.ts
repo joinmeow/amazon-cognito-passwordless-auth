@@ -31,7 +31,7 @@ import {
 import { scheduleRefresh, cleanupUserRefreshState } from "./refresh.js";
 import { computeClockDriftMs, redactSecret } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
-import { withLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
@@ -499,7 +499,7 @@ export async function processTokens(
       abort
     );
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.(
         "⏱️ [Process Tokens] Lock timeout - another auth operation in progress"
       );

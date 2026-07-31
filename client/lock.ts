@@ -18,10 +18,29 @@ import { configure } from "./config.js";
  * Custom error class for lock acquisition timeouts
  */
 export class LockTimeoutError extends Error {
+  /**
+   * Type-guard marker. Check this (via isLockTimeoutError) instead of
+   * `instanceof`: a bundler can end up with two copies of this module — the
+   * app and a dependency each bundling their own — and an instance of one
+   * copy's class is not `instanceof` the other copy's.
+   */
+  readonly isLockTimeout = true;
   constructor(key: string, timeout: number) {
     super(`Timeout acquiring lock '${key}' after ${timeout}ms`);
     this.name = "LockTimeoutError";
   }
+}
+
+/**
+ * Whether `err` is a lock-acquisition timeout. Use this instead of
+ * `instanceof LockTimeoutError` — it stays correct when a bundler has
+ * duplicated this module and the error crossed the copy boundary.
+ */
+export function isLockTimeoutError(err: unknown): err is LockTimeoutError {
+  return (
+    err instanceof Error &&
+    (err as { isLockTimeout?: unknown }).isLockTimeout === true
+  );
 }
 
 const DEFAULT_RETRY_DELAY_MS = 50;
@@ -432,6 +451,25 @@ async function withWebLock<T>(
     throw new DOMException("Operation aborted", "AbortError");
   }
 
+  if (timeoutMs === 0) {
+    // Try-immediate: take the lock only if it is free right now, never queue.
+    // The Web Locks spec forbids combining `signal` with `ifAvailable`, so
+    // there is no pending wait to interrupt — the caller abort was already
+    // checked above, and once granted an abort has no effect anyway.
+    return (await globalThis.navigator.locks.request(
+      key,
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          debug?.("withWebLock: lock unavailable (try-immediate)", key);
+          throw new LockTimeoutError(key, 0);
+        }
+        debug?.("withWebLock: acquired lock", key);
+        return fn();
+      }
+    )) as T;
+  }
+
   // One controller aborts the pending request on caller-abort OR the
   // acquisition deadline. `timedOut` distinguishes the two so the deadline maps
   // to LockTimeoutError (matching the storage backend's contract) while a
@@ -489,6 +527,12 @@ async function withWebLock<T>(
  * to the storage lock otherwise (Node, SSR, insecure contexts, unsupported
  * browsers). Both backends honor the caller `abort` and surface a
  * `LockTimeoutError` when acquisition exceeds `timeoutMs`.
+ *
+ * `timeoutMs: 0` means try-immediate: take the lock only if it is free right
+ * now, otherwise throw `LockTimeoutError` without queueing (Web Locks:
+ * `ifAvailable`; storage: a single acquisition attempt). Use it for
+ * best-effort background work that should skip, not wait, when another
+ * context is already doing the job.
  *
  * Mixed-version caveat: a tab on the storage lock and a tab on Web Locks do not
  * coordinate on the same key. Safe here because sign-out takes no lock, and a

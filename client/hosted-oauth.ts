@@ -27,7 +27,7 @@ import {
   redactTokensFromObject,
 } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 import { processTokens, signOut } from "./common.js";
 import { BusyState, IdleState, TokensFromSignIn } from "./model.js";
 
@@ -97,7 +97,7 @@ export async function signInWithRedirect({
       await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "true");
     });
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout - another OAuth operation in progress");
       throw new Error(
         "Another OAuth operation is in progress. Please try again."
@@ -323,7 +323,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     // timeouts — so code/state/tokens don't linger in the address bar or
     // session history
     cleanupCallbackUrl();
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout during state validation");
       throw new Error("OAuth operation in progress. Please try again.");
     }
@@ -607,7 +607,7 @@ async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {
       debug?.(`PKCE verifier retrieved: ${verifier ? "present" : "missing"}`);
     });
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout during PKCE retrieval");
       throw new Error("OAuth operation in progress. Please try again.");
     }
@@ -765,7 +765,7 @@ async function clear() {
   try {
     await withLock(oauthLockKey, async () => clearInternal());
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.(
         "⏱️ [OAuth] Lock timeout during clear - another OAuth operation is in progress"
       );

@@ -2,6 +2,7 @@ import { configure } from "../client/config.js";
 import {
   withLock,
   LockTimeoutError,
+  isLockTimeoutError,
   activeLockBackend,
 } from "../client/lock.js";
 
@@ -13,6 +14,7 @@ import {
 interface MockLockOptions {
   mode?: "exclusive" | "shared";
   signal?: AbortSignal;
+  ifAvailable?: boolean;
 }
 
 // Minimal, spec-faithful LockManager: exclusive requests on a name serialize;
@@ -42,6 +44,15 @@ function createWebLocksMock() {
         const entry = getEntry(name);
         const signal = options?.signal;
         let granted = false;
+
+        // Spec: with ifAvailable, a held lock invokes the callback with null
+        // instead of queueing the request.
+        if (options?.ifAvailable && entry.held) {
+          Promise.resolve()
+            .then(() => callback(null))
+            .then(resolve, reject);
+          return;
+        }
 
         const run = async () => {
           granted = true;
@@ -267,6 +278,66 @@ describe("withLock backend selection", () => {
       ran = true;
     });
     expect(ran).toBe(true);
+  });
+
+  test("timeoutMs 0 (try-immediate) acquires a free lock and runs the callback", async () => {
+    const m = installWebLocksMock();
+    configure({ clientId: "testClient", cognitoIdpEndpoint: "us-west-2" });
+
+    const result = await withLock(LOCK_KEY, async () => "ran", 0);
+
+    expect(result).toBe("ran");
+    // ifAvailable was requested — a free lock is granted, never queued.
+    expect(m.request.mock.calls[0][1]).toMatchObject({ ifAvailable: true });
+  });
+
+  test("timeoutMs 0 (try-immediate) throws LockTimeoutError at once when the lock is held, without queueing", async () => {
+    installWebLocksMock();
+    configure({ clientId: "testClient", cognitoIdpEndpoint: "us-west-2" });
+
+    let releaseHolder!: () => void;
+    const holderGate = new Promise<void>((r) => {
+      releaseHolder = r;
+    });
+    const holder = withLock(LOCK_KEY, async () => {
+      await holderGate;
+      return "holder-done";
+    });
+    await Promise.resolve(); // let the holder acquire
+
+    // No timers are driven: the rejection must be immediate, not a timeout.
+    let ran = false;
+    const err = await withLock(
+      LOCK_KEY,
+      async () => {
+        ran = true;
+      },
+      0
+    ).catch((e: unknown) => e);
+
+    expect(isLockTimeoutError(err)).toBe(true);
+    expect(ran).toBe(false);
+
+    // The holder was never disturbed by the try-immediate attempt.
+    releaseHolder();
+    await expect(holder).resolves.toBe("holder-done");
+  });
+
+  test("isLockTimeoutError recognizes an instance from a duplicated module copy (where instanceof fails)", () => {
+    // Simulate a bundler shipping two copies of lock.ts: the "foreign" copy's
+    // LockTimeoutError shares the shape (name + isLockTimeout marker) but not
+    // the prototype, so instanceof is false. The type guard must still match.
+    const foreign = Object.assign(
+      new Error("Timeout acquiring lock 'k' after 5ms"),
+      { name: "LockTimeoutError", isLockTimeout: true }
+    );
+
+    expect(foreign instanceof LockTimeoutError).toBe(false);
+    expect(isLockTimeoutError(foreign)).toBe(true);
+
+    // And it stays a guard, not a name-sniffer: plain errors don't match.
+    expect(isLockTimeoutError(new Error("Timeout acquiring lock"))).toBe(false);
+    expect(isLockTimeoutError(undefined)).toBe(false);
   });
 
   test("an AbortError thrown INSIDE the critical section is not reported as a lock timeout", async () => {
