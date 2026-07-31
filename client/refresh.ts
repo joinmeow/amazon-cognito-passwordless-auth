@@ -1104,13 +1104,12 @@ if (isBrowserEnvironment()) {
     cleanupRefreshSystem();
   };
 
+  // Deliberately NO "unload" listener: its mere presence makes the page
+  // ineligible for the back/forward cache in desktop Chrome and Firefox, and
+  // pagehide fires in every case unload does (plus when the page enters
+  // bfcache), so it adds nothing. See https://web.dev/articles/bfcache
   globalThis.addEventListener("beforeunload", autoCleanupHandler);
   globalThis.addEventListener("pagehide", autoCleanupHandler);
-
-  // For SPA navigation - cleanup on unload
-  if (typeof globalThis.addEventListener === "function") {
-    globalThis.addEventListener("unload", autoCleanupHandler);
-  }
 
   // Simplified watchdog with cleanup support
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -1149,8 +1148,8 @@ if (isBrowserEnvironment()) {
 /**
  * Clean up refresh state for a specific user (timers and in-memory state).
  * Call this on sign-out: it does NOT remove the global visibilitychange,
- * watchdog and unload listeners, so token refresh keeps working when
- * another user signs in afterwards.
+ * watchdog and page-lifecycle listeners, so token refresh keeps working
+ * when another user signs in afterwards.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupUserRefreshState(username?: string): void {
@@ -1187,9 +1186,9 @@ export function cleanupUserRefreshState(username?: string): void {
 /**
  * Clean up all refresh-related timers and event listeners.
  * Call this when unmounting the application (e.g. on page unload).
- * Note: this removes the GLOBAL visibilitychange, watchdog and unload
- * listeners for the rest of the page lifetime — for user sign-out use
- * cleanupUserRefreshState instead.
+ * Note: this removes the GLOBAL visibilitychange, watchdog and
+ * page-lifecycle listeners for the rest of the page lifetime — for user
+ * sign-out use cleanupUserRefreshState instead.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupRefreshSystem(username?: string): void {
@@ -1211,7 +1210,6 @@ export function cleanupRefreshSystem(username?: string): void {
   if (autoCleanupHandler && isBrowserEnvironment()) {
     globalThis.removeEventListener("beforeunload", autoCleanupHandler);
     globalThis.removeEventListener("pagehide", autoCleanupHandler);
-    globalThis.removeEventListener("unload", autoCleanupHandler);
     autoCleanupHandler = undefined;
   }
 

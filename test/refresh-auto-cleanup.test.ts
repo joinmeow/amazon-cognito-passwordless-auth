@@ -27,10 +27,11 @@ describe("Auto-Cleanup Functionality", () => {
   // so we need to track listeners that were already added
   const getPreExistingListeners = () => {
     const listeners = new Map<string, Set<EventListener>>();
-    // These are the events that refresh.ts registers on module load
+    // These are the events that refresh.ts registers on module load.
+    // Deliberately NOT "unload": its mere presence disqualifies the page
+    // from the back/forward cache (see refresh-auto-cleanup-verify.test.ts).
     listeners.set("beforeunload", new Set());
     listeners.set("pagehide", new Set());
-    listeners.set("unload", new Set());
     listeners.set("doc:visibilitychange", new Set());
     return listeners;
   };
@@ -107,8 +108,12 @@ describe("Auto-Cleanup Functionality", () => {
     // we just verify that the expected event types are present
     expect(eventListeners.has("beforeunload")).toBe(true);
     expect(eventListeners.has("pagehide")).toBe(true);
-    expect(eventListeners.has("unload")).toBe(true);
     expect(eventListeners.has("doc:visibilitychange")).toBe(true);
+    // Nothing may register an "unload" listener — it makes the page
+    // ineligible for the back/forward cache, and pagehide covers every case
+    // unload does. (Module-load registration itself is asserted for real in
+    // refresh-auto-cleanup-verify.test.ts.)
+    expect(eventListeners.has("unload")).toBe(false);
   });
 
   test("should trigger cleanup on beforeunload event", () => {
