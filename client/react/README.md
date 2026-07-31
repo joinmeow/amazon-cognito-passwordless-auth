@@ -172,6 +172,15 @@ conditional (autofill) or immediate (fast fail) mediation modes. Import
 capability matrix. The library maps `mediation: "immediate"` to the browser's
 standards-compliant `uiMode: "immediate"` request field.
 
+Immediate UI mode is **discoverable-credential-only**: the browser rejects an
+immediate-mode request that carries a non-empty `allowCredentials` list with
+`NotAllowedError` (an anti-tracking measure), so the library strips the
+allow-list on this path — server-issued credential IDs from a username-first
+flow are not sent. Also note that Chrome rejects **all** immediate-mode
+requests in incognito/private windows with the same `NotAllowedError`, so
+users with working passkeys will silently take your fallback path there;
+design the fallback (password form, other factors) accordingly.
+
 ### 3.2 SRP Password
 
 ```mermaid
