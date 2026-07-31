@@ -80,6 +80,10 @@ let autoCleanupHandler: (() => void) | undefined;
 
 // Max consecutive refresh failures before giving up
 const MAX_CONSECUTIVE_REFRESH_FAILURES = 5;
+// How long a scheduled refresh that found the lock contended (and fell back
+// to the cached token) waits before re-arming — matches the cross-tab
+// coordination window, so the holder has normally finished by then.
+const CONTENTION_REARM_DELAY_MS = 5000;
 
 // Generate unique tab ID for this tab
 const TAB_ID =
@@ -279,9 +283,11 @@ function logDebug(message: string, error?: unknown): void {
  * in-memory work, and holding `.refreshLock` here is what let an orphaned lock
  * from a dead tab stall scheduling. The immediate-refresh branch delegates to
  * refreshTokens(), which takes the lock itself and serializes across tabs. A
- * sign-out cancels an armed timer through the schedule's abort signal, and a
+ * sign-out cancels an armed timer through the schedule's abort signal; a
  * timer that fires for a torn-down session is discarded by refreshTokens'
- * re-validation.
+ * re-validation, and its failure path re-checks storage before arming any
+ * retry (a schedule can race sign-out and arm after teardown — harmless, but
+ * it must not spawn a retry chain for a session that no longer exists).
  */
 export async function scheduleRefresh({
   abort,
@@ -418,22 +424,16 @@ export async function scheduleRefresh({
       try {
         const latestTokens = await retrieveTokensForRefresh();
 
-        // An already-expired access token (e.g. the timer fired on wake from
-        // sleep, long past its due time) has no cached-token fallback: the
-        // refresh must actually happen. Force so it queues for the lock like
-        // the immediate-refresh branch does, instead of the best-effort
-        // try-lock-and-skip a due-at-half-life refresh gets.
-        const alreadyExpired =
-          !!latestTokens?.expireAt &&
-          latestTokens.expireAt.valueOf() <=
-            Date.now() - (latestTokens.clockDriftMs ?? 0);
-
-        await refreshTokens({
+        // No force here even when the token is already expired at fire time
+        // (wake from sleep): refreshTokens' lock policy queues on its own
+        // whenever no valid cached token exists, and staying non-forced keeps
+        // the coordination check, so a race with another waking tab adopts
+        // that tab's refresh instead of rotating twice.
+        const refreshed = await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens: latestTokens,
-          force: alreadyExpired,
         });
 
         // refreshTokens can succeed WITHOUT this tab having refreshed —
@@ -443,7 +443,27 @@ export async function scheduleRefresh({
         // until the watchdog. Re-arm here: when this tab DID refresh,
         // processTokens already registered the next timer and scheduleRefresh
         // dedups against it, so this is a no-op on that path.
-        void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+        const gotDifferentTokens =
+          refreshed.accessToken !== latestTokens?.accessToken;
+        if (gotDifferentTokens) {
+          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+        } else if (
+          !abort?.aborted &&
+          username &&
+          refreshStateMap.get(username) === state
+        ) {
+          // Cached-token return: another context holds the lock and is
+          // refreshing right now. An immediate re-arm would compute a ~0
+          // delay (we are at the buffer boundary) and fire again after the
+          // recovery's 2s wait — a ~2s poll against the holder. Wait out the
+          // coordination window first; by then the holder has usually
+          // finished and the re-arm schedules off the fresh tokens. Tracked
+          // as retryTimer so sign-out/cleanup can cancel it.
+          state.retryTimer = setTimeoutWallClock(() => {
+            state.retryTimer = undefined;
+            void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          }, CONTENTION_REARM_DELAY_MS);
+        }
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
 
@@ -465,6 +485,24 @@ export async function scheduleRefresh({
         ) {
           logDebug(
             "Session torn down (or no user) during the failed refresh; not scheduling a retry"
+          );
+          return;
+        }
+
+        // A sign-out can also race lock-free scheduling the other way round:
+        // this schedule read tokens just before sign-out cleared storage, and
+        // getRefreshState() recreated the map entry after teardown — so the
+        // identity check above passes. Re-check storage before arming a retry
+        // chain: with the session gone, every retry could only fail fast on
+        // "cannot determine user identity" (the tombstone and re-validation
+        // keep it harmless, but it is pure churn).
+        const sessionStillThere = await retrieveTokensForRefresh();
+        if (
+          !sessionStillThere?.refreshToken ||
+          sessionStillThere.username !== username
+        ) {
+          logDebug(
+            "Session no longer in storage after the failed refresh; not scheduling a retry"
           );
           return;
         }
@@ -904,6 +942,22 @@ export async function refreshTokens({
   };
 
   const { debug } = configure();
+  // Lock-wait policy. Best-effort try-lock (0) is only safe when a
+  // still-valid cached access token exists to fall back on: if the lock is
+  // held, whoever holds it IS refreshing this user's tokens, so the recovery
+  // below can adopt their result or return the cached token. With an expired
+  // (or missing) access token there is NO fallback — the refresh must
+  // actually produce tokens — so queue for the lock (undefined = default
+  // timeout); after acquiring, the coordination check adopts a refresh the
+  // holder just completed instead of repeating it. Forced refreshes (e.g.
+  // after a 401) always queue: they need a genuinely fresh token.
+  let lockWaitMs: number | undefined = undefined;
+  if (!force) {
+    const cached = await retrieveTokens();
+    if (cached?.accessToken && cached.username === userIdentifier) {
+      lockWaitMs = 0;
+    }
+  }
   debug?.("refreshTokens: waiting for lock", lockKey);
   try {
     const result = await withLock(
@@ -912,13 +966,7 @@ export async function refreshTokens({
         debug?.("refreshTokens: lock acquired", lockKey);
         return doRefresh();
       },
-      // A non-forced (background/scheduled) refresh is best-effort: if the
-      // lock is held, whoever holds it IS refreshing this user's tokens, so
-      // skip straight to the recovery below (adopt their result, or return
-      // the still-valid cached token) instead of queueing behind them.
-      // A forced refresh (e.g. after a 401) needs a fresh token and must
-      // wait its turn.
-      force ? undefined : 0,
+      lockWaitMs,
       abort
     );
     debug?.("refreshTokens: lock released", lockKey);

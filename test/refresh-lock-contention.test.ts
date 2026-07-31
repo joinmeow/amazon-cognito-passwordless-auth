@@ -37,28 +37,28 @@ function createMemoryStorage() {
 const USERNAME = "testuser";
 const LOCK_KEY = `Passwordless.testClient.${USERNAME}.refreshLock`;
 
-const accessToken = (jti: string) =>
+const accessToken = (jti: string, expOffsetSec = 3600) =>
   createJWT({
     sub: "user123",
     username: USERNAME,
     jti,
-    exp: Math.floor(Date.now() / 1000) + 3600,
-    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + expOffsetSec,
+    iat: Math.floor(Date.now() / 1000) + Math.min(0, expOffsetSec) - 3600,
   });
 
-async function seedSession(jti = "cached") {
-  const token = accessToken(jti);
+async function seedSession(jti = "cached", expOffsetSec = 3600) {
+  const token = accessToken(jti, expOffsetSec);
   await storeTokens({
     accessToken: token,
     idToken: createJWT({
       sub: "user123",
       "cognito:username": USERNAME,
-      exp: Math.floor(Date.now() / 1000) + 3600,
+      exp: Math.floor(Date.now() / 1000) + expOffsetSec,
       iat: Math.floor(Date.now() / 1000),
     }),
     refreshToken: `refresh-${jti}`,
     authMethod: "SRP",
-    expireAt: new Date(Date.now() + 3600_000),
+    expireAt: new Date(Date.now() + expOffsetSec * 1000),
   });
   return token;
 }
@@ -140,6 +140,48 @@ describe("refreshTokens under lock contention", () => {
       clearInterval(renewer);
     }
   }, 15000);
+
+  test("a non-forced refresh with an EXPIRED access token queues for the lock instead of erroring after the 2s recovery", async () => {
+    // The blocker case: an expired token has no cached-return fallback, so
+    // best-effort try-lock would error into the caller (the React
+    // incomplete-tokens effect treats that as terminal and signs the user
+    // out). With no valid cached token, refreshTokens must queue for the
+    // lock like it always used to, then perform the refresh.
+    const storage = createMemoryStorage();
+    const fetchMock = jest.fn(
+      async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+        if (isRefreshApiCall(init)) return refreshResponse();
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    );
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+      useGetTokensFromRefreshToken: true,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    // Access token expired an hour ago; refresh token still usable.
+    await seedSession("expired", -3600);
+
+    // Another tab holds the lock past the 2s recovery window, then releases.
+    storage.setItem(
+      LOCK_KEY,
+      JSON.stringify({ id: "other-tab", timestamp: Date.now() })
+    );
+    setTimeout(() => storage.removeItem(LOCK_KEY), 3000);
+
+    const result = await refreshTokens();
+
+    // Queued past the release, then performed a REAL refresh.
+    expect(result.accessToken).toBeTruthy();
+    expect(result.accessToken).not.toContain('"jti":"expired"');
+    expect(
+      fetchMock.mock.calls.some(([, init]) =>
+        isRefreshApiCall(init as { headers?: Record<string, string> })
+      )
+    ).toBe(true);
+  }, 20000);
 
   test("a forced refresh queues for the lock and performs a real refresh once the holder releases", async () => {
     const storage = createMemoryStorage();
