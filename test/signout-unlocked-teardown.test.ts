@@ -143,15 +143,20 @@ describe("SignOut unlocked local teardown", () => {
     });
     await seedSession();
 
-    const callback = jest.fn();
+    // Resolve off the callback itself rather than a fixed sleep: the assertion
+    // is about ordering, so waiting a wall-clock guess would flake under load.
+    let markCallbackFired!: () => void;
+    const callbackFired = new Promise<void>((resolve) => {
+      markCallbackFired = resolve;
+    });
+    const callback = jest.fn(() => markCallbackFired());
     let resolved = false;
     const { signedOut } = signOut({ tokensRemovedLocallyCb: callback });
     void signedOut.then(() => {
       resolved = true;
     });
 
-    // Give the local teardown time to run; revocation is still gated.
-    await new Promise((r) => setTimeout(r, 50));
+    await callbackFired;
 
     // Local removal + navigation callback have already happened...
     expect(callback).toHaveBeenCalledTimes(1);

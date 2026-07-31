@@ -273,7 +273,6 @@ function logDebug(message: string, error?: unknown): void {
   }
 }
 
-// Extract original implementation into a helper
 /**
  * Arm (or immediately run) this user's token refresh. Timer calculation and
  * registration run WITHOUT the refresh lock: arming a timer is purely local,
@@ -608,16 +607,11 @@ export interface RefreshTokensOptions {
    * Skip the cross-tab `shouldAttemptRefresh()` coordination/dedup check and
    * the in-process `isRefreshing` guard: the caller wants a refresh NOW
    * (e.g. after a 401), regardless of the 5s dedup window. Does NOT bypass
-   * the per-user refresh lock — a forced refresh still serializes with
-   * sign-out and any in-flight scheduled refresh.
+   * the per-user refresh lock, so it still serializes with other refreshes.
    */
   force?: boolean;
 }
 
-/**
- * Refresh tokens using the refresh token. Always goes through the per-user
- * refresh lock, so it serializes with sign-out and any in-flight refresh.
- */
 /**
  * Refresh this user's tokens under the per-user refresh lock, which serializes
  * refreshes across tabs. A sign-out that raced the network round-trip is
@@ -829,13 +823,11 @@ export async function refreshTokens({
         throw error;
       }
 
-      // The refresh round-trip may have raced a sign-out that proceeded
-      // without the refresh lock (signOut falls back to an unlocked
-      // teardown when lock acquisition times out). Re-validate that the
-      // session still exists in storage before writing anything back:
-      // storing now would resurrect the session the user just signed out
-      // of. (A rotated refresh token, if any, dies with this discard —
-      // RevokeToken revokes the whole token family, so it is unusable.)
+      // Sign-out does not take the refresh lock, so it can have landed during
+      // this round-trip. Re-validate the session before writing anything back:
+      // storing now would resurrect the session the user just signed out of.
+      // (A rotated refresh token dies with this discard — RevokeToken revokes
+      // the whole token family, so it is unusable.)
       const sessionStillExists = await retrieveTokensForRefresh();
       if (
         !sessionStillExists?.refreshToken ||
@@ -850,14 +842,10 @@ export async function refreshTokens({
         );
       }
 
-      // The network round-trip is done and the session re-validated, so the
-      // refresh itself is complete. Clear the in-progress flag now — BEFORE
-      // processTokens stores the new tokens and (fire-and-forget) schedules
-      // the next refresh: that scheduling checks state.isRefreshing and must
-      // see the refresh as finished, otherwise short-lived tokens never get
-      // their next timer armed. We still hold the refresh lock here, so no
-      // concurrent refresh can start in the meantime. The finally below
-      // re-clears the flag for the error paths above this point.
+      // Cleared before processTokens, which fire-and-forget schedules the next
+      // refresh and skips scheduling while this flag is set — otherwise
+      // short-lived tokens never get their next timer armed. Mutual exclusion
+      // is held by the refresh lock, not this flag.
       state.isRefreshing = false;
 
       let processedTokens: TokensFromRefresh;

@@ -444,13 +444,7 @@ async function withWebLock<T>(
     timedOut = true;
     acquireController.abort();
   }, timeoutMs);
-  let timerCleared = false;
-  const clearAcquireTimer = () => {
-    if (!timerCleared) {
-      timerCleared = true;
-      clearTimeout(acquireTimer);
-    }
-  };
+  const clearAcquireTimer = () => clearTimeout(acquireTimer);
 
   try {
     // The DOM lib types LockManager.request as Promise<any>; the callback here
@@ -489,12 +483,9 @@ async function withWebLock<T>(
  * browsers). Both backends honor the caller `abort` and surface a
  * `LockTimeoutError` when acquisition exceeds `timeoutMs`.
  *
- * Mixed-version note: an old tab still on the storage lock and a new tab on Web
- * Locks do NOT coordinate on the same key. The webapp's client-version reload
- * narrows that window (stale tabs reload on their next route navigation), but an
- * idle old tab can linger on the legacy protocol. That skew is safe without the
- * lock: sign-out no longer takes one at all, and a doubly-run refresh is covered
- * by the version-independent lastRefreshAttempt coordination window, the
+ * Mixed-version caveat: a tab on the storage lock and a tab on Web Locks do not
+ * coordinate on the same key. Safe here because sign-out takes no lock, and a
+ * doubly-run refresh is bounded by the lastRefreshAttempt window, the
  * refresh-token-reuse retry, and the sign-out tombstone re-validation.
  */
 export async function withLock<T>(

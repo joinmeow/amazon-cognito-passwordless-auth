@@ -299,6 +299,71 @@ describe("MFA status readiness (derived from token identity)", () => {
     expect(ready()).toBe("false");
   });
 
+  test("a same-user token rotation during refreshTotpMfaStatus cannot strand readiness", async () => {
+    // Readiness is keyed to the access token, so a manual refresh must discard
+    // its answer once the token rotates — committing the superseded token would
+    // derive readiness false with no later fetch to correct it, because the
+    // effect already fetched for the new token.
+    let releaseManualRefresh!: () => void;
+    const manualRefreshGate = new Promise<void>((resolve) => {
+      releaseManualRefresh = resolve;
+    });
+    let getUserCalls = 0;
+    const { fetchMock } = makeFetch({
+      getUser: async () => {
+        getUserCalls += 1;
+        // Call 1 = mount effect (token A); call 2 = the manual refresh (token A,
+        // gated); call 3 = the effect re-running for the rotated token B.
+        if (getUserCalls === 2) await manualRefreshGate;
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            Username: USERNAME,
+            UserAttributes: [],
+            UserMFASettingList: [],
+          },
+        };
+      },
+    });
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage: createMemoryStorage(),
+      fetch: fetchMock as unknown as MinimalFetch,
+    });
+    await seedSession(true, "a");
+
+    renderProbe();
+    await waitFor(() => expect(ready()).toBe("true"));
+    const firstToken = screen.getByTestId("token").textContent;
+
+    // Manual refresh for token A is now in flight and gated.
+    await act(async () => {
+      screen.getByTestId("refresh-mfa").click();
+    });
+
+    // Same user, new access token: the effect resolves readiness for B.
+    await act(async () => {
+      await seedSession(true, "b");
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("token").textContent).not.toBe(firstToken)
+    );
+    // The effect re-fetches for the rotated token only after its 5s cooldown;
+    // that fetch must land BEFORE token A's answer, which is what makes a
+    // mis-keyed commit permanent.
+    await waitFor(() => expect(ready()).toBe("true"), { timeout: 10000 });
+
+    // Token A's late answer must not key readiness back to the old token.
+    await act(async () => {
+      releaseManualRefresh();
+      await Promise.resolve();
+    });
+
+    expect(ready()).toBe("true");
+  }, 20000);
+
   test("a getUser response that lands after sign-out cannot mark a signed-out session ready", async () => {
     let releaseGetUser!: () => void;
     const gate = new Promise<void>((r) => {

@@ -2075,14 +2075,13 @@ function _usePasswordless() {
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
       const accessToken = tokens?.accessToken;
-      const forUsername = tokens?.username;
       if (!accessToken) return;
-      // Discard results that land after the session changed (sign-out or a
-      // different user signed in while getUser was in flight): session B's
-      // totpMfaStatus must never be overwritten with session A's answer.
-      // currentSignInUserRef is the authoritative marker (set in _setTokens,
-      // the single sink for every token change).
-      const sessionChanged = () => currentSignInUserRef.current !== forUsername;
+      // Shares the effect's staleness owner: a response is committed only while
+      // its token is still the one last fetched for. Keying on the username
+      // instead would let a same-user token rotation commit readiness for a
+      // superseded token, which no later fetch would correct.
+      lastFetchedMfaTokenRef.current = accessToken;
+      const isStale = () => lastFetchedMfaTokenRef.current !== accessToken;
 
       if (!accessTokenHasUserAdminScope(accessToken)) {
         dispatch({
@@ -2098,7 +2097,7 @@ function _usePasswordless() {
 
       try {
         const user = await getUser({ accessToken });
-        if (sessionChanged()) return;
+        if (isStale()) return;
 
         // Simple approach - if we have a valid user with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
@@ -2135,7 +2134,7 @@ function _usePasswordless() {
           });
         }
       } catch (error) {
-        if (sessionChanged()) return;
+        if (isStale()) return;
         const { debug } = configure();
         debug?.("refreshTotpMfaStatus failed; not marking ready");
         // Make the current (last-known) status consumable by the UI
