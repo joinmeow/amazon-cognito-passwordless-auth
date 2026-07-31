@@ -114,20 +114,7 @@
   "files": [
     "dist",
     "react",
-    "cognito-api.d.ts",
-    "common.d.ts",
-    "config.d.ts",
-    "errors.d.ts",
-    "fido2.d.ts",
-    "index.d.ts",
-    "jwt-model.d.ts",
-    "model.d.ts",
-    "plaintext.d.ts",
-    "refresh.d.ts",
-    "srp.d.ts",
-    "storage.d.ts",
-    "util.d.ts",
-    "hosted-oauth.d.ts"
+    "*.d.ts"
   ],
   "dependencies": {
     "aws-jwt-verify": "^4.0.1",
