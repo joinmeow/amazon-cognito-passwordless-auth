@@ -20,7 +20,7 @@ import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { withLock, LockTimeoutError } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -274,7 +274,17 @@ function logDebug(message: string, error?: unknown): void {
 }
 
 // Extract original implementation into a helper
-async function scheduleRefreshUnlocked({
+/**
+ * Arm (or immediately run) this user's token refresh. Timer calculation and
+ * registration run WITHOUT the refresh lock: arming a timer is purely local,
+ * in-memory work, and holding `.refreshLock` here is what let an orphaned lock
+ * from a dead tab stall scheduling. The immediate-refresh branch delegates to
+ * refreshTokens(), which takes the lock itself and serializes across tabs. A
+ * sign-out cancels an armed timer through the schedule's abort signal, and a
+ * timer that fires for a torn-down session is discarded by refreshTokens'
+ * re-validation.
+ */
+export async function scheduleRefresh({
   abort,
   tokensCb,
   isRefreshingCb,
@@ -347,22 +357,16 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        await performRefresh({
+        // Route the immediate refresh through refreshTokens so it takes the
+        // per-user lock itself — scheduling no longer holds it. refreshTokens
+        // marks completion, and its processTokens schedules the next refresh.
+        await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens,
           force: true,
-          // This path runs inside scheduleRefresh's per-user refresh lock
-          // (same lock key), so re-acquiring would self-deadlock
-          skipLock: true,
         });
-
-        // Mark as completed
-        await markRefreshCompleted();
-
-        // processTokens already handles scheduling the next refresh,
-        // so we don't need to do it here
       } catch (err) {
         logDebug("Failed to refresh token:", err);
       }
@@ -470,7 +474,7 @@ async function scheduleRefreshUnlocked({
         // otherwise it fires for a session that may already be torn down.
         state.retryTimer = setTimeoutWallClock(() => {
           state.retryTimer = undefined;
-          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
         }, backoffMs);
       }
     }, refreshDelay);
@@ -494,51 +498,6 @@ async function scheduleRefreshUnlocked({
     );
   } catch (err) {
     logDebug("Error scheduling refresh:", err);
-  }
-}
-
-// Simplified wrapper with per-user lock
-export async function scheduleRefresh(
-  args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
-): Promise<void> {
-  const { clientId, debug } = configure();
-  // Use retrieveTokensForRefresh first: the access token may already be
-  // expired while a refresh token still exists, and the per-user lock must
-  // still be honored then — e.g. signOut holds it during teardown, and the
-  // global watchdog/visibilitychange handlers must not schedule a refresh
-  // for a session that is being torn down
-  const tokens0 = (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
-  const userIdentifier = tokens0?.username;
-  if (!userIdentifier) {
-    debug?.("scheduleRefresh: no user, running unlocked");
-    return scheduleRefreshUnlocked(args);
-  }
-
-  const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
-  debug?.("scheduleRefresh: waiting for lock", lockKey);
-
-  try {
-    const result = await withStorageLock(
-      lockKey,
-      async () => {
-        debug?.("scheduleRefresh: lock acquired", lockKey);
-        return scheduleRefreshUnlocked(args);
-      },
-      undefined,
-      args.abort
-    );
-    debug?.("scheduleRefresh: lock released", lockKey);
-    return result;
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      debug?.(
-        "scheduleRefresh: could not acquire lock, another tab is handling refresh"
-      );
-      // This is fine - another tab is already refreshing
-      return;
-    }
-    // Re-throw other errors
-    throw err;
   }
 }
 
@@ -659,31 +618,20 @@ export interface RefreshTokensOptions {
  * Refresh tokens using the refresh token. Always goes through the per-user
  * refresh lock, so it serializes with sign-out and any in-flight refresh.
  */
-export async function refreshTokens(
-  args: RefreshTokensOptions = {}
-): Promise<TokensFromRefresh> {
-  // skipLock is INTERNAL and deliberately not part of the public options:
-  // exposing it would let a consumer bypass the per-user lock and recreate
-  // the sign-out/refresh resurrection race this path guards against.
-  return performRefresh(args);
-}
-
 /**
- * Internal refresh implementation. `skipLock` is private to this module: the
- * in-lock immediate-refresh path already holds the per-user refresh lock on
- * the same key, so re-acquiring would self-deadlock (storage locks are not
- * reentrant). No other caller may bypass the lock.
+ * Refresh this user's tokens under the per-user refresh lock, which serializes
+ * refreshes across tabs. A sign-out that raced the network round-trip is
+ * detected afterwards (session re-validation here plus the sign-out tombstone
+ * re-checked in processTokens) and the refreshed tokens are discarded rather
+ * than resurrecting the signed-out session.
  */
-async function performRefresh({
+export async function refreshTokens({
   abort,
   tokensCb,
   isRefreshingCb,
   tokens,
   force = false,
-  skipLock = false,
-}: RefreshTokensOptions & {
-  skipLock?: boolean;
-} = {}): Promise<TokensFromRefresh> {
+}: RefreshTokensOptions = {}): Promise<TokensFromRefresh> {
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
   if (!userIdentifier) {
@@ -902,6 +850,16 @@ async function performRefresh({
         );
       }
 
+      // The network round-trip is done and the session re-validated, so the
+      // refresh itself is complete. Clear the in-progress flag now — BEFORE
+      // processTokens stores the new tokens and (fire-and-forget) schedules
+      // the next refresh: that scheduling checks state.isRefreshing and must
+      // see the refresh as finished, otherwise short-lived tokens never get
+      // their next timer armed. We still hold the refresh lock here, so no
+      // concurrent refresh can start in the meantime. The finally below
+      // re-clears the flag for the error paths above this point.
+      state.isRefreshing = false;
+
       let processedTokens: TokensFromRefresh;
       try {
         processedTokens = (await processTokens(tokensFromRefresh, abort, {
@@ -938,16 +896,9 @@ async function performRefresh({
   };
 
   const { debug } = configure();
-  if (skipLock) {
-    debug?.(
-      "refreshTokens: skipLock=true, caller already holds the lock",
-      lockKey
-    );
-    return doRefresh();
-  }
   debug?.("refreshTokens: waiting for lock", lockKey);
   try {
-    const result = await withStorageLock(
+    const result = await withLock(
       lockKey,
       async () => {
         debug?.("refreshTokens: lock acquired", lockKey);
@@ -1074,11 +1025,10 @@ export async function forceRefreshTokens(
     state.retryTimer = undefined;
   }
 
-  // force: true skips the dedup/coordination check, but the refresh still
-  // goes through the per-user lock (no skipLock) so it serializes with
-  // sign-out and any in-flight scheduled refresh — a forced refresh that
-  // wrote tokens back without the lock could resurrect a session a
-  // concurrent sign-out just removed
+  // force: true skips the dedup/coordination check, but refreshTokens still
+  // takes the per-user lock and re-validates against sign-out afterwards, so a
+  // forced refresh racing a concurrent sign-out cannot resurrect the session it
+  // just removed.
   const refreshed = await refreshTokens({
     ...(args ?? {}),
     force: true,
@@ -1087,9 +1037,7 @@ export async function forceRefreshTokens(
   // scheduleRefresh's tokensCb is nullable (scheduling can yield null tokens)
   // while the forced-refresh tokensCb is not; the spread is behaviourally the
   // same as before, the cast just bridges that variance difference
-  void scheduleRefresh(
-    { ...args } as Parameters<typeof scheduleRefresh>[0]
-  );
+  void scheduleRefresh({ ...args } as Parameters<typeof scheduleRefresh>[0]);
 
   return refreshed;
 }

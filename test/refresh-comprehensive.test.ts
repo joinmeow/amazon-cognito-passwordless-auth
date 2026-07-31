@@ -4,6 +4,7 @@ import {
   refreshTokens,
   forceRefreshTokens,
   cleanupRefreshSystem,
+  cleanupUserRefreshState,
 } from "../client/refresh.js";
 import { storeTokens } from "../client/storage.js";
 import type { MinimalResponse } from "../client/config.js";
@@ -307,16 +308,16 @@ describe("Refresh System Comprehensive Tests", () => {
       // it would check if refresh is needed based on the time elapsed
 
       // Instead of testing the event directly, we can verify the behavior
-      // by checking that scheduleRefresh works correctly
+      // by checking that scheduleRefresh works correctly. Clear any timer a
+      // prior test left for this user first: refresh state is module-global
+      // and the suite's cleanupRefreshSystem() only resets the "default" user,
+      // so a stale future timer would otherwise make scheduling skip here.
+      cleanupUserRefreshState("testuser");
       await scheduleRefresh();
 
-      // Verify that refresh was scheduled
+      // Verify that a refresh was actually scheduled.
       expect(
-        debugLogs.some(
-          (log) =>
-            log.includes("Scheduling token refresh") ||
-            log.includes("scheduleRefresh")
-        )
+        debugLogs.some((log) => log.includes("Scheduling token refresh"))
       ).toBe(true);
     });
   });
