@@ -306,6 +306,68 @@ describe("Mediation Integration Tests", () => {
       expect(request).not.toHaveProperty("mediation");
     });
 
+    it("strips a non-empty allowCredentials for immediate mediation (discoverable-credential-only)", async () => {
+      // Chrome rejects uiMode:"immediate" requests that carry a non-empty
+      // allowCredentials with NotAllowedError (anti-tracking) — regardless of
+      // whether the user has a matching passkey. Sending the server-issued
+      // credential IDs (username-first flow) would therefore make every
+      // immediate request fail silently into the fallback path.
+      // https://developer.chrome.com/docs/identity/immediate-ui-mode
+      const debugSpy = jest.fn();
+      mockConfigure.mockReturnValue({
+        debug: debugSpy,
+        fido2: {
+          rp: { id: TEST_RP.id, name: TEST_RP.name },
+        },
+      } as any);
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+      cleanup = setupWebAuthnMock({
+        customCredentials: {
+          get: getSpy,
+          create: jest.fn(),
+        } as any,
+      });
+      const serverIssuedCredentials = [
+        { id: "AQIDBA", transports: ["internal"] as AuthenticatorTransport[] },
+      ];
+
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "immediate",
+        credentials: serverIssuedCredentials,
+      });
+
+      const request = getSpy.mock.calls[0][0];
+      expect(request.uiMode).toBe("immediate");
+      expect(request.publicKey.allowCredentials).toBeUndefined();
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining("discoverable-credential-only")
+      );
+    });
+
+    it("keeps allowCredentials for non-immediate requests with the same input", async () => {
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+      cleanup = setupWebAuthnMock({
+        customCredentials: {
+          get: getSpy,
+          create: jest.fn(),
+        } as any,
+      });
+
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        credentials: [
+          {
+            id: "AQIDBA",
+            transports: ["internal"] as AuthenticatorTransport[],
+          },
+        ],
+      });
+
+      const request = getSpy.mock.calls[0][0];
+      expect(request.publicKey.allowCredentials).toHaveLength(1);
+    });
+
     it("logs debug message for immediate mediation", async () => {
       const debugSpy = jest.fn();
       mockConfigure.mockReturnValue({

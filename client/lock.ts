@@ -18,20 +18,42 @@ import { configure } from "./config.js";
  * Custom error class for lock acquisition timeouts
  */
 export class LockTimeoutError extends Error {
+  /**
+   * Type-guard marker. Check this (via isLockTimeoutError) instead of
+   * `instanceof`: a bundler can end up with two copies of this module — the
+   * app and a dependency each bundling their own — and an instance of one
+   * copy's class is not `instanceof` the other copy's.
+   */
+  readonly isLockTimeout = true;
   constructor(key: string, timeout: number) {
     super(`Timeout acquiring lock '${key}' after ${timeout}ms`);
     this.name = "LockTimeoutError";
   }
 }
 
+/**
+ * Whether `err` is a lock-acquisition timeout. Use this instead of
+ * `instanceof LockTimeoutError` — it stays correct when a bundler has
+ * duplicated this module and the error crossed the copy boundary.
+ */
+export function isLockTimeoutError(err: unknown): err is LockTimeoutError {
+  return (
+    err instanceof Error &&
+    (err as { isLockTimeout?: unknown }).isLockTimeout === true
+  );
+}
+
 const DEFAULT_RETRY_DELAY_MS = 50;
 const STALE_LOCK_TIMEOUT_MS = 30000; // 30 seconds without a heartbeat renewal
-// The default acquisition timeout MUST exceed the stale threshold (plus a
-// takeover margin): a lock orphaned by an abruptly closed page keeps its
-// last timestamp forever, and a waiter that gives up before the orphan CAN
-// go stale is guaranteed a LockTimeoutError — worst case the OAuth
-// callback's token exchange right after a redirect, when the one-time
-// authorization code is already spent.
+// Default acquisition timeout for BOTH backends. Storage backend: it MUST
+// exceed the stale threshold (plus a takeover margin) — a lock orphaned by an
+// abruptly closed page keeps its last timestamp forever, and a waiter that
+// gives up before the orphan CAN go stale is guaranteed a LockTimeoutError;
+// worst case the OAuth callback's token exchange right after a redirect, when
+// the one-time authorization code is already spent. Web Locks backend: orphans
+// don't exist (the browser releases locks on tab death), so this only bounds
+// waiting on a LIVE holder — whose longest legitimate critical section (a
+// token refresh with retries on a slow network) fits comfortably within it.
 const DEFAULT_TIMEOUT_MS = STALE_LOCK_TIMEOUT_MS + 15000;
 const LOCK_HEARTBEAT_INTERVAL_MS = 10000; // renew held locks well within the stale timeout
 // Stop renewing the heartbeat after this long. A hung critical section
@@ -374,4 +396,208 @@ export async function withStorageLock<T>(
       debug?.("withStorageLock: error releasing lock", key, error);
     }
   }
+}
+
+/**
+ * Which cross-tab lock backend withLock will use in this context. Exposed so
+ * applications can tag telemetry (e.g. RUM auth events) with the backend in
+ * use — stalls have very different failure modes on the two paths (a storage
+ * lock can be orphaned by a dead tab; a Web Lock cannot).
+ */
+export function activeLockBackend(): "web-locks" | "storage" {
+  return webLocksAvailable() ? "web-locks" : "storage";
+}
+
+/**
+ * Internal sentinel: navigator.locks exists but request() rejected with
+ * SecurityError BEFORE the lock was granted — an opaque origin (e.g. a
+ * sandboxed iframe without allow-same-origin) does this. The critical section
+ * has NOT run, so withLock can safely retry on the storage backend.
+ */
+class WebLocksUnusableError extends Error {
+  constructor(readonly reason: unknown) {
+    super("Web Locks API is unusable in this context");
+    this.name = "WebLocksUnusableError";
+  }
+}
+
+/**
+ * Whether the Web Locks API is usable in this context. It requires a secure
+ * context (https or localhost); in insecure contexts, Node, SSR, and older
+ * browsers `navigator.locks` is absent and we fall back to the storage lock.
+ */
+function webLocksAvailable(): boolean {
+  if (
+    typeof globalThis === "undefined" ||
+    typeof globalThis.navigator === "undefined"
+  ) {
+    return false;
+  }
+  const locks = (globalThis.navigator as { locks?: LockManager }).locks;
+  return typeof locks?.request === "function";
+}
+
+/**
+ * Acquire a cross-tab lock via the Web Locks API and run `fn` while holding it.
+ *
+ * The critical advantage over the storage lock: the browser owns the lock and
+ * releases it automatically when the document unloads or the agent is
+ * terminated (a refresh, navigation, tab close, or crash). A tab killed
+ * mid-critical-section therefore cannot orphan the lock and stall other tabs
+ * for the ~30s stale-takeover window — the failure class behind the login and
+ * logout stalls.
+ *
+ * `abort` and the acquisition `timeoutMs` bound ACQUISITION only: a pending
+ * `navigator.locks.request` is cancelled through its `signal`. Once the lock is
+ * held, aborting has no effect (per the Web Locks spec), so a hung critical
+ * section must bound itself (e.g. the per-attempt fetch timeout on the
+ * refresh/revoke calls).
+ */
+async function withWebLock<T>(
+  key: string,
+  fn: () => Promise<T>,
+  timeoutMs: number,
+  abort?: AbortSignal
+): Promise<T> {
+  const { debug } = configure();
+  if (abort?.aborted) {
+    throw new DOMException("Operation aborted", "AbortError");
+  }
+
+  if (timeoutMs === 0) {
+    // Try-immediate: take the lock only if it is free right now, never queue.
+    // The Web Locks spec forbids combining `signal` with `ifAvailable`, so
+    // there is no pending wait to interrupt — the caller abort was already
+    // checked above, and once granted an abort has no effect anyway.
+    let granted = false;
+    try {
+      return (await globalThis.navigator.locks.request(
+        key,
+        { mode: "exclusive", ifAvailable: true },
+        async (lock) => {
+          if (!lock) {
+            debug?.("withWebLock: lock unavailable (try-immediate)", key);
+            throw new LockTimeoutError(key, 0);
+          }
+          granted = true;
+          debug?.("withWebLock: acquired lock", key);
+          return fn();
+        }
+      )) as T;
+    } catch (err) {
+      if (
+        !granted &&
+        err instanceof DOMException &&
+        err.name === "SecurityError"
+      ) {
+        throw new WebLocksUnusableError(err);
+      }
+      throw err;
+    }
+  }
+
+  // One controller aborts the pending request on caller-abort OR the
+  // acquisition deadline. `timedOut` distinguishes the two so the deadline maps
+  // to LockTimeoutError (matching the storage backend's contract) while a
+  // caller abort propagates as AbortError. `granted` gates BOTH translations:
+  // the deadline can fire in the microtask gap between the browser granting the
+  // lock and the callback clearing the timer, and once fn() is running any
+  // AbortError it throws is its own (e.g. an aborted fetch inside the critical
+  // section) and must propagate unchanged rather than be reported as a lock
+  // acquisition failure.
+  const acquireController = new AbortController();
+  let timedOut = false;
+  let granted = false;
+  const onCallerAbort = () => acquireController.abort();
+  abort?.addEventListener("abort", onCallerAbort, { once: true });
+  const acquireTimer = setTimeout(() => {
+    timedOut = true;
+    acquireController.abort();
+  }, timeoutMs);
+  const clearAcquireTimer = () => clearTimeout(acquireTimer);
+
+  try {
+    // The DOM lib types LockManager.request as Promise<any>; the callback here
+    // returns fn()'s result, so the resolved value is T.
+    return (await globalThis.navigator.locks.request(
+      key,
+      { mode: "exclusive", signal: acquireController.signal },
+      async () => {
+        // Acquired — the acquisition deadline no longer applies to the lock we
+        // now hold. The callback promise settling releases the lock, so a
+        // throw from fn() still releases it.
+        granted = true;
+        clearAcquireTimer();
+        debug?.("withWebLock: acquired lock", key);
+        return fn();
+      }
+    )) as T;
+  } catch (err) {
+    if (!granted && err instanceof DOMException) {
+      if (err.name === "AbortError") {
+        if (timedOut) {
+          debug?.("withWebLock: timeout acquiring lock", key, { timeoutMs });
+          throw new LockTimeoutError(key, timeoutMs);
+        }
+        debug?.("withWebLock: acquisition aborted by caller", key);
+      } else if (err.name === "SecurityError") {
+        // Opaque origin: request() rejects before any grant. fn() has not
+        // run — signal withLock to retry on the storage backend.
+        throw new WebLocksUnusableError(err);
+      }
+    }
+    throw err;
+  } finally {
+    clearAcquireTimer();
+    abort?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+/**
+ * Acquire a cross-tab lock and run `fn` while holding it. Uses the Web Locks
+ * API when available (browser-owned, auto-released on tab death) and falls back
+ * to the storage lock otherwise (Node, SSR, insecure contexts, unsupported
+ * browsers). Both backends honor the caller `abort` and surface a
+ * `LockTimeoutError` when acquisition exceeds `timeoutMs`.
+ *
+ * `timeoutMs: 0` means try-immediate: take the lock only if it is free right
+ * now, otherwise throw `LockTimeoutError` without queueing (Web Locks:
+ * `ifAvailable`; storage: a single acquisition attempt). Use it for
+ * best-effort background work that should skip, not wait, when another
+ * context is already doing the job.
+ *
+ * Mixed-version caveat: a tab on the storage lock and a tab on Web Locks do not
+ * coordinate on the same key. Safe here because sign-out takes no lock, and a
+ * doubly-run refresh is bounded by the lastRefreshAttempt window, the
+ * refresh-token-reuse retry, and the sign-out tombstone re-validation.
+ */
+export async function withLock<T>(
+  key: string,
+  fn: () => Promise<T>,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  abort?: AbortSignal
+): Promise<T> {
+  const { debug } = configure();
+  if (webLocksAvailable()) {
+    debug?.("withLock: acquiring via Web Locks backend", key);
+    try {
+      return await withWebLock(key, fn, timeoutMs, abort);
+    } catch (err) {
+      if (!(err instanceof WebLocksUnusableError)) {
+        throw err;
+      }
+      // navigator.locks exists but rejected with SecurityError before any
+      // grant (opaque origin) — fn() has not run, so retrying on the storage
+      // backend is safe. Note the storage backend may be unusable there too
+      // (localStorage throws in sandboxed iframes) unless the app configured
+      // a custom storage; either way this surfaces a coherent storage error
+      // instead of a baffling SecurityError from a lock API.
+      debug?.(
+        "withLock: Web Locks unusable in this context; falling back to storage lock",
+        key
+      );
+    }
+  }
+  debug?.("withLock: acquiring via storage-lock fallback", key);
+  return withStorageLock(key, fn, timeoutMs, abort);
 }

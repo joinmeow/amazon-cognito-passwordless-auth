@@ -20,7 +20,7 @@ import { setTimeoutWallClock } from "./util.js";
 import { processTokens } from "./common.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 
 // Simple state tracking
 type RefreshState = {
@@ -80,6 +80,10 @@ let autoCleanupHandler: (() => void) | undefined;
 
 // Max consecutive refresh failures before giving up
 const MAX_CONSECUTIVE_REFRESH_FAILURES = 5;
+// How long a scheduled refresh that found the lock contended (and fell back
+// to the cached token) waits before re-arming — matches the cross-tab
+// coordination window, so the holder has normally finished by then.
+const CONTENTION_REARM_DELAY_MS = 5000;
 
 // Generate unique tab ID for this tab
 const TAB_ID =
@@ -273,8 +277,19 @@ function logDebug(message: string, error?: unknown): void {
   }
 }
 
-// Extract original implementation into a helper
-async function scheduleRefreshUnlocked({
+/**
+ * Arm (or immediately run) this user's token refresh. Timer calculation and
+ * registration run WITHOUT the refresh lock: arming a timer is purely local,
+ * in-memory work, and holding `.refreshLock` here is what let an orphaned lock
+ * from a dead tab stall scheduling. The immediate-refresh branch delegates to
+ * refreshTokens(), which takes the lock itself and serializes across tabs. A
+ * sign-out cancels an armed timer through the schedule's abort signal; a
+ * timer that fires for a torn-down session is discarded by refreshTokens'
+ * re-validation, and its failure path re-checks storage before arming any
+ * retry (a schedule can race sign-out and arm after teardown — harmless, but
+ * it must not spawn a retry chain for a session that no longer exists).
+ */
+export async function scheduleRefresh({
   abort,
   tokensCb,
   isRefreshingCb,
@@ -347,22 +362,16 @@ async function scheduleRefreshUnlocked({
       );
 
       try {
-        await performRefresh({
+        // Route the immediate refresh through refreshTokens so it takes the
+        // per-user lock itself — scheduling no longer holds it. refreshTokens
+        // marks completion, and its processTokens schedules the next refresh.
+        await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens,
           force: true,
-          // This path runs inside scheduleRefresh's per-user refresh lock
-          // (same lock key), so re-acquiring would self-deadlock
-          skipLock: true,
         });
-
-        // Mark as completed
-        await markRefreshCompleted();
-
-        // processTokens already handles scheduling the next refresh,
-        // so we don't need to do it here
       } catch (err) {
         logDebug("Failed to refresh token:", err);
       }
@@ -415,12 +424,46 @@ async function scheduleRefreshUnlocked({
       try {
         const latestTokens = await retrieveTokensForRefresh();
 
-        await refreshTokens({
+        // No force here even when the token is already expired at fire time
+        // (wake from sleep): refreshTokens' lock policy queues on its own
+        // whenever no valid cached token exists, and staying non-forced keeps
+        // the coordination check, so a race with another waking tab adopts
+        // that tab's refresh instead of rotating twice.
+        const refreshed = await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens: latestTokens,
         });
+
+        // refreshTokens can succeed WITHOUT this tab having refreshed —
+        // adopting another tab's result, or returning the still-valid cached
+        // token when the lock was contended. Those paths never reach
+        // processTokens, so no next timer is armed and the chain would stall
+        // until the watchdog. Re-arm here: when this tab DID refresh,
+        // processTokens already registered the next timer and scheduleRefresh
+        // dedups against it, so this is a no-op on that path.
+        const gotDifferentTokens =
+          refreshed.accessToken !== latestTokens?.accessToken;
+        if (gotDifferentTokens) {
+          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+        } else if (
+          !abort?.aborted &&
+          username &&
+          refreshStateMap.get(username) === state
+        ) {
+          // Cached-token return: another context holds the lock and is
+          // refreshing right now. An immediate re-arm would compute a ~0
+          // delay (we are at the buffer boundary) and fire again after the
+          // recovery's 2s wait — a ~2s poll against the holder. Wait out the
+          // coordination window first; by then the holder has usually
+          // finished and the re-arm schedules off the fresh tokens. Tracked
+          // as retryTimer so sign-out/cleanup can cancel it.
+          state.retryTimer = setTimeoutWallClock(() => {
+            state.retryTimer = undefined;
+            void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
+          }, CONTENTION_REARM_DELAY_MS);
+        }
       } catch (err) {
         logDebug("Error during scheduled refresh:", err);
 
@@ -442,6 +485,24 @@ async function scheduleRefreshUnlocked({
         ) {
           logDebug(
             "Session torn down (or no user) during the failed refresh; not scheduling a retry"
+          );
+          return;
+        }
+
+        // A sign-out can also race lock-free scheduling the other way round:
+        // this schedule read tokens just before sign-out cleared storage, and
+        // getRefreshState() recreated the map entry after teardown — so the
+        // identity check above passes. Re-check storage before arming a retry
+        // chain: with the session gone, every retry could only fail fast on
+        // "cannot determine user identity" (the tombstone and re-validation
+        // keep it harmless, but it is pure churn).
+        const sessionStillThere = await retrieveTokensForRefresh();
+        if (
+          !sessionStillThere?.refreshToken ||
+          sessionStillThere.username !== username
+        ) {
+          logDebug(
+            "Session no longer in storage after the failed refresh; not scheduling a retry"
           );
           return;
         }
@@ -470,7 +531,7 @@ async function scheduleRefreshUnlocked({
         // otherwise it fires for a session that may already be torn down.
         state.retryTimer = setTimeoutWallClock(() => {
           state.retryTimer = undefined;
-          void scheduleRefreshUnlocked({ abort, tokensCb, isRefreshingCb });
+          void scheduleRefresh({ abort, tokensCb, isRefreshingCb });
         }, backoffMs);
       }
     }, refreshDelay);
@@ -494,51 +555,6 @@ async function scheduleRefreshUnlocked({
     );
   } catch (err) {
     logDebug("Error scheduling refresh:", err);
-  }
-}
-
-// Simplified wrapper with per-user lock
-export async function scheduleRefresh(
-  args: Parameters<typeof scheduleRefreshUnlocked>[0] = {}
-): Promise<void> {
-  const { clientId, debug } = configure();
-  // Use retrieveTokensForRefresh first: the access token may already be
-  // expired while a refresh token still exists, and the per-user lock must
-  // still be honored then — e.g. signOut holds it during teardown, and the
-  // global watchdog/visibilitychange handlers must not schedule a refresh
-  // for a session that is being torn down
-  const tokens0 = (await retrieveTokensForRefresh()) ?? (await retrieveTokens());
-  const userIdentifier = tokens0?.username;
-  if (!userIdentifier) {
-    debug?.("scheduleRefresh: no user, running unlocked");
-    return scheduleRefreshUnlocked(args);
-  }
-
-  const lockKey = `Passwordless.${clientId}.${userIdentifier}.refreshLock`;
-  debug?.("scheduleRefresh: waiting for lock", lockKey);
-
-  try {
-    const result = await withStorageLock(
-      lockKey,
-      async () => {
-        debug?.("scheduleRefresh: lock acquired", lockKey);
-        return scheduleRefreshUnlocked(args);
-      },
-      undefined,
-      args.abort
-    );
-    debug?.("scheduleRefresh: lock released", lockKey);
-    return result;
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      debug?.(
-        "scheduleRefresh: could not acquire lock, another tab is handling refresh"
-      );
-      // This is fine - another tab is already refreshing
-      return;
-    }
-    // Re-throw other errors
-    throw err;
   }
 }
 
@@ -649,41 +665,25 @@ export interface RefreshTokensOptions {
    * Skip the cross-tab `shouldAttemptRefresh()` coordination/dedup check and
    * the in-process `isRefreshing` guard: the caller wants a refresh NOW
    * (e.g. after a 401), regardless of the 5s dedup window. Does NOT bypass
-   * the per-user refresh lock — a forced refresh still serializes with
-   * sign-out and any in-flight scheduled refresh.
+   * the per-user refresh lock, so it still serializes with other refreshes.
    */
   force?: boolean;
 }
 
 /**
- * Refresh tokens using the refresh token. Always goes through the per-user
- * refresh lock, so it serializes with sign-out and any in-flight refresh.
+ * Refresh this user's tokens under the per-user refresh lock, which serializes
+ * refreshes across tabs. A sign-out that raced the network round-trip is
+ * detected afterwards (session re-validation here plus the sign-out tombstone
+ * re-checked in processTokens) and the refreshed tokens are discarded rather
+ * than resurrecting the signed-out session.
  */
-export async function refreshTokens(
-  args: RefreshTokensOptions = {}
-): Promise<TokensFromRefresh> {
-  // skipLock is INTERNAL and deliberately not part of the public options:
-  // exposing it would let a consumer bypass the per-user lock and recreate
-  // the sign-out/refresh resurrection race this path guards against.
-  return performRefresh(args);
-}
-
-/**
- * Internal refresh implementation. `skipLock` is private to this module: the
- * in-lock immediate-refresh path already holds the per-user refresh lock on
- * the same key, so re-acquiring would self-deadlock (storage locks are not
- * reentrant). No other caller may bypass the lock.
- */
-async function performRefresh({
+export async function refreshTokens({
   abort,
   tokensCb,
   isRefreshingCb,
   tokens,
   force = false,
-  skipLock = false,
-}: RefreshTokensOptions & {
-  skipLock?: boolean;
-} = {}): Promise<TokensFromRefresh> {
+}: RefreshTokensOptions = {}): Promise<TokensFromRefresh> {
   const { clientId } = configure();
   let userIdentifier: string | undefined = tokens?.username;
   if (!userIdentifier) {
@@ -881,13 +881,11 @@ async function performRefresh({
         throw error;
       }
 
-      // The refresh round-trip may have raced a sign-out that proceeded
-      // without the refresh lock (signOut falls back to an unlocked
-      // teardown when lock acquisition times out). Re-validate that the
-      // session still exists in storage before writing anything back:
-      // storing now would resurrect the session the user just signed out
-      // of. (A rotated refresh token, if any, dies with this discard —
-      // RevokeToken revokes the whole token family, so it is unusable.)
+      // Sign-out does not take the refresh lock, so it can have landed during
+      // this round-trip. Re-validate the session before writing anything back:
+      // storing now would resurrect the session the user just signed out of.
+      // (A rotated refresh token dies with this discard — RevokeToken revokes
+      // the whole token family, so it is unusable.)
       const sessionStillExists = await retrieveTokensForRefresh();
       if (
         !sessionStillExists?.refreshToken ||
@@ -901,6 +899,12 @@ async function performRefresh({
           "Session was signed out during the token refresh; refreshed tokens discarded"
         );
       }
+
+      // Cleared before processTokens, which fire-and-forget schedules the next
+      // refresh and skips scheduling while this flag is set — otherwise
+      // short-lived tokens never get their next timer armed. Mutual exclusion
+      // is held by the refresh lock, not this flag.
+      state.isRefreshing = false;
 
       let processedTokens: TokensFromRefresh;
       try {
@@ -938,34 +942,43 @@ async function performRefresh({
   };
 
   const { debug } = configure();
-  if (skipLock) {
-    debug?.(
-      "refreshTokens: skipLock=true, caller already holds the lock",
-      lockKey
-    );
-    return doRefresh();
+  // Lock-wait policy. Best-effort try-lock (0) is only safe when a
+  // still-valid cached access token exists to fall back on: if the lock is
+  // held, whoever holds it IS refreshing this user's tokens, so the recovery
+  // below can adopt their result or return the cached token. With an expired
+  // (or missing) access token there is NO fallback — the refresh must
+  // actually produce tokens — so queue for the lock (undefined = default
+  // timeout); after acquiring, the coordination check adopts a refresh the
+  // holder just completed instead of repeating it. Forced refreshes (e.g.
+  // after a 401) always queue: they need a genuinely fresh token.
+  let lockWaitMs: number | undefined = undefined;
+  if (!force) {
+    const cached = await retrieveTokens();
+    if (cached?.accessToken && cached.username === userIdentifier) {
+      lockWaitMs = 0;
+    }
   }
   debug?.("refreshTokens: waiting for lock", lockKey);
   try {
-    const result = await withStorageLock(
+    const result = await withLock(
       lockKey,
       async () => {
         debug?.("refreshTokens: lock acquired", lockKey);
         return doRefresh();
       },
-      undefined,
+      lockWaitMs,
       abort
     );
     debug?.("refreshTokens: lock released", lockKey);
     return result;
   } catch (err) {
     if (
-      err instanceof LockTimeoutError ||
+      isLockTimeoutError(err) ||
       (err instanceof Error &&
         err.message === "Another tab is handling refresh")
     ) {
       debug?.(
-        err instanceof LockTimeoutError
+        isLockTimeoutError(err)
           ? "refreshTokens: could not acquire lock, another process is refreshing"
           : "refreshTokens: another tab is handling refresh (coordination check)"
       );
@@ -1037,6 +1050,41 @@ async function performRefresh({
           );
         }
       } else {
+        // The holder didn't finish within the wait. For a background refresh,
+        // a still-valid cached token beats an error: retrieveTokens() already
+        // returned undefined if the access token were expired (skew-corrected),
+        // so a non-null result here IS valid. Surfacing an error instead would
+        // let a spurious lock timeout (e.g. a timer that fired while the event
+        // loop was parked through laptop sleep) look like an auth failure.
+        // tokensCb is deliberately NOT called: these are the tokens the caller
+        // already has, not a state change to propagate.
+        if (
+          !force &&
+          currentTokens?.accessToken &&
+          currentTokens.expireAt &&
+          currentTokens.refreshToken &&
+          currentTokens.username
+        ) {
+          debug?.(
+            "refreshTokens: lock unavailable but cached access token is still valid; returning it"
+          );
+          return {
+            accessToken: currentTokens.accessToken,
+            ...(currentTokens.idToken && { idToken: currentTokens.idToken }),
+            expireAt: currentTokens.expireAt,
+            username: currentTokens.username,
+            refreshToken: currentTokens.refreshToken,
+            ...(currentTokens.deviceKey && {
+              deviceKey: currentTokens.deviceKey,
+            }),
+            ...(currentTokens.authMethod && {
+              authMethod: currentTokens.authMethod,
+            }),
+            ...(currentTokens.clockDriftMs !== undefined && {
+              clockDriftMs: currentTokens.clockDriftMs,
+            }),
+          };
+        }
         debug?.(
           "refreshTokens: tokens were NOT refreshed by another tab (access token unchanged)"
         );
@@ -1074,11 +1122,10 @@ export async function forceRefreshTokens(
     state.retryTimer = undefined;
   }
 
-  // force: true skips the dedup/coordination check, but the refresh still
-  // goes through the per-user lock (no skipLock) so it serializes with
-  // sign-out and any in-flight scheduled refresh — a forced refresh that
-  // wrote tokens back without the lock could resurrect a session a
-  // concurrent sign-out just removed
+  // force: true skips the dedup/coordination check, but refreshTokens still
+  // takes the per-user lock and re-validates against sign-out afterwards, so a
+  // forced refresh racing a concurrent sign-out cannot resurrect the session it
+  // just removed.
   const refreshed = await refreshTokens({
     ...(args ?? {}),
     force: true,
@@ -1087,9 +1134,7 @@ export async function forceRefreshTokens(
   // scheduleRefresh's tokensCb is nullable (scheduling can yield null tokens)
   // while the forced-refresh tokensCb is not; the spread is behaviourally the
   // same as before, the cast just bridges that variance difference
-  void scheduleRefresh(
-    { ...args } as Parameters<typeof scheduleRefresh>[0]
-  );
+  void scheduleRefresh({ ...args } as Parameters<typeof scheduleRefresh>[0]);
 
   return refreshed;
 }
@@ -1118,13 +1163,12 @@ if (isBrowserEnvironment()) {
     cleanupRefreshSystem();
   };
 
+  // Deliberately NO "unload" listener: its mere presence makes the page
+  // ineligible for the back/forward cache in desktop Chrome and Firefox, and
+  // pagehide fires in every case unload does (plus when the page enters
+  // bfcache), so it adds nothing. See https://web.dev/articles/bfcache
   globalThis.addEventListener("beforeunload", autoCleanupHandler);
   globalThis.addEventListener("pagehide", autoCleanupHandler);
-
-  // For SPA navigation - cleanup on unload
-  if (typeof globalThis.addEventListener === "function") {
-    globalThis.addEventListener("unload", autoCleanupHandler);
-  }
 
   // Simplified watchdog with cleanup support
   const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -1163,8 +1207,8 @@ if (isBrowserEnvironment()) {
 /**
  * Clean up refresh state for a specific user (timers and in-memory state).
  * Call this on sign-out: it does NOT remove the global visibilitychange,
- * watchdog and unload listeners, so token refresh keeps working when
- * another user signs in afterwards.
+ * watchdog and page-lifecycle listeners, so token refresh keeps working
+ * when another user signs in afterwards.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupUserRefreshState(username?: string): void {
@@ -1201,9 +1245,9 @@ export function cleanupUserRefreshState(username?: string): void {
 /**
  * Clean up all refresh-related timers and event listeners.
  * Call this when unmounting the application (e.g. on page unload).
- * Note: this removes the GLOBAL visibilitychange, watchdog and unload
- * listeners for the rest of the page lifetime — for user sign-out use
- * cleanupUserRefreshState instead.
+ * Note: this removes the GLOBAL visibilitychange, watchdog and
+ * page-lifecycle listeners for the rest of the page lifetime — for user
+ * sign-out use cleanupUserRefreshState instead.
  * @param username - Optional username to clean up specific user state
  */
 export function cleanupRefreshSystem(username?: string): void {
@@ -1225,7 +1269,6 @@ export function cleanupRefreshSystem(username?: string): void {
   if (autoCleanupHandler && isBrowserEnvironment()) {
     globalThis.removeEventListener("beforeunload", autoCleanupHandler);
     globalThis.removeEventListener("pagehide", autoCleanupHandler);
-    globalThis.removeEventListener("unload", autoCleanupHandler);
     autoCleanupHandler = undefined;
   }
 

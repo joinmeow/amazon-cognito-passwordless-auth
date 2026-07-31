@@ -27,7 +27,7 @@ import {
   redactTokensFromObject,
 } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
-import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 import { processTokens, signOut } from "./common.js";
 import { BusyState, IdleState, TokensFromSignIn } from "./model.js";
 
@@ -91,13 +91,13 @@ export async function signInWithRedirect({
   debug?.("🔒 [OAuth] Acquiring lock for OAuth state storage");
 
   try {
-    await withStorageLock(oauthLockKey, async () => {
+    await withLock(oauthLockKey, async () => {
       await cfg.storage.setItem(STATE_KEY, state);
       await cfg.storage.setItem(PKCE_KEY, verifier);
       await cfg.storage.setItem(OAUTH_IN_PROGRESS_KEY, "true");
     });
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout - another OAuth operation in progress");
       throw new Error(
         "Another OAuth operation is in progress. Please try again."
@@ -306,7 +306,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
   const oauthLockKey = `Passwordless.${cfg.clientId}.oauthLock`;
 
   try {
-    await withStorageLock(oauthLockKey, async () => {
+    await withLock(oauthLockKey, async () => {
       const storedState = await cfg.storage.getItem(STATE_KEY);
       debug?.(`Stored state from browser: ${storedState?.substring(0, 10)}...`);
 
@@ -323,7 +323,7 @@ export async function handleCognitoOAuthCallback(): Promise<TokensFromSignIn | n
     // timeouts — so code/state/tokens don't linger in the address bar or
     // session history
     cleanupCallbackUrl();
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout during state validation");
       throw new Error("OAuth operation in progress. Please try again.");
     }
@@ -602,12 +602,12 @@ async function exchangeCodeForTokens(code: string): Promise<TokensFromSignIn> {
   let verifier = "";
 
   try {
-    await withStorageLock(oauthLockKey, async () => {
+    await withLock(oauthLockKey, async () => {
       verifier = (await cfg.storage.getItem(PKCE_KEY)) ?? "";
       debug?.(`PKCE verifier retrieved: ${verifier ? "present" : "missing"}`);
     });
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.("⏱️ [OAuth] Lock timeout during PKCE retrieval");
       throw new Error("OAuth operation in progress. Please try again.");
     }
@@ -763,9 +763,9 @@ async function clear() {
   debug?.("🔒 [OAuth] Acquiring lock for clearing OAuth state");
 
   try {
-    await withStorageLock(oauthLockKey, async () => clearInternal());
+    await withLock(oauthLockKey, async () => clearInternal());
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.(
         "⏱️ [OAuth] Lock timeout during clear - another OAuth operation is in progress"
       );

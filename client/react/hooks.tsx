@@ -278,8 +278,15 @@ interface PasswordlessState {
     preferred: boolean;
     availableMfaTypes: string[];
   };
-  /** True once we have a reliable MFA status from Cognito (via getUser) */
-  mfaStatusReady: boolean;
+  /**
+   * The access token that MFA status has been resolved for (getUser succeeded,
+   * failed open, or the token lacks the admin scope). Readiness is DERIVED from
+   * this equalling the current access token — so a stale updateTokens closure
+   * cannot un-ready an already-resolved token (the permanent post-login spinner
+   * bug), and a getUser response for a superseded token cannot ready a newer
+   * one.
+   */
+  mfaStatusReadyForToken?: string;
 }
 
 // Define action types
@@ -305,7 +312,7 @@ type PasswordlessAction =
   | { type: "INCREMENT_RECHECK_STATUS" }
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
   | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
-  | { type: "SET_MFA_STATUS_READY"; payload: boolean }
+  | { type: "SET_MFA_STATUS_READY_FOR_TOKEN"; payload: string | undefined }
   | { type: "RESET_REDIRECT_SIGNIN_STATUS" }
   | { type: "SIGN_OUT" };
 
@@ -321,7 +328,6 @@ const initialPasswordlessState: PasswordlessState = {
     preferred: false,
     availableMfaTypes: [],
   },
-  mfaStatusReady: false,
 };
 
 // Reducer function
@@ -406,8 +412,8 @@ function passwordlessReducer(
     case "SET_TOTP_MFA_STATUS":
       return { ...state, totpMfaStatus: action.payload };
 
-    case "SET_MFA_STATUS_READY":
-      return { ...state, mfaStatusReady: action.payload };
+    case "SET_MFA_STATUS_READY_FOR_TOKEN":
+      return { ...state, mfaStatusReadyForToken: action.payload };
 
     case "SIGN_OUT":
       // Reset all per-user state (tokens, deviceKey, TOTP MFA status, etc.)
@@ -450,8 +456,16 @@ function _usePasswordless() {
     recheckSignInStatus,
     authMethod,
     totpMfaStatus,
-    mfaStatusReady,
+    mfaStatusReadyForToken,
   } = state;
+
+  // MFA readiness is DERIVED, not stored: it holds only while the resolved
+  // token still equals the current access token. This makes it immune to a
+  // stale updateTokens closure (which used to reset a plain boolean to false
+  // for an already-resolved token and hang MfaGuard indefinitely) and to a
+  // getUser response for a superseded token.
+  const mfaStatusReady =
+    !!tokens?.accessToken && mfaStatusReadyForToken === tokens.accessToken;
 
   // Helper functions for common dispatch actions
   const setSigninInStatus = useCallback((status: BusyState | IdleState) => {
@@ -664,6 +678,21 @@ function _usePasswordless() {
   const isHandlingIncompleteTokens = useRef(false);
   // Track which accessToken we have already used for GetUser, so we only
   // fetch MFA status once per token rotation (per page load).
+  //
+  // This ref is the single staleness owner for MFA fetches, shared by the mount
+  // effect and the manual refreshTotpMfaStatus(). Its contract:
+  //  - A fetcher CLAIMS the ref (sets it to the token it is about to fetch for)
+  //    before awaiting, and commits its response only while the ref still holds
+  //    that token — so the last claimer wins and earlier responses are dropped.
+  //  - A claimer MUST commit readiness on every outcome, including failure
+  //    (the catch paths dispatch SET_MFA_STATUS_READY_FOR_TOKEN too). Claiming
+  //    suppresses the effect's per-token dedup below, so a claimer that returns
+  //    without committing would leave readiness unresolved with nothing left to
+  //    resolve it — the permanent-spinner class this keying exists to prevent.
+  //  - Setting it to undefined (sign-out, or the retry path forcing a re-fetch
+  //    of the same token) releases the claim and invalidates any in-flight
+  //    response, which is why a retry can discard an otherwise successful
+  //    concurrent answer; the retry's own fetch then re-resolves it.
   const lastFetchedMfaTokenRef = useRef<string | undefined>();
   // Silent retry timer for MFA status fetch
   const mfaRetryTimeoutRef = useRef<
@@ -1177,7 +1206,10 @@ function _usePasswordless() {
         type: "SET_TOTP_MFA_STATUS",
         payload: { enabled: false, preferred: false, availableMfaTypes: [] },
       });
-      dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+      dispatch({
+        type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+        payload: tokens.accessToken,
+      });
       return;
     }
 
@@ -1252,7 +1284,10 @@ function _usePasswordless() {
               availableMfaTypes: user.UserMFASettingList || [],
             },
           });
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          dispatch({
+            type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+            payload: fetchedForToken,
+          });
           // Successful fetch – cancel any scheduled retry and reset the
           // per-token retry budget
           if (mfaRetryTimeoutRef.current) {
@@ -1270,7 +1305,10 @@ function _usePasswordless() {
               availableMfaTypes: [],
             },
           });
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          dispatch({
+            type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+            payload: fetchedForToken,
+          });
           if (mfaRetryTimeoutRef.current) {
             clearTimeout(mfaRetryTimeoutRef.current);
             mfaRetryTimeoutRef.current = undefined;
@@ -1286,7 +1324,10 @@ function _usePasswordless() {
         const { debug } = configure();
         debug?.("getUser failed; retaining previous TOTP MFA status");
         // Ensure UI never hangs behind a loader due to a transient failure
-        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        dispatch({
+          type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+          payload: fetchedForToken,
+        });
         // Schedule a simple early silent retry with jitter (6–8s), but cap
         // the number of retries per token so a persistently failing getUser
         // (e.g. a network outage, or a backend that keeps erroring) does not
@@ -1342,9 +1383,10 @@ function _usePasswordless() {
       if (!current || !next) {
         _setTokens(next);
         parseAndSetTokens(next);
-        if (!current || current.accessToken !== next?.accessToken) {
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: false });
-        }
+        // No MFA-readiness reset here: readiness is derived from the resolved
+        // token identity, so a stale updateTokens closure re-setting the same
+        // token can no longer un-ready an already-resolved session, and a new
+        // token derives to not-ready until its own getUser resolves.
         return;
       }
 
@@ -1358,9 +1400,8 @@ function _usePasswordless() {
       if (hasChanges) {
         _setTokens(next);
         parseAndSetTokens(next);
-        if (current.accessToken !== next.accessToken) {
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: false });
-        }
+        // Readiness is derived from the resolved token identity (see above),
+        // so no explicit reset is needed when the access token changes.
       }
       // If no changes, skip update to prevent re-renders
     },
@@ -2048,19 +2089,30 @@ function _usePasswordless() {
     mfaStatusReady,
     /** Refresh the TOTP MFA status - use this after enabling/disabling MFA */
     refreshTotpMfaStatus: async () => {
-      if (!tokens?.accessToken) return;
+      const accessToken = tokens?.accessToken;
+      if (!accessToken) return;
+      // Shares the effect's staleness owner: a response is committed only while
+      // its token is still the one last fetched for. Keying on the username
+      // instead would let a same-user token rotation commit readiness for a
+      // superseded token, which no later fetch would correct.
+      lastFetchedMfaTokenRef.current = accessToken;
+      const isStale = () => lastFetchedMfaTokenRef.current !== accessToken;
 
-      if (!accessTokenHasUserAdminScope(tokens.accessToken)) {
+      if (!accessTokenHasUserAdminScope(accessToken)) {
         dispatch({
           type: "SET_TOTP_MFA_STATUS",
           payload: { enabled: false, preferred: false, availableMfaTypes: [] },
         });
-        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        dispatch({
+          type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+          payload: accessToken,
+        });
         return;
       }
 
       try {
-        const user = await getUser({ accessToken: tokens.accessToken });
+        const user = await getUser({ accessToken });
+        if (isStale()) return;
 
         // Simple approach - if we have a valid user with MFA settings, use them
         if (user && typeof user === "object" && !("__type" in user)) {
@@ -2077,7 +2129,10 @@ function _usePasswordless() {
               availableMfaTypes: user.UserMFASettingList || [],
             },
           });
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          dispatch({
+            type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+            payload: accessToken,
+          });
         } else {
           // Default to no MFA
           dispatch({
@@ -2088,13 +2143,20 @@ function _usePasswordless() {
               availableMfaTypes: [],
             },
           });
-          dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+          dispatch({
+            type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+            payload: accessToken,
+          });
         }
       } catch (error) {
+        if (isStale()) return;
         const { debug } = configure();
         debug?.("refreshTotpMfaStatus failed; not marking ready");
         // Make the current (last-known) status consumable by the UI
-        dispatch({ type: "SET_MFA_STATUS_READY", payload: true });
+        dispatch({
+          type: "SET_MFA_STATUS_READY_FOR_TOKEN",
+          payload: accessToken,
+        });
       }
     },
     /**

@@ -1,41 +1,81 @@
-describe("Verify Auto-Cleanup Setup", () => {
-  test("should have auto-cleanup listeners already registered", () => {
-    // The refresh module sets up listeners at initialization
-    // Let's verify they exist by checking the global object
+/* eslint-disable @typescript-eslint/no-var-requires --
+   jest.isolateModules only isolates modules loaded with require(); a static
+   import would resolve from the shared registry and defeat the whole point. */
+// Module-LOAD behavior of client/refresh.ts's page-lifecycle listeners.
+//
+// The listeners are registered at import time, which the other auto-cleanup
+// suite cannot observe (its spies install after the shared module instance
+// already loaded — it used to pre-seed a map and assert `has()`, which was
+// vacuous). jest.isolateModules gives a fresh module registry, so requiring
+// refresh.ts INSIDE it re-runs the top-level registration against our spies.
 
-    // We can't easily test this because the listeners are added
-    // at module load time and we can't intercept them
+describe("Refresh system page-lifecycle listeners (module load)", () => {
+  test("registers beforeunload + pagehide, and deliberately NO unload listener", () => {
+    const added: string[] = [];
+    const addSpy = jest
+      .spyOn(globalThis, "addEventListener")
+      .mockImplementation(((event: string) => {
+        added.push(event);
+      }) as typeof globalThis.addEventListener);
+    // Swallow the doc-level visibilitychange registration too, so the fresh
+    // module instance leaks no live listeners into this jsdom.
+    const docAddSpy = jest
+      .spyOn(document, "addEventListener")
+      .mockImplementation(() => {});
 
-    // Instead, let's trigger an event and see if cleanup happens
-    const beforeUnloadEvent = new Event("beforeunload");
-
-    // Create a spy on console methods to catch debug logs
-    const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-
+    let freshRefresh: typeof import("../client/refresh.js") | undefined;
     try {
-      // Dispatch the event
-      globalThis.dispatchEvent(beforeUnloadEvent);
+      jest.isolateModules(() => {
+        // The fresh registry has a fresh (unconfigured) config module too;
+        // configure it so the teardown's debug logging can run.
+        const { configure } =
+          require("../client/config.js") as typeof import("../client/config.js");
+        configure({ clientId: "testClient", cognitoIdpEndpoint: "us-west-2" });
+        freshRefresh =
+          require("../client/refresh.js") as typeof import("../client/refresh.js");
+      });
 
-      // In a real scenario, this would trigger cleanup
-      // But in tests, we might not see it due to configuration
-
-      // The important thing is that the code is there
-      expect(true).toBe(true);
+      expect(added).toContain("beforeunload");
+      expect(added).toContain("pagehide");
+      // An "unload" listener makes the page ineligible for the back/forward
+      // cache in desktop Chrome and Firefox, and pagehide fires in every case
+      // unload does — so registering one is pure downside.
+      // https://web.dev/articles/bfcache
+      expect(added).not.toContain("unload");
     } finally {
-      consoleSpy.mockRestore();
+      addSpy.mockRestore();
+      docAddSpy.mockRestore();
+      // Tear down the fresh instance's watchdog timer.
+      freshRefresh?.cleanupRefreshSystem();
     }
   });
 
-  test("VERIFICATION: The auto-cleanup code exists in refresh.ts", () => {
-    // This test verifies that we added the auto-cleanup code
-    // The actual functionality is hard to test because it runs at module load
+  test("a pagehide event triggers the auto-cleanup handler", () => {
+    const logs: string[] = [];
+    let freshRefresh: typeof import("../client/refresh.js") | undefined;
+    // Isolate BOTH refresh.ts and its config module, so we can point the
+    // fresh instance's debug at our log capture.
+    jest.isolateModules(() => {
+      const { configure } =
+        require("../client/config.js") as typeof import("../client/config.js");
+      configure({
+        clientId: "testClient",
+        cognitoIdpEndpoint: "us-west-2",
+        debug: (...args: unknown[]) => {
+          logs.push(args.map(String).join(" "));
+        },
+      });
+      freshRefresh =
+        require("../client/refresh.js") as typeof import("../client/refresh.js");
+    });
 
-    // The key additions:
-    // 1. autoCleanupHandler variable
-    // 2. addEventListener for beforeunload, pagehide, unload
-    // 3. removeEventListener in cleanupRefreshSystem
-
-    // This is more of a documentation test
-    expect(true).toBe(true);
+    try {
+      globalThis.dispatchEvent(new Event("pagehide"));
+      expect(
+        logs.some((l) => l.includes("Auto-cleanup triggered on page unload"))
+      ).toBe(true);
+    } finally {
+      freshRefresh?.cleanupRefreshSystem();
+    }
   });
 });

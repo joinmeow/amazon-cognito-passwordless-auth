@@ -25,13 +25,19 @@ import {
 import { webcrypto } from "crypto";
 import { configure, getAuthorizeEndpoint } from "../config.js";
 import { processTokens } from "../common.js";
-import { withStorageLock, LockTimeoutError } from "../lock.js";
+import { withLock, LockTimeoutError } from "../lock.js";
 import type { ConfigWithDefaults } from "../config.js";
 
 // Mock dependencies
 jest.mock("../config");
 jest.mock("../common");
-jest.mock("../lock");
+// Partial mock: withLock is stubbed per-test, but LockTimeoutError and
+// isLockTimeoutError stay real so the code under test can recognize the
+// timeout errors these tests throw.
+jest.mock("../lock", () => ({
+  ...jest.requireActual<typeof import("../lock.js")>("../lock"),
+  withLock: jest.fn(),
+}));
 jest.mock("../storage");
 
 const mockConfigure = configure as jest.MockedFunction<typeof configure>;
@@ -41,9 +47,7 @@ const mockGetAuthorizeEndpoint = getAuthorizeEndpoint as jest.MockedFunction<
 const mockProcessTokens = processTokens as jest.MockedFunction<
   typeof processTokens
 >;
-const mockWithStorageLock = withStorageLock as jest.MockedFunction<
-  typeof withStorageLock
->;
+const mockWithLock = withLock as jest.MockedFunction<typeof withLock>;
 
 interface MockLocation {
   href: string;
@@ -110,7 +114,7 @@ describe("OAuth Integration with processTokens", () => {
     };
 
     mockConfigure.mockReturnValue(mockConfig as ConfigWithDefaults);
-    mockWithStorageLock.mockImplementation(async (_, fn) => fn());
+    mockWithLock.mockImplementation(async (_, fn) => fn());
   });
 
   describe("handleCognitoOAuthCallback", () => {
@@ -720,7 +724,7 @@ describe("OAuth Integration with processTokens", () => {
 
     it("should scrub code and state from the URL when state validation hits a lock timeout", async () => {
       setupCodeFlowState();
-      mockWithStorageLock.mockRejectedValueOnce(
+      mockWithLock.mockRejectedValueOnce(
         new LockTimeoutError("test-lock-key", 15000)
       );
 
@@ -749,9 +753,7 @@ describe("OAuth Integration with processTokens", () => {
         if (key === "cognito_oauth_state") return Promise.resolve("test-state");
         return Promise.resolve(null);
       });
-      mockProcessTokens.mockRejectedValue(
-        new Error("token processing failed")
-      );
+      mockProcessTokens.mockRejectedValue(new Error("token processing failed"));
 
       await expect(handleCognitoOAuthCallback()).rejects.toThrow(
         "token processing failed"

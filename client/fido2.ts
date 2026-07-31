@@ -138,6 +138,13 @@ export async function getClientCapabilities(): Promise<WebAuthnClientCapabilitie
  * Feature detection for WebAuthn mediation capabilities.
  * Simplified helper that checks both conditional and immediate mediation support.
  *
+ * Note on `immediate`: capability means the browser understands immediate UI
+ * mode, not that a given request will succeed. Immediate mode is
+ * discoverable-credential-only (a non-empty allowCredentials is rejected with
+ * NotAllowedError — this library strips it), and Chrome also rejects ALL
+ * immediate-mode requests in incognito/private windows with NotAllowedError,
+ * so plan the fallback path accordingly.
+ *
  * @returns Object with capability flags
  *
  * @example
@@ -1042,6 +1049,7 @@ export async function fido2getCredential({
   // Adjust parameters based on mediation mode
   let effectiveUserVerification = userVerification;
   let effectiveTimeout = timeout;
+  let effectiveCredentials = credentials;
 
   if (mediation === "conditional") {
     // Conditional mediation: default userVerification to "preferred" (per passkeys.dev
@@ -1062,12 +1070,30 @@ export async function fido2getCredential({
           `Overriding timeout ${timeout}ms → undefined (browser default)`
       );
     }
+  } else if (mediation === "immediate") {
+    // Immediate UI mode is DISCOVERABLE-CREDENTIAL-ONLY: Chrome rejects any
+    // uiMode:"immediate" request carrying a non-empty allowCredentials with
+    // NotAllowedError (an anti-tracking measure), regardless of whether the
+    // user has a matching local passkey — indistinguishable from "no
+    // credentials", so users WITH working passkeys would silently fall through
+    // to the fallback. Strip the allow-list (mirroring how the conditional
+    // path strips timeout) so the request targets discoverable credentials
+    // for this rpId instead; the server-issued challenge still binds the
+    // assertion to the signed-in user.
+    // https://developer.chrome.com/docs/identity/immediate-ui-mode
+    if (credentials?.length) {
+      effectiveCredentials = undefined;
+      debug?.(
+        `⚠️ Immediate UI mode is discoverable-credential-only: dropping the ` +
+          `${credentials.length}-entry allowCredentials list (a non-empty list ` +
+          `is rejected with NotAllowedError by the browser)`
+      );
+    }
   }
-  // Immediate mediation uses parameters as-is (no overrides needed)
 
   const publicKey: CredentialRequestOptions["publicKey"] = {
     challenge: bufferFromBase64Url(challenge),
-    allowCredentials: credentials?.map((credential) => ({
+    allowCredentials: effectiveCredentials?.map((credential) => ({
       id: bufferFromBase64Url(credential.id),
       transports: credential.transports,
       type: "public-key" as const,
@@ -1812,6 +1838,14 @@ export function authenticateWithFido2({
    * - Enables intelligent fallback to password forms
    * - No cross-device/QR code prompts
    * - Requires: User gesture (button click)
+   * - DISCOVERABLE-CREDENTIAL-ONLY: the browser rejects an immediate-mode
+   *   request carrying a non-empty allowCredentials list with NotAllowedError
+   *   (anti-tracking), so this library strips the allow-list on this path —
+   *   server-issued credential IDs (username-first flows) are not sent
+   * - Incognito/private windows: Chrome always rejects immediate-mode
+   *   requests with NotAllowedError there, so users with working passkeys
+   *   silently take your fallback path — indistinguishable from "no local
+   *   credentials"
    *
    * Usage patterns:
    * ```typescript

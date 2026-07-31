@@ -31,7 +31,7 @@ import {
 import { scheduleRefresh, cleanupUserRefreshState } from "./refresh.js";
 import { computeClockDriftMs, redactSecret } from "./util.js";
 import { handleDeviceConfirmation } from "./device.js";
-import { withStorageLock, LockTimeoutError } from "./lock.js";
+import { withLock, isLockTimeoutError } from "./lock.js";
 import { parseJwtPayload } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 
@@ -238,10 +238,7 @@ async function processTokensInternal(
     }
   }
 
-  const {
-    clientId: clientIdForGuard,
-    storage: storageForGuard,
-  } = configure();
+  const { clientId: clientIdForGuard, storage: storageForGuard } = configure();
   const tombstoneKey = normalizedTokens.username
     ? signedOutTombstoneKey(clientIdForGuard, normalizedTokens.username)
     : undefined;
@@ -441,7 +438,10 @@ async function processTokensInternal(
       debug?.(
         "🔄 [Process Tokens] Fresh login detected, deferring token refresh scheduling"
       );
-      const deferralTimer = setTimeout(scheduleFn, FRESH_LOGIN_REFRESH_DELAY_MS);
+      const deferralTimer = setTimeout(
+        scheduleFn,
+        FRESH_LOGIN_REFRESH_DELAY_MS
+      );
       const entry = activeRefreshSchedules.get(normalizedTokens.username);
       if (entry?.abortController === scheduleAbort) {
         entry.deferralTimer = deferralTimer;
@@ -492,14 +492,14 @@ export async function processTokens(
   debug?.("🔒 [Process Tokens] Acquiring auth lock for user:", username);
 
   try {
-    return await withStorageLock(
+    return await withLock(
       lockKey,
       async () => processTokensInternal(tokens, abort, opts),
       undefined, // use default timeout
       abort
     );
   } catch (error) {
-    if (error instanceof LockTimeoutError) {
+    if (isLockTimeoutError(error)) {
       debug?.(
         "⏱️ [Process Tokens] Lock timeout - another auth operation in progress"
       );
@@ -510,6 +510,12 @@ export async function processTokens(
     throw error;
   }
 }
+
+// Bound the best-effort refresh-token revocation during sign-out so a hung
+// network call can never keep the returned `signedOut` promise pending: the
+// local teardown (and the app's navigation) has already completed by the time
+// revocation runs, so this only caps how long the server-side call may take.
+const SIGN_OUT_REVOKE_DEADLINE_MS = 5000;
 
 /**
  * Sign the user out. This means: clear tokens from storage,
@@ -546,7 +552,6 @@ export const signOut = (props?: {
   const tokenRevocationTracker = new Set<string>();
 
   const amplifyKeyPrefix = `CognitoIdentityServiceProvider.${clientId}`;
-  const customKeyPrefix = `Passwordless.${clientId}`;
 
   // Resolve the session to tear down. Prefer retrieveTokensForRefresh so a
   // session whose access token has already expired (but is still refreshable)
@@ -570,131 +575,118 @@ export const signOut = (props?: {
     return username ? { username } : undefined;
   };
 
-  // Wrap sign-out in per-user storage lock
+  // The local sign-out runs WITHOUT the per-user refresh lock. Holding
+  // `.refreshLock` here is what let a single orphaned lock — a tab killed
+  // mid-refresh, whose lock record lingers until it goes stale — freeze
+  // `/logout` for the ~30s stale-takeover window. The lock was only ever
+  // belt-and-suspenders: the sign-out tombstone is authoritative. An in-flight
+  // refresh re-checks the tombstone immediately before AND after writing
+  // tokens back (processTokens' `sessionMustExistSince` guard) and also
+  // re-validates that the session still exists in storage after its network
+  // round-trip (refreshTokens), so sign-out wins the race whether or not it
+  // holds the lock. Refresh-token revocation is bounded best-effort, after the
+  // local teardown.
   const signedOut = (async () => {
-    // Determine lock key per user
-    const session0 = await resolveSignOutSession();
-    const userIdentifier = session0?.username;
-    const lockKey = userIdentifier
-      ? `${customKeyPrefix}.${userIdentifier}.refreshLock`
-      : undefined;
-    // Run sign-out logic under lock if we have a user
-    const doSignOut = async () => {
-      try {
-        debug?.("signOut: performing sign-out for user", userIdentifier);
+    const session = await resolveSignOutSession();
+    const userIdentifier = session?.username;
+    debug?.("signOut: performing sign-out for user", userIdentifier);
 
-        // Clean up any active refresh schedules for this user
-        if (userIdentifier) {
-          const activeSchedule = activeRefreshSchedules.get(userIdentifier);
-          if (activeSchedule) {
-            debug?.("signOut: cancelling active refresh schedule for user");
-            activeSchedule.abortController.abort();
-            // Also cancel a pending fresh-login deferral so it can't fire
-            // and schedule a refresh for the session we are signing out of
-            if (activeSchedule.deferralTimer) {
-              clearTimeout(activeSchedule.deferralTimer);
-            }
-            activeRefreshSchedules.delete(userIdentifier);
-          }
-
-          // Clean up this user's refresh state (timers, in-memory state).
-          // Deliberately NOT cleanupRefreshSystem: that would tear down the
-          // global visibilitychange/watchdog listeners for the rest of the
-          // page lifetime, breaking refresh for the next user that signs in.
-          cleanupUserRefreshState(userIdentifier);
+    // Cancel this user's in-memory refresh schedule and per-user state so
+    // nothing re-arms a refresh for the session being torn down. In-memory
+    // only — no lock required. cleanupUserRefreshState (NOT
+    // cleanupRefreshSystem) deliberately preserves the global
+    // visibilitychange/watchdog listeners so refresh keeps working for the
+    // next user that signs in.
+    if (userIdentifier) {
+      const activeSchedule = activeRefreshSchedules.get(userIdentifier);
+      if (activeSchedule) {
+        debug?.("signOut: cancelling active refresh schedule for user");
+        activeSchedule.abortController.abort();
+        // Also cancel a pending fresh-login deferral so it can't fire and
+        // schedule a refresh for the session we are signing out of
+        if (activeSchedule.deferralTimer) {
+          clearTimeout(activeSchedule.deferralTimer);
         }
-
-        const session = await resolveSignOutSession();
-        if (abort.signal.aborted) {
-          debug?.("Aborting sign-out");
-          currentStatus && statusCb?.(currentStatus);
-          return;
-        }
-        if (!session) {
-          debug?.("No session in storage to delete");
-          props?.tokensRemovedLocallyCb?.();
-          statusCb?.("SIGNED_OUT");
-          return;
-        }
-        const { username, refreshToken } = session;
-        const revokeRefreshTokenOnce = async () => {
-          if (
-            refreshToken &&
-            !tokenRevocationTracker.has(refreshToken) &&
-            !skipTokenRevocation
-          ) {
-            try {
-              tokenRevocationTracker.add(refreshToken);
-              await revokeToken({
-                abort: undefined,
-                refreshToken: refreshToken,
-              });
-              debug?.("Successfully revoked refresh token");
-            } catch (revokeError) {
-              debug?.(
-                "Error revoking token, but continuing sign-out process:",
-                revokeError
-              );
-            }
-          }
-        };
-
-        // Tombstone FIRST, before revocation and removals: an in-flight
-        // refresh re-checks it immediately before AND after writing tokens
-        // back, so whichever way the race interleaves, the sign-out wins
-        await storage.setItem(
-          signedOutTombstoneKey(clientId, username),
-          Date.now().toString()
-        );
-
-        if (props?.revokeTokensBeforeLocalRemoval) {
-          await revokeRefreshTokenOnce();
-        }
-        await removeSessionKeysFromStorage(username);
-        props?.tokensRemovedLocallyCb?.();
-
-        await revokeRefreshTokenOnce();
-
-        statusCb?.("SIGNED_OUT");
-      } catch (error) {
-        if (abort.signal.aborted) return;
-        debug?.("Error during sign-out:", error);
-        currentStatus && statusCb?.(currentStatus);
-        throw error;
+        activeRefreshSchedules.delete(userIdentifier);
       }
-    };
-    if (lockKey) {
-      debug?.("signOut: waiting for lock", lockKey);
-      try {
-        const result = await withStorageLock(
-          lockKey,
-          async () => {
-            debug?.("signOut: lock acquired", lockKey);
-            return doSignOut();
-          },
-          undefined,
-          abort.signal
-        );
-        debug?.("signOut: lock released", lockKey);
-        return result;
-      } catch (err) {
-        if (!(err instanceof LockTimeoutError)) {
-          throw err;
-        }
-        // Sign-out must eventually win. The holder is most likely a hung or
-        // throttled refresh in another tab (its heartbeat is capped, but we
-        // won't make the user wait that out): proceed without the lock. A
-        // concurrent refresh that loses this race re-validates the session
-        // before acting on its result.
-        debug?.(
-          "signOut: could not acquire lock, signing out without it",
-          lockKey
-        );
-        return doSignOut();
-      }
+      cleanupUserRefreshState(userIdentifier);
     }
-    debug?.("signOut: no lock key, running unlocked");
-    return doSignOut();
+
+    try {
+      if (abort.signal.aborted) {
+        debug?.("Aborting sign-out");
+        currentStatus && statusCb?.(currentStatus);
+        return;
+      }
+      if (!session) {
+        debug?.("No session in storage to delete");
+        props?.tokensRemovedLocallyCb?.();
+        statusCb?.("SIGNED_OUT");
+        return;
+      }
+      const { username, refreshToken } = session;
+      const revokeRefreshTokenOnce = async () => {
+        if (
+          refreshToken &&
+          !tokenRevocationTracker.has(refreshToken) &&
+          !skipTokenRevocation
+        ) {
+          tokenRevocationTracker.add(refreshToken);
+          // Bound the revoke so a hung network call cannot keep `signedOut`
+          // pending forever. RevokeToken invalidates the whole token family,
+          // so revoking this snapshot also kills any token a racing refresh
+          // rotated to.
+          const revokeAbort = new AbortController();
+          const revokeDeadline = setTimeout(
+            () => revokeAbort.abort(),
+            SIGN_OUT_REVOKE_DEADLINE_MS
+          );
+          try {
+            await revokeToken({
+              abort: revokeAbort.signal,
+              refreshToken: refreshToken,
+            });
+            debug?.("Successfully revoked refresh token");
+          } catch (revokeError) {
+            debug?.(
+              "Error revoking token, but continuing sign-out process:",
+              revokeError
+            );
+          } finally {
+            clearTimeout(revokeDeadline);
+          }
+        }
+      };
+
+      // Tombstone FIRST, before revocation and removals: an in-flight refresh
+      // re-checks it immediately before AND after writing tokens back, so
+      // whichever way the race interleaves, the sign-out wins.
+      await storage.setItem(
+        signedOutTombstoneKey(clientId, username),
+        Date.now().toString()
+      );
+
+      // Hosted-UI logout revokes before local removal so the network call
+      // completes while the page is still alive (revokeTokensBeforeLocalRemoval).
+      if (props?.revokeTokensBeforeLocalRemoval) {
+        await revokeRefreshTokenOnce();
+      }
+
+      await removeSessionKeysFromStorage(username);
+      // Fire the local-removal callback and mark signed-out BEFORE the
+      // best-effort revoke: this is the signal the app waits on to navigate
+      // away from a protected route, and it must not be gated on a network
+      // round-trip (or an orphaned lock).
+      props?.tokensRemovedLocallyCb?.();
+      statusCb?.("SIGNED_OUT");
+
+      await revokeRefreshTokenOnce();
+    } catch (error) {
+      if (abort.signal.aborted) return;
+      debug?.("Error during sign-out:", error);
+      currentStatus && statusCb?.(currentStatus);
+      throw error;
+    }
   })();
   return {
     signedOut,
