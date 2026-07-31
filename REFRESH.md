@@ -210,16 +210,22 @@ tombstone re-validation.
 
 - **Forced refreshes** (`force: true`, e.g. after a 401) need a genuinely fresh
   token, so they queue on the lock for up to the 45s acquisition timeout.
-- **Background/scheduled refreshes** are best-effort and use **try-immediate**
-  acquisition (`timeoutMs: 0` → Web Locks `ifAvailable`, or a single storage
-  attempt): if the lock is held, whoever holds it is refreshing this same
-  user's tokens, so the caller skips to recovery instead of queueing — it waits
-  2s, adopts the holder's refreshed tokens if they landed, and otherwise
-  **returns the still-valid cached token** rather than surfacing an error. A
-  spurious lock timeout (timers firing before the event loop resumes after
-  laptop sleep) must never masquerade as an auth failure while the session is
-  healthy. Only when the cached token is genuinely expired does the caller see
-  an error (and the scheduled path then retries with backoff).
+- **Non-forced refreshes with a still-valid cached access token** are
+  best-effort and use **try-immediate** acquisition (`timeoutMs: 0` → Web
+  Locks `ifAvailable`, or a single storage attempt): if the lock is held,
+  whoever holds it is refreshing this same user's tokens, so the caller skips
+  to recovery instead of queueing — it waits 2s, adopts the holder's refreshed
+  tokens if they landed, and otherwise **returns the still-valid cached
+  token** rather than surfacing an error. A spurious lock timeout (timers
+  firing before the event loop resumes after laptop sleep) must never
+  masquerade as an auth failure while the session is healthy. A scheduled
+  refresh that took the cached-token path re-arms only after the 5s
+  coordination window, so contention never becomes a tight poll.
+- **Non-forced refreshes with an expired (or missing) access token** have no
+  fallback — the refresh must actually produce tokens — so they **queue** like
+  a forced refresh does. Staying non-forced keeps the cross-tab coordination
+  check, so a refresh the previous lock holder just completed is adopted
+  rather than repeated.
 - **Detecting a lock timeout**: use the exported `isLockTimeoutError()` type
   guard, not `instanceof LockTimeoutError` — a bundler can duplicate the
   module, and an instance of one copy's class is not `instanceof` the other's.
