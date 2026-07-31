@@ -678,6 +678,21 @@ function _usePasswordless() {
   const isHandlingIncompleteTokens = useRef(false);
   // Track which accessToken we have already used for GetUser, so we only
   // fetch MFA status once per token rotation (per page load).
+  //
+  // This ref is the single staleness owner for MFA fetches, shared by the mount
+  // effect and the manual refreshTotpMfaStatus(). Its contract:
+  //  - A fetcher CLAIMS the ref (sets it to the token it is about to fetch for)
+  //    before awaiting, and commits its response only while the ref still holds
+  //    that token — so the last claimer wins and earlier responses are dropped.
+  //  - A claimer MUST commit readiness on every outcome, including failure
+  //    (the catch paths dispatch SET_MFA_STATUS_READY_FOR_TOKEN too). Claiming
+  //    suppresses the effect's per-token dedup below, so a claimer that returns
+  //    without committing would leave readiness unresolved with nothing left to
+  //    resolve it — the permanent-spinner class this keying exists to prevent.
+  //  - Setting it to undefined (sign-out, or the retry path forcing a re-fetch
+  //    of the same token) releases the claim and invalidates any in-flight
+  //    response, which is why a retry can discard an otherwise successful
+  //    concurrent answer; the retry's own fetch then re-resolves it.
   const lastFetchedMfaTokenRef = useRef<string | undefined>();
   // Silent retry timer for MFA status fetch
   const mfaRetryTimeoutRef = useRef<

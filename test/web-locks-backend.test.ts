@@ -268,4 +268,52 @@ describe("withLock backend selection", () => {
     });
     expect(ran).toBe(true);
   });
+
+  test("an AbortError thrown INSIDE the critical section is not reported as a lock timeout", async () => {
+    // The acquisition deadline can fire in the gap between the browser granting
+    // the lock and our callback clearing the timer (the browser grants, then
+    // queues a task to invoke the callback). Aborting after the grant has no
+    // effect on the held lock per spec — but the deadline flag is set. If fn()
+    // then throws its own AbortError (e.g. an aborted fetch inside the critical
+    // section), it must propagate unchanged rather than be translated into a
+    // LockTimeoutError the caller would treat as "another tab is refreshing".
+    const grantThenDelayCallback = {
+      request: jest.fn(
+        (
+          _name: string,
+          _options: MockLockOptions,
+          callback: (lock: unknown) => Promise<unknown>
+        ) =>
+          // Lock is granted here; the callback runs a macrotask later, which is
+          // the window the acquisition timer can fire in.
+          new Promise((resolve, reject) => {
+            setTimeout(() => {
+              void callback({}).then(resolve, reject);
+            }, 50);
+          })
+      ),
+    };
+    Object.defineProperty(globalThis.navigator, "locks", {
+      value: grantThenDelayCallback,
+      configurable: true,
+      writable: true,
+    });
+    mock = grantThenDelayCallback as unknown as ReturnType<
+      typeof createWebLocksMock
+    >;
+    configure({ clientId: "testClient", cognitoIdpEndpoint: "us-west-2" });
+
+    // 10ms deadline expires during the 50ms grant→callback gap.
+    const err = await withLock(
+      LOCK_KEY,
+      async () => {
+        throw new DOMException("The operation was aborted", "AbortError");
+      },
+      10
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+    expect(err).not.toBeInstanceOf(LockTimeoutError);
+  });
 });

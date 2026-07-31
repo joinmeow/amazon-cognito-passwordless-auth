@@ -435,9 +435,15 @@ async function withWebLock<T>(
   // One controller aborts the pending request on caller-abort OR the
   // acquisition deadline. `timedOut` distinguishes the two so the deadline maps
   // to LockTimeoutError (matching the storage backend's contract) while a
-  // caller abort propagates as AbortError.
+  // caller abort propagates as AbortError. `granted` gates BOTH translations:
+  // the deadline can fire in the microtask gap between the browser granting the
+  // lock and the callback clearing the timer, and once fn() is running any
+  // AbortError it throws is its own (e.g. an aborted fetch inside the critical
+  // section) and must propagate unchanged rather than be reported as a lock
+  // acquisition failure.
   const acquireController = new AbortController();
   let timedOut = false;
+  let granted = false;
   const onCallerAbort = () => acquireController.abort();
   abort?.addEventListener("abort", onCallerAbort, { once: true });
   const acquireTimer = setTimeout(() => {
@@ -456,13 +462,14 @@ async function withWebLock<T>(
         // Acquired — the acquisition deadline no longer applies to the lock we
         // now hold. The callback promise settling releases the lock, so a
         // throw from fn() still releases it.
+        granted = true;
         clearAcquireTimer();
         debug?.("withWebLock: acquired lock", key);
         return fn();
       }
     )) as T;
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
+    if (!granted && err instanceof DOMException && err.name === "AbortError") {
       if (timedOut) {
         debug?.("withWebLock: timeout acquiring lock", key, { timeoutMs });
         throw new LockTimeoutError(key, timeoutMs);

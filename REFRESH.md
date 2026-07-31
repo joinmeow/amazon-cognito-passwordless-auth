@@ -19,7 +19,7 @@ graph TB
 
     subgraph "Coordination Layer"
         B1[activeRefreshSchedules Map]
-        B2[Storage Lock System]
+        B2[Cross-Tab Lock System]
         B3[Attempt Tracking]
         B4[Completion Tracking]
     end
@@ -156,11 +156,30 @@ if ("newDeviceMetadata" in tokens) {
 
 ## Multi-Tab Coordination
 
-### Storage-Based Lock System
+### Cross-Tab Lock System
 
 **Location**: `client/lock.ts`
 
-Prevents concurrent refreshes across tabs.
+Prevents concurrent refreshes across tabs. `withLock()` is the single entry
+point and picks one of two backends; `activeLockBackend()` reports which one is
+in use (useful for tagging telemetry, since the two have different failure
+modes).
+
+**Web Locks backend** (default wherever `navigator.locks` exists — a secure
+context in a modern browser):
+
+```typescript
+// Lock characteristics:
+- Browser-owned: released automatically on tab close, crash, or navigation,
+  so a tab killed mid-critical-section cannot orphan the lock
+- 45-second acquisition timeout (bounds waiting on a LIVE holder only)
+- No stale detection needed — orphans cannot exist
+- Not reentrant, and a held lock cannot be force-evicted: a hung critical
+  section must bound itself (the per-attempt fetch timeout does)
+```
+
+**Storage backend** (fallback for Node, SSR, insecure contexts, and browsers
+without the Web Locks API):
 
 ```typescript
 interface StorageLock {
@@ -169,11 +188,37 @@ interface StorageLock {
 }
 
 // Lock characteristics:
-- 15-second acquisition timeout
-- 30-second stale lock detection
+- 45-second acquisition timeout (MUST exceed the stale threshold)
+- 30-second stale lock detection, with heartbeat renewal by the holder
 - Storage events for fast release detection
 - Adaptive polling: 50ms → 75ms → ... → 500ms
 ```
+
+**Scope caveat**: the two backends scope locks differently. Web Locks are
+per-origin; the storage lock's scope is whatever `configure().storage` spans. If
+you configure a storage that reaches beyond one origin (e.g. a cookie shared
+across subdomains), the Web Locks path will not coordinate across those origins.
+If you configure per-tab storage (e.g. `sessionStorage`), the Web Locks path
+gains cross-tab coordination the storage lock never had. Both backends also
+ignore each other, so during a mixed-version rollout a tab on the old version
+and a tab on the new one do not coordinate on the same key. This is safe here:
+sign-out takes no lock at all, and a doubly-run refresh is bounded by the
+`lastRefreshAttempt` window, the refresh-token-reuse retry, and the sign-out
+tombstone re-validation.
+
+### What Is and Isn't Locked
+
+Only the refresh round-trip itself takes the per-user refresh lock, via
+`refreshTokens()`. Two things deliberately run **unlocked**:
+
+- **Scheduling** (`scheduleRefresh`) — computing a delay and arming a timer is
+  local, in-memory work. Holding a cross-tab lock for it let an orphaned lock
+  stall scheduling entirely.
+- **The local sign-out teardown** — the sign-out tombstone is authoritative, so
+  correctness does not depend on the lock. Waiting on one only meant a logout
+  spinner could hang behind another tab's orphaned lock. Refresh-token
+  revocation is bounded best-effort (5s) _after_ the local teardown, on both the
+  normal and `revokeTokensBeforeLocalRemoval` (hosted-UI) paths.
 
 ### Active Refresh Schedules Map
 
@@ -269,7 +314,8 @@ for (let attempt = 1; attempt <= 3; attempt++) {
 
 ### Handled Scenarios
 
-1. **Stale Locks**: Automatically cleared after 30 seconds
+1. **Stale Locks**: Impossible on the Web Locks backend (the browser releases
+   them on tab death); cleared after 30s on the storage backend
 2. **Race Conditions**: Unique lock IDs with timestamp verification
 3. **Network Failures**: 3 retries with exponential backoff
 4. **Token Rotation**: Handles RefreshTokenReuseException
@@ -297,7 +343,7 @@ for (let attempt = 1; attempt <= 3; attempt++) {
 
 | Operation        | Duration   | Notes             |
 | ---------------- | ---------- | ----------------- |
-| Lock Acquisition | 0-15s      | Usually <100ms    |
+| Lock Acquisition | 0-45s      | Usually <100ms    |
 | Refresh API Call | 200-3000ms | Network dependent |
 | Token Processing | <50ms      | Storage writes    |
 | Total Refresh    | 250-3500ms | Typical case      |
@@ -329,9 +375,14 @@ REFRESH_ATTEMPT_JITTER_MS = 100; // 0-100ms random
 // Watchdog
 WATCHDOG_INTERVAL_MS = 300000; // 5 minutes
 
-// Lock timeouts
-DEFAULT_LOCK_TIMEOUT_MS = 15000; // 15 seconds
-STALE_LOCK_THRESHOLD_MS = 30000; // 30 seconds
+// Lock timeouts (client/lock.ts)
+DEFAULT_TIMEOUT_MS = 45000; // 45s acquisition, both backends
+STALE_LOCK_TIMEOUT_MS = 30000; // 30s, storage backend only
+LOCK_HEARTBEAT_INTERVAL_MS = 10000; // 10s, storage backend only
+MAX_LOCK_HOLD_MS = 120000; // 2min renewal cap, storage backend only
+
+// Sign-out (client/common.ts)
+SIGN_OUT_REVOKE_DEADLINE_MS = 5000; // bounds best-effort revocation
 ```
 
 ### Per-User Isolation
@@ -347,7 +398,7 @@ All refresh operations are isolated per user:
 
 - **`client/refresh.ts`**: Core refresh logic and scheduling
 - **`client/common.ts`**: Token processing and schedule management
-- **`client/lock.ts`**: Storage-based locking mechanism
+- **`client/lock.ts`**: Cross-tab locking (Web Locks, storage-lock fallback)
 - **`client/retry.ts`**: Network retry logic
 - **`client/react/hooks.tsx`**: React integration and auto-refresh
 
