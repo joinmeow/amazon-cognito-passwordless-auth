@@ -340,6 +340,66 @@ describe("withLock backend selection", () => {
     expect(isLockTimeoutError(undefined)).toBe(false);
   });
 
+  test("falls back to the storage lock when request() rejects with SecurityError before any grant (opaque origin)", async () => {
+    // A sandboxed iframe without allow-same-origin exposes navigator.locks
+    // but rejects every request() with SecurityError. The critical section
+    // has not run, so withLock must retry it on the storage backend rather
+    // than surface a baffling SecurityError.
+    const securityMock = {
+      request: jest.fn(() =>
+        Promise.reject(
+          new DOMException("The request was denied", "SecurityError")
+        )
+      ),
+    };
+    Object.defineProperty(globalThis.navigator, "locks", {
+      value: securityMock,
+      configurable: true,
+      writable: true,
+    });
+    mock = securityMock as unknown as ReturnType<typeof createWebLocksMock>;
+    const { backing, storage } = createEnumerableStorage();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+    });
+
+    let sawStorageRecord = false;
+    const result = await withLock(LOCK_KEY, async () => {
+      sawStorageRecord = backing.has(LOCK_KEY);
+      return "via-storage";
+    });
+
+    expect(result).toBe("via-storage");
+    expect(securityMock.request).toHaveBeenCalledTimes(1);
+    // fn ran exactly once, under the STORAGE lock.
+    expect(sawStorageRecord).toBe(true);
+    expect(backing.has(LOCK_KEY)).toBe(false);
+  });
+
+  test("a SecurityError thrown INSIDE the critical section propagates (no storage retry, fn must not run twice)", async () => {
+    installWebLocksMock();
+    const { backing, storage } = createEnumerableStorage();
+    configure({
+      clientId: "testClient",
+      cognitoIdpEndpoint: "us-west-2",
+      storage,
+    });
+
+    let runs = 0;
+    const err = await withLock(LOCK_KEY, async () => {
+      runs++;
+      throw new DOMException("thrown by fn", "SecurityError");
+    }).catch((e: unknown) => e);
+
+    expect(runs).toBe(1);
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("SecurityError");
+    // Never re-ran on the storage backend.
+    expect(backing.has(LOCK_KEY)).toBe(false);
+  });
+
   test("an AbortError thrown INSIDE the critical section is not reported as a lock timeout", async () => {
     // The acquisition deadline can fire in the gap between the browser granting
     // the lock and our callback clearing the timer (the browser grants, then

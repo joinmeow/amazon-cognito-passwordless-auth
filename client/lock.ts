@@ -409,6 +409,19 @@ export function activeLockBackend(): "web-locks" | "storage" {
 }
 
 /**
+ * Internal sentinel: navigator.locks exists but request() rejected with
+ * SecurityError BEFORE the lock was granted — an opaque origin (e.g. a
+ * sandboxed iframe without allow-same-origin) does this. The critical section
+ * has NOT run, so withLock can safely retry on the storage backend.
+ */
+class WebLocksUnusableError extends Error {
+  constructor(readonly reason: unknown) {
+    super("Web Locks API is unusable in this context");
+    this.name = "WebLocksUnusableError";
+  }
+}
+
+/**
  * Whether the Web Locks API is usable in this context. It requires a secure
  * context (https or localhost); in insecure contexts, Node, SSR, and older
  * browsers `navigator.locks` is absent and we fall back to the storage lock.
@@ -456,18 +469,31 @@ async function withWebLock<T>(
     // The Web Locks spec forbids combining `signal` with `ifAvailable`, so
     // there is no pending wait to interrupt — the caller abort was already
     // checked above, and once granted an abort has no effect anyway.
-    return (await globalThis.navigator.locks.request(
-      key,
-      { mode: "exclusive", ifAvailable: true },
-      async (lock) => {
-        if (!lock) {
-          debug?.("withWebLock: lock unavailable (try-immediate)", key);
-          throw new LockTimeoutError(key, 0);
+    let granted = false;
+    try {
+      return (await globalThis.navigator.locks.request(
+        key,
+        { mode: "exclusive", ifAvailable: true },
+        async (lock) => {
+          if (!lock) {
+            debug?.("withWebLock: lock unavailable (try-immediate)", key);
+            throw new LockTimeoutError(key, 0);
+          }
+          granted = true;
+          debug?.("withWebLock: acquired lock", key);
+          return fn();
         }
-        debug?.("withWebLock: acquired lock", key);
-        return fn();
+      )) as T;
+    } catch (err) {
+      if (
+        !granted &&
+        err instanceof DOMException &&
+        err.name === "SecurityError"
+      ) {
+        throw new WebLocksUnusableError(err);
       }
-    )) as T;
+      throw err;
+    }
   }
 
   // One controller aborts the pending request on caller-abort OR the
@@ -507,12 +533,18 @@ async function withWebLock<T>(
       }
     )) as T;
   } catch (err) {
-    if (!granted && err instanceof DOMException && err.name === "AbortError") {
-      if (timedOut) {
-        debug?.("withWebLock: timeout acquiring lock", key, { timeoutMs });
-        throw new LockTimeoutError(key, timeoutMs);
+    if (!granted && err instanceof DOMException) {
+      if (err.name === "AbortError") {
+        if (timedOut) {
+          debug?.("withWebLock: timeout acquiring lock", key, { timeoutMs });
+          throw new LockTimeoutError(key, timeoutMs);
+        }
+        debug?.("withWebLock: acquisition aborted by caller", key);
+      } else if (err.name === "SecurityError") {
+        // Opaque origin: request() rejects before any grant. fn() has not
+        // run — signal withLock to retry on the storage backend.
+        throw new WebLocksUnusableError(err);
       }
-      debug?.("withWebLock: acquisition aborted by caller", key);
     }
     throw err;
   } finally {
@@ -548,7 +580,23 @@ export async function withLock<T>(
   const { debug } = configure();
   if (webLocksAvailable()) {
     debug?.("withLock: acquiring via Web Locks backend", key);
-    return withWebLock(key, fn, timeoutMs, abort);
+    try {
+      return await withWebLock(key, fn, timeoutMs, abort);
+    } catch (err) {
+      if (!(err instanceof WebLocksUnusableError)) {
+        throw err;
+      }
+      // navigator.locks exists but rejected with SecurityError before any
+      // grant (opaque origin) — fn() has not run, so retrying on the storage
+      // backend is safe. Note the storage backend may be unusable there too
+      // (localStorage throws in sandboxed iframes) unless the app configured
+      // a custom storage; either way this surfaces a coherent storage error
+      // instead of a baffling SecurityError from a lock API.
+      debug?.(
+        "withLock: Web Locks unusable in this context; falling back to storage lock",
+        key
+      );
+    }
   }
   debug?.("withLock: acquiring via storage-lock fallback", key);
   return withStorageLock(key, fn, timeoutMs, abort);

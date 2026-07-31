@@ -418,11 +418,22 @@ export async function scheduleRefresh({
       try {
         const latestTokens = await retrieveTokensForRefresh();
 
+        // An already-expired access token (e.g. the timer fired on wake from
+        // sleep, long past its due time) has no cached-token fallback: the
+        // refresh must actually happen. Force so it queues for the lock like
+        // the immediate-refresh branch does, instead of the best-effort
+        // try-lock-and-skip a due-at-half-life refresh gets.
+        const alreadyExpired =
+          !!latestTokens?.expireAt &&
+          latestTokens.expireAt.valueOf() <=
+            Date.now() - (latestTokens.clockDriftMs ?? 0);
+
         await refreshTokens({
           abort,
           tokensCb,
           isRefreshingCb,
           tokens: latestTokens,
+          force: alreadyExpired,
         });
 
         // refreshTokens can succeed WITHOUT this tab having refreshed —
