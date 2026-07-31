@@ -37,7 +37,9 @@ describe("createFetchWithRetry", () => {
       return Promise.resolve(okResponse);
     });
 
-    const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 1);
+    // Short per-attempt timeout (50ms) so the successful attempt's
+    // body-guard relay detaches within the test.
+    const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 1, 50);
     const res = await fetchWithRetry("https://example.com", {
       signal: controller.signal,
     });
@@ -46,15 +48,99 @@ describe("createFetchWithRetry", () => {
     expect(fetchFn).toHaveBeenCalledTimes(3);
 
     // "abort" listeners are registered on the caller signal both for each
-    // backoff wait and for each attempt's per-attempt-timeout controller. Every
-    // one must be removed again (on timer fire / in the attempt's finally), so a
-    // long-lived signal never accumulates dead listeners across retries.
-    const abortAdds = addSpy.mock.calls.filter(([type]) => type === "abort");
-    const abortRemoves = removeSpy.mock.calls.filter(
-      ([type]) => type === "abort"
+    // backoff wait and for each attempt's per-attempt-timeout controller.
+    // Failed attempts remove theirs before retrying. The SUCCESSFUL attempt
+    // deliberately keeps its relay armed to cover body reads, so right after
+    // the response returns exactly one listener is still live...
+    const abortAdds = () =>
+      addSpy.mock.calls.filter(([type]) => type === "abort").length;
+    const abortRemoves = () =>
+      removeSpy.mock.calls.filter(([type]) => type === "abort").length;
+    expect(abortAdds()).toBeGreaterThanOrEqual(2);
+    expect(abortRemoves()).toBe(abortAdds() - 1);
+
+    // ...and the per-attempt deadline removes it when it fires, so a
+    // long-lived signal never accumulates listeners indefinitely.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(abortRemoves()).toBe(abortAdds());
+  });
+
+  test("a caller abort during res.json() cancels the body read", async () => {
+    // The response body stream is bound to the attempt's signal. Before this
+    // fix, the success path detached the caller-abort relay when headers
+    // arrived, so aborting during a body read was silently ignored.
+    const controller = new AbortController();
+    const fetchFn = jest
+      .fn()
+      .mockImplementation((_input: unknown, init?: { signal?: AbortSignal }) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          // Body that only settles when the attempt signal aborts — models a
+          // stream mid-transfer.
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () =>
+                reject(new DOMException("Aborted", "AbortError"))
+              );
+            }),
+        })
+      );
+
+    const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 1);
+    const res = await fetchWithRetry("https://example.com", {
+      signal: controller.signal,
+    });
+
+    const bodyRead = res.json();
+    const assertion = expect(bodyRead).rejects.toThrow("Aborted");
+    controller.abort();
+    await assertion;
+  });
+
+  test("a body stalled past the per-attempt deadline is aborted instead of hanging forever", async () => {
+    // Headers arrive promptly, then the server black-holes the body. The
+    // per-attempt deadline must keep covering the body read.
+    const fetchFn = jest
+      .fn()
+      .mockImplementation((_input: unknown, init?: { signal?: AbortSignal }) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () =>
+                reject(new DOMException("Aborted", "AbortError"))
+              );
+            }),
+        })
+      );
+
+    // 100ms per-attempt deadline.
+    const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 1, 100);
+    const res = await fetchWithRetry("https://example.com", {});
+
+    await expect(res.json()).rejects.toThrow("Aborted");
+  });
+
+  test("a fully-consumed response is unaffected by the deadline firing afterwards", async () => {
+    const consumed: unknown[] = [];
+    const fetchFn = jest.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ fine: true }),
+      })
     );
-    expect(abortAdds.length).toBeGreaterThanOrEqual(2);
-    expect(abortRemoves.length).toBe(abortAdds.length);
+
+    const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 1, 50);
+    const res = await fetchWithRetry("https://example.com", {});
+    consumed.push(await res.json());
+
+    // Let the deadline fire after consumption — nothing should throw, and the
+    // consumed body is intact (aborting a consumed response is a no-op).
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(consumed).toEqual([{ fine: true }]);
   });
 
   test("abort during backoff wait still rejects with AbortError", async () => {

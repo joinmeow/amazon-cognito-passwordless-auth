@@ -42,6 +42,12 @@ export class FetchAttemptTimeoutError extends Error {
  * `FetchAttemptTimeoutError`) rather than hanging forever. A caller-provided
  * `signal` abort is always propagated and never retried.
  *
+ * The deadline and the caller's abort both cover the response BODY too, not
+ * just the wait for headers: a returned response's body stream stays bound to
+ * the attempt's signal, so a caller abort cancels an in-flight `res.json()`,
+ * and a server that returns headers then stalls the body is aborted at the
+ * per-attempt deadline (surfacing to the body reader as an AbortError).
+ *
  * Uses `Response.clone()` to inspect 400 error bodies without consuming the
  * original response body.
  */
@@ -94,17 +100,43 @@ export function createFetchWithRetry(
 
       // Bound this attempt: abort it if the caller aborts OR the per-attempt
       // timeout fires. A timeout is retryable; a caller abort propagates.
+      //
+      // The deadline and the caller-abort relay deliberately survive a
+      // successful return: the response BODY stream is bound to
+      // attemptController.signal, so keeping them armed is what lets a caller
+      // abort cancel an in-flight res.json() and what bounds a server that
+      // returns headers and then stalls the body (aborting a fully-consumed
+      // response is a spec-level no-op, so this costs the happy path
+      // nothing). Cleanup is mutual and therefore self-limiting: the deadline
+      // firing removes the relay, the relay firing clears the deadline — a
+      // long-lived caller signal holds each request's listener for at most
+      // perAttemptTimeoutMs, never indefinitely. Note a body stalled past the
+      // deadline surfaces to the body reader as an AbortError (that is what
+      // an aborted stream throws), not FetchAttemptTimeoutError.
       const attemptController = new AbortController();
       let timedOut = false;
-      const onCallerAbort = () => attemptController.abort();
       const callerSignal = init?.signal;
+      // onCallerAbort captures timeoutId before its initialization below;
+      // safe because abort events only fire synchronously inside an abort()
+      // call, which cannot interleave with this block.
+      const onCallerAbort = () => {
+        clearTimeout(timeoutId);
+        attemptController.abort();
+      };
       if (callerSignal) {
         callerSignal.addEventListener("abort", onCallerAbort, { once: true });
       }
       const timeoutId = setTimeout(() => {
         timedOut = true;
+        callerSignal?.removeEventListener("abort", onCallerAbort);
         attemptController.abort();
       }, perAttemptTimeoutMs);
+      // For FAILED attempts only — a successful return leaves the guard armed
+      // to cover the caller's body reads (see above).
+      const disarmAttemptGuard = () => {
+        clearTimeout(timeoutId);
+        callerSignal?.removeEventListener("abort", onCallerAbort);
+      };
 
       try {
         const res = await fetchFn(input, {
@@ -157,6 +189,7 @@ export function createFetchWithRetry(
         }
         return res;
       } catch (error: unknown) {
+        disarmAttemptGuard();
         // A caller-initiated abort always propagates and is never retried.
         if (callerSignal?.aborted) {
           throw error;
@@ -185,9 +218,6 @@ export function createFetchWithRetry(
         const backoff = baseDelayMs * Math.pow(2, attempt - 1);
         debugFn?.(`Retrying in ${backoff}ms...`);
         await wait(backoff);
-      } finally {
-        clearTimeout(timeoutId);
-        callerSignal?.removeEventListener("abort", onCallerAbort);
       }
     }
     // Fallback

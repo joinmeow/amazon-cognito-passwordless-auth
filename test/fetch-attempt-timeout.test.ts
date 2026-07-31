@@ -107,11 +107,19 @@ describe("createFetchWithRetry per-attempt timeout", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
-  test("clears the attempt timer on success (no dangling timers)", async () => {
+  test("keeps the attempt timer armed across a successful return (it now bounds body reads), then self-clears", async () => {
     const fetchFn = jest.fn(async () => okResponse);
     const fetchWithRetry = createFetchWithRetry(fetchFn, undefined, 3, 10, 100);
 
     await fetchWithRetry("https://cognito.example/");
+    // The deadline deliberately survives the return: the response body stream
+    // is bound to the attempt's signal, so this timer is what bounds a server
+    // that sends headers and then stalls the body. Aborting a consumed
+    // response is a no-op, so the happy path is unaffected.
+    expect(jest.getTimerCount()).toBe(1);
+
+    // And it self-clears when it fires — nothing dangles indefinitely.
+    await jest.advanceTimersByTimeAsync(100);
     expect(jest.getTimerCount()).toBe(0);
   });
 });
