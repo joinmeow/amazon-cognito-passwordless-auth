@@ -22,12 +22,6 @@ import {
   usePasswordless,
 } from "../react/hooks.js";
 
-// Phase 4: MFA readiness is DERIVED from the resolved access-token identity
-// (state.mfaStatusReadyForToken === current access token), not a plain boolean
-// that updateTokens could reset. This removes the permanent post-login spinner:
-// a stale updateTokens closure can no longer un-ready an already-resolved token,
-// and a getUser response for a superseded token cannot ready a newer one.
-
 const enc = (obj: unknown) =>
   btoa(JSON.stringify(obj))
     .replace(/\+/g, "-")
@@ -150,7 +144,7 @@ async function seedSession(adminScope: boolean, jti = "a") {
   });
 }
 
-describe("MFA status readiness (derived from token identity)", () => {
+describe("MFA status readiness", () => {
   afterEach(() => {
     cleanup();
     jest.useRealTimers();
@@ -300,16 +294,12 @@ describe("MFA status readiness (derived from token identity)", () => {
   });
 
   test("a same-user token rotation during refreshTotpMfaStatus cannot strand readiness", async () => {
-    // Readiness is keyed to the access token, so a manual refresh must discard
-    // its answer once the token rotates — committing the superseded token would
-    // derive readiness false with no later fetch to correct it, because the
-    // effect already fetched for the new token.
     let releaseManualRefresh!: () => void;
     const manualRefreshGate = new Promise<void>((resolve) => {
       releaseManualRefresh = resolve;
     });
     let getUserCalls = 0;
-    const { fetchMock } = makeFetch({
+    const { fetchMock, state } = makeFetch({
       getUser: async () => {
         getUserCalls += 1;
         // Call 1 = mount effect (token A); call 2 = the manual refresh (token A,
@@ -350,12 +340,8 @@ describe("MFA status readiness (derived from token identity)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("token").textContent).not.toBe(firstToken)
     );
-    // The effect re-fetches for the rotated token only after its 5s cooldown;
-    // that fetch must land BEFORE token A's answer, which is what makes a
-    // mis-keyed commit permanent.
-    await waitFor(() => expect(ready()).toBe("true"), { timeout: 10000 });
+    await waitFor(() => expect(state.getUserCalls).toBe(3), { timeout: 10000 });
 
-    // Token A's late answer must not key readiness back to the old token.
     await act(async () => {
       releaseManualRefresh();
       await Promise.resolve();

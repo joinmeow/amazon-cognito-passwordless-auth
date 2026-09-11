@@ -47,13 +47,13 @@ function tokens(subject: string, revision = 1): TokensToStore {
   };
 }
 
-function enabledResponse(): MinimalResponse {
+function mfaResponse(enabled = true): MinimalResponse {
   return {
     ok: true,
     status: 200,
     json: async () => ({
       UserAttributes: [],
-      UserMFASettingList: ["SOFTWARE_TOKEN_MFA"],
+      UserMFASettingList: enabled ? ["SOFTWARE_TOKEN_MFA"] : [],
     }),
   };
 }
@@ -67,14 +67,21 @@ function failedResponse(): MinimalResponse {
   };
 }
 const fetchMfa = jest.fn<ReturnType<MinimalFetch>, Parameters<MinimalFetch>>();
+let refreshMfa: () => Promise<void>;
 
 function Probe() {
   const { tokensParsed, mfaStatusReady, totpMfaStatus, refreshTotpMfaStatus } =
     usePasswordless();
+  refreshMfa = refreshTotpMfaStatus;
   return (
     <>
       <output aria-label="MFA status">{`${tokensParsed?.idToken.sub}:${mfaStatusReady}:${totpMfaStatus.enabled}`}</output>
       <button onClick={() => void refreshTotpMfaStatus()}>Refresh MFA</button>
+      {mfaStatusReady && totpMfaStatus.enabled && (
+        <form aria-label="Payment">
+          <input aria-label="Reference" defaultValue="" />
+        </form>
+      )}
     </>
   );
 }
@@ -99,7 +106,7 @@ async function mountProvider() {
 describe("MFA subject ownership", () => {
   beforeEach(() => {
     jest.useFakeTimers();
-    fetchMfa.mockReset().mockImplementation(async () => enabledResponse());
+    fetchMfa.mockReset().mockImplementation(async () => mfaResponse());
     configure({
       cognitoIdpEndpoint: "https://cognito.test",
       clientId: "test-client",
@@ -126,8 +133,8 @@ describe("MFA subject ownership", () => {
       });
       expect(status()).toBe("second-user:true:false");
       await changeTokens("second-user", 2);
-      expect(status()).toBe("second-user:false:false");
-      fetchMfa.mockImplementation(async () => enabledResponse());
+      expect(status()).toBe("second-user:true:false");
+      fetchMfa.mockImplementation(async () => mfaResponse());
       await act(async () => {
         fireEvent.click(screen.getByText("Refresh MFA"));
       });
@@ -164,19 +171,83 @@ describe("MFA subject ownership", () => {
     expect(fetchMfa).toHaveBeenCalledTimes(2);
     await changeTokens("second-user");
     await act(async () => {
-      resolveResponse(enabledResponse());
+      resolveResponse(mfaResponse());
     });
     expect(status()).toBe("second-user:false:false");
   });
 
-  it("retains confirmed MFA through a failed same-subject refresh", async () => {
+  it("keeps an entered form mounted through a failed same-subject refresh", async () => {
     await mountProvider();
+    const reference = screen.getByRole("textbox", { name: "Reference" });
+    fireEvent.change(reference, { target: { value: "Invoice payment" } });
     fetchMfa.mockImplementation(async () => failedResponse());
     await changeTokens("first-user", 2);
-    expect(status()).toBe("first-user:false:true");
+    expect(status()).toBe("first-user:true:true");
+    expect(screen.getByDisplayValue("Invoice payment")).toBe(reference);
     await act(async () => {
       await jest.advanceTimersByTimeAsync(5000);
     });
     expect(status()).toBe("first-user:true:true");
+    expect(screen.getByDisplayValue("Invoice payment")).toBe(reference);
+  });
+
+  it("blocks the form when a later check reports MFA disabled", async () => {
+    await mountProvider();
+    expect(screen.getByRole("form", { name: "Payment" })).toBeDefined();
+    fetchMfa.mockImplementation(async () => mfaResponse(false));
+    await changeTokens("first-user", 2);
+    expect(status()).toBe("first-user:true:true");
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(5000);
+    });
+    expect(status()).toBe("first-user:true:false");
+    expect(screen.queryByRole("form", { name: "Payment" })).toBeNull();
+  });
+
+  it("rejects a late manual result for a superseded same-user token", async () => {
+    await mountProvider();
+    let resolveResponse: (response: MinimalResponse) => void = () => {
+      throw new Error("Request not started");
+    };
+    fetchMfa.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveResponse = resolve;
+        })
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Refresh MFA"));
+    });
+    await changeTokens("first-user", 2);
+    await act(async () => {
+      resolveResponse(mfaResponse(false));
+    });
+    expect(status()).toBe("first-user:true:true");
+  });
+
+  it("does not let an old refresher discard the current user's result", async () => {
+    await mountProvider();
+    const oldRefresh = refreshMfa;
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(5000);
+    });
+    let resolveCurrent: (response: MinimalResponse) => void = () => {
+      throw new Error("Request not started");
+    };
+    fetchMfa.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCurrent = resolve;
+        })
+    );
+    await changeTokens("second-user");
+    await act(async () => {
+      await oldRefresh();
+    });
+    expect(status()).toBe("second-user:false:false");
+    await act(async () => {
+      resolveCurrent(mfaResponse());
+    });
+    expect(status()).toBe("second-user:true:true");
   });
 });

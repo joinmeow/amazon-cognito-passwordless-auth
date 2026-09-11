@@ -107,7 +107,7 @@ describe("MFA status fetch cooldown", () => {
     jest.useRealTimers();
   });
 
-  it("recovers mfaStatusReady when the access token rotates within the cooldown window", async () => {
+  it("keeps MFA ready while refetching a rotated token after the cooldown", async () => {
     const initialTokens = makeTokens("initial");
     mockRetrieveTokens.mockResolvedValue(initialTokens);
 
@@ -137,13 +137,9 @@ describe("MFA status fetch cooldown", () => {
       await result.current.refreshTokens();
     });
 
-    // The token change resets mfaStatusReady, and the cooldown blocks an
-    // immediate re-fetch
-    expect(result.current.mfaStatusReady).toBe(false);
+    expect(result.current.mfaStatusReady).toBe(true);
     expect(mockGetUser).toHaveBeenCalledTimes(1);
 
-    // Once the cooldown elapses, the fetch must run again on its own
-    // (without the fix, no dependency changes and this deadlocks at false)
     await act(async () => {
       await jest.advanceTimersByTimeAsync(3_100);
     });
