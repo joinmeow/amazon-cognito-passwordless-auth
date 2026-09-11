@@ -311,7 +311,11 @@ type PasswordlessAction =
     }
   | { type: "INCREMENT_RECHECK_STATUS" }
   | { type: "SET_AUTH_METHOD"; payload: PasswordlessState["authMethod"] }
-  | { type: "SET_TOTP_MFA_STATUS"; payload: PasswordlessState["totpMfaStatus"] }
+  | {
+      type: "SET_TOTP_MFA_STATUS";
+      accessToken: string;
+      payload: PasswordlessState["totpMfaStatus"];
+    }
   | { type: "SET_MFA_STATUS_READY_FOR_TOKEN"; payload: string | undefined }
   | { type: "RESET_REDIRECT_SIGNIN_STATUS" }
   | { type: "SIGN_OUT" };
@@ -357,6 +361,14 @@ function passwordlessReducer(
       return { ...state, tokens: action.payload };
 
     case "SET_TOKENS_PARSED":
+      if (state.tokensParsed?.idToken.sub !== action.payload?.idToken.sub) {
+        return {
+          ...state,
+          tokensParsed: action.payload,
+          totpMfaStatus: initialPasswordlessState.totpMfaStatus,
+          mfaStatusReadyForToken: undefined,
+        };
+      }
       return { ...state, tokensParsed: action.payload };
 
     case "SET_ERROR":
@@ -410,9 +422,11 @@ function passwordlessReducer(
       return { ...state, authMethod: action.payload };
 
     case "SET_TOTP_MFA_STATUS":
+      if (action.accessToken !== state.tokens?.accessToken) return state;
       return { ...state, totpMfaStatus: action.payload };
 
     case "SET_MFA_STATUS_READY_FOR_TOKEN":
+      if (action.payload !== state.tokens?.accessToken) return state;
       return { ...state, mfaStatusReadyForToken: action.payload };
 
     case "SIGN_OUT":
@@ -491,6 +505,9 @@ function _usePasswordless() {
     // session marker here keeps it authoritative for all paths (not just the
     // sign-in tokensCb): a cross-tab sign-out / OAuth callback / refresh that
     // does not go through a tokensCb still moves the marker.
+    if (currentSignInUserRef.current !== tokens?.username) {
+      lastFetchedMfaTokenRef.current = undefined;
+    }
     currentSignInUserRef.current = tokens?.username;
     dispatch({ type: "SET_TOKENS", payload: tokens });
   }, []);
@@ -1204,6 +1221,7 @@ function _usePasswordless() {
       lastFetchedMfaTokenRef.current = tokens.accessToken;
       dispatch({
         type: "SET_TOTP_MFA_STATUS",
+        accessToken: tokens.accessToken,
         payload: { enabled: false, preferred: false, availableMfaTypes: [] },
       });
       dispatch({
@@ -1278,6 +1296,7 @@ function _usePasswordless() {
 
           dispatch({
             type: "SET_TOTP_MFA_STATUS",
+            accessToken: fetchedForToken,
             payload: {
               enabled: hasMfa,
               preferred: preferredMfa,
@@ -1299,6 +1318,7 @@ function _usePasswordless() {
           // Default to no MFA
           dispatch({
             type: "SET_TOTP_MFA_STATUS",
+            accessToken: fetchedForToken,
             payload: {
               enabled: false,
               preferred: false,
@@ -2101,6 +2121,7 @@ function _usePasswordless() {
       if (!accessTokenHasUserAdminScope(accessToken)) {
         dispatch({
           type: "SET_TOTP_MFA_STATUS",
+          accessToken,
           payload: { enabled: false, preferred: false, availableMfaTypes: [] },
         });
         dispatch({
@@ -2123,6 +2144,7 @@ function _usePasswordless() {
 
           dispatch({
             type: "SET_TOTP_MFA_STATUS",
+            accessToken,
             payload: {
               enabled: hasMfa,
               preferred: preferredMfa,
@@ -2137,6 +2159,7 @@ function _usePasswordless() {
           // Default to no MFA
           dispatch({
             type: "SET_TOTP_MFA_STATUS",
+            accessToken,
             payload: {
               enabled: false,
               preferred: false,
