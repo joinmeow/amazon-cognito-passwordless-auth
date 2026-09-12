@@ -272,7 +272,7 @@ interface PasswordlessState {
   deviceKey: string | null;
   isRefreshingTokens?: boolean;
   recheckSignInStatus: number;
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
   totpMfaStatus: {
     enabled: boolean;
     preferred: boolean;
@@ -512,7 +512,7 @@ function _usePasswordless() {
   /** Translate authMethod → the corresponding *SIGNED_IN_WITH_* status */
   const signedInStatusForAuth = useCallback(
     (
-      method?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT"
+      method?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE"
     ): BusyState | IdleState | undefined => {
       switch (method) {
         case "REDIRECT":
@@ -523,6 +523,8 @@ function _usePasswordless() {
           return "SIGNED_IN_WITH_PLAINTEXT_PASSWORD";
         case "FIDO2":
           return "SIGNED_IN_WITH_FIDO2";
+        case "ENTERPRISE":
+          return "SIGNED_IN_WITH_ENTERPRISE_SSO";
         default:
           return undefined;
       }
@@ -2244,7 +2246,7 @@ type StoredUser = {
   useFido?: "YES" | "NO" | "ASK";
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   /** Last authentication method used by this user */
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
 };
 
 /** Retrieve the last signed in users from your configured storage (e.g. localStorage) */
