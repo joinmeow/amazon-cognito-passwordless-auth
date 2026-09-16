@@ -43,7 +43,7 @@ export interface TokensToStore {
    * The authentication method used to obtain these tokens
    * Helps the refresh mechanism determine how to refresh tokens
    */
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
   /**
    * Client clock drift (ms) captured at token receipt (local time minus the
    * access token's `iat`). Persisted so token expiry can be evaluated against
@@ -59,7 +59,7 @@ export interface TokensFromStorage {
   username: string;
   deviceKey?: string;
   /** The authentication method used with these tokens */
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
   /** Client clock drift (ms) captured at token receipt; 0 when unknown. */
   clockDriftMs?: number;
 }
@@ -94,7 +94,7 @@ export function onTokensStored(listener: TokensStoredListener): () => void {
  */
 export async function storeAuthMethod(
   username: string,
-  authMethod: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT"
+  authMethod: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE"
 ) {
   if (!username) return;
   const { clientId, storage, debug } = configure();
@@ -109,7 +109,9 @@ export async function storeAuthMethod(
  */
 export async function retrieveAuthMethod(
   username: string
-): Promise<"SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | undefined> {
+): Promise<
+  "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE" | undefined
+> {
   if (!username) return undefined;
   const { clientId, storage } = configure();
   const key = `Passwordless.${clientId}.${username}.authMethod`;
@@ -119,7 +121,8 @@ export async function retrieveAuthMethod(
     authMethod === "SRP" ||
     authMethod === "FIDO2" ||
     authMethod === "PLAINTEXT" ||
-    authMethod === "REDIRECT"
+    authMethod === "REDIRECT" ||
+    authMethod === "ENTERPRISE"
   ) {
     return authMethod;
   }
