@@ -32,7 +32,7 @@ import {
   authenticateWithFido2 as authenticateWithFido2Core,
 } from "../fido2.js";
 import type { PreparedFido2SignIn } from "../fido2.js";
-import { Fido2AbortError } from "../errors.js";
+import { Fido2AbortError, Fido2PasswordSelectedError } from "../errors.js";
 
 // Mocks
 jest.mock("../config");
@@ -427,6 +427,31 @@ describe("React hooks coverage for hooks.tsx branches", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
 
+    expect(result.current.lastError).toBeUndefined();
+  });
+
+  it("forwards password and does not set lastError when the user picks a saved password", async () => {
+    mockAuthenticateWithFido2.mockReturnValueOnce({
+      signedIn: Promise.reject(
+        new Fido2PasswordSelectedError("alice@example.com", "secret")
+      ),
+      abort: jest.fn(),
+    });
+
+    const wrapper = makeWrapper();
+    const { result } = renderHook(() => usePasswordless(), { wrapper });
+
+    await act(async () => {
+      result.current.authenticateWithFido2({
+        mediation: "immediate",
+        password: true,
+      });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(mockAuthenticateWithFido2).toHaveBeenCalledWith(
+      expect.objectContaining({ mediation: "immediate", password: true })
+    );
     expect(result.current.lastError).toBeUndefined();
   });
 

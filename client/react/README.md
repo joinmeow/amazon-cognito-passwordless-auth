@@ -181,6 +181,30 @@ requests in incognito/private windows with the same `NotAllowedError`, so
 users with working passkeys will silently take your fallback path there;
 design the fallback (password form, other factors) accordingly.
 
+To also offer saved passwords in the same Chrome prompt, pass `password: true`
+(honoured with `mediation: "immediate"` only). If the user picks a password,
+`signedIn` rejects with `Fido2PasswordSelectedError` and the status returns to
+`SIGNED_OUT`. The library does not sign in with the password. Pass its
+`username` and `password` to `authenticateWithSRP`, so your MFA and
+new-password callbacks still run:
+
+```tsx
+import { isFido2PasswordSelectedError } from "@joinmeow/cognito-passwordless-auth";
+
+try {
+  await authenticateWithFido2({ mediation: "immediate", password: true })
+    .signedIn;
+} catch (error) {
+  if (isFido2PasswordSelectedError(error)) {
+    authenticateWithSRP({
+      username: error.username,
+      password: error.password,
+      otpMfaCode,
+    });
+  }
+}
+```
+
 ### 3.2 SRP Password
 
 ```mermaid

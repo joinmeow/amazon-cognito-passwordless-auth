@@ -39,8 +39,10 @@ import {
   Fido2ValidationError,
   Fido2AuthError,
   Fido2AbortError,
+  Fido2PasswordSelectedError,
   fromDOMException,
   isFido2AbortError,
+  isFido2PasswordSelectedError,
 } from "./errors.js";
 
 // Enhanced type definitions for mediation support
@@ -53,6 +55,19 @@ export type MediationMode =
 
 interface CredentialRequestOptionsWithUiMode extends CredentialRequestOptions {
   uiMode?: "immediate";
+  password?: boolean;
+}
+
+function isPasswordCredentialLike(
+  credential: unknown
+): credential is { id: string; password: string } {
+  return (
+    !!credential &&
+    typeof credential === "object" &&
+    (credential as { type?: unknown }).type === "password" &&
+    typeof (credential as { id?: unknown }).id === "string" &&
+    typeof (credential as { password?: unknown }).password === "string"
+  );
 }
 
 /**
@@ -810,6 +825,12 @@ interface Fido2Options {
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   signal?: AbortSignal;
   mediation?: MediationMode;
+  /**
+   * Also offer saved passwords in the browser prompt. Only honoured with
+   * mediation "immediate". A picked password rejects with
+   * Fido2PasswordSelectedError.
+   */
+  password?: boolean;
 }
 
 function assertIsFido2Options(o: unknown): asserts o is Fido2Options {
@@ -988,6 +1009,7 @@ export async function fido2getCredential({
   userVerification,
   signal,
   mediation,
+  password,
 }: Fido2Options): Promise<ParsedFido2Assertion> {
   const { debug, fido2: { extensions } = {} } = configure();
 
@@ -1192,7 +1214,7 @@ export async function fido2getCredential({
         publicKey,
         signal: effectiveSignal,
         ...(mediation === "immediate"
-          ? { uiMode: "immediate" }
+          ? { uiMode: "immediate", ...(password ? { password: true } : {}) }
           : { mediation }),
       };
       const getCredential = navigator.credentials.get(credentialRequestOptions);
@@ -1255,6 +1277,10 @@ export async function fido2getCredential({
   }
   if (!credential) {
     throw new Fido2CredentialError("No credential returned from browser");
+  }
+  if (isPasswordCredentialLike(credential)) {
+    debug?.("🔑 User selected a saved password instead of a passkey");
+    throw new Fido2PasswordSelectedError(credential.id, credential.password);
   }
   if (
     !isPublicKeyCredentialLike(credential) ||
@@ -1371,6 +1397,7 @@ export async function prepareFido2SignIn({
   credentials,
   credentialGetter = fido2getCredential,
   mediation,
+  password,
   signal,
 }: {
   /** Username or alias. Providing this enables the FAST username-based flow. */
@@ -1378,6 +1405,8 @@ export async function prepareFido2SignIn({
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   credentialGetter?: typeof fido2getCredential;
   mediation?: MediationMode;
+  /** See authenticateWithFido2's `password` option. */
+  password?: boolean;
   signal?: AbortSignal;
 }): Promise<PreparedFido2SignIn> {
   const { debug, fido2 } = configure();
@@ -1468,6 +1497,7 @@ export async function prepareFido2SignIn({
           ) ?? []
         ),
         mediation,
+        password,
         signal: credentialSignal,
       });
 
@@ -1712,6 +1742,7 @@ export async function prepareFido2SignIn({
         ) ?? []
       ),
       mediation,
+      password,
       signal,
     });
 
@@ -1804,6 +1835,7 @@ export function authenticateWithFido2({
   clientMetadata,
   credentialGetter = fido2getCredential,
   mediation,
+  password,
   prepared,
 }: {
   /**
@@ -1891,6 +1923,14 @@ export function authenticateWithFido2({
    */
   mediation?: MediationMode;
   /**
+   * With mediation "immediate", also offer saved passwords in the browser
+   * prompt (Chrome only). If the user picks a password, `signedIn` rejects
+   * with Fido2PasswordSelectedError carrying `username` and `password`, and
+   * status returns to SIGNED_OUT. Sign the user in with those through
+   * authenticateWithSRP. Ignored for other mediation modes.
+   */
+  password?: boolean;
+  /**
    * Optional pre-fetched WebAuthn assertion bundle returned by prepareFido2SignIn().
    * When provided, authenticateWithFido2() will skip navigator.credentials.get()
    * and directly complete the Cognito challenge using this data.
@@ -1953,6 +1993,7 @@ export function authenticateWithFido2({
           credentials,
           credentialGetter,
           mediation,
+          password,
           signal: abort.signal,
         }));
       assertedCredentialIdB64 = preparedSignIn.credential.credentialIdB64;
@@ -2071,10 +2112,12 @@ export function authenticateWithFido2({
       }
       if (
         isFido2AbortError(err) ||
+        isFido2PasswordSelectedError(err) ||
         (err instanceof Error && err.name === "AbortError")
       ) {
-        // Deliberate cancellation (e.g. the caller invoked abort()) is not a
-        // sign-in failure: revert to the idle state the flow started from
+        // Deliberate cancellation (e.g. the caller invoked abort()) or a picked
+        // password is not a sign-in failure: revert to the idle state the
+        // flow started from
         statusCb?.("SIGNED_OUT");
       } else {
         statusCb?.("FIDO2_SIGNIN_FAILED");
