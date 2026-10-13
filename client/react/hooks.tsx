@@ -25,7 +25,7 @@ import {
 } from "../fido2.js";
 import type { PreparedFido2SignIn } from "../fido2.js";
 import { authenticateWithSRP } from "../srp.js";
-import { isFido2AbortError } from "../errors.js";
+import { isFido2AbortError, isFido2PasswordSelectedError } from "../errors.js";
 import { authenticateWithPlaintextPassword } from "../plaintext.js";
 import { configure } from "../config.js";
 import {
@@ -1769,6 +1769,7 @@ function _usePasswordless() {
       credentials,
       clientMetadata,
       mediation,
+      password,
       prepared,
     }: {
       /** Username, alias (e-mail, phone number) */
@@ -1780,6 +1781,11 @@ function _usePasswordless() {
        * @see fido2.ts authenticateWithFido2() for detailed documentation
        */
       mediation?: "conditional" | "immediate";
+      /**
+       * With mediation 'immediate', also offer saved passwords
+       * @see fido2.ts authenticateWithFido2() for detailed documentation
+       */
+      password?: boolean;
       /**
        * Optional prepared bundle returned by `prepareFido2SignIn`.
        * Pass this to skip re-requesting the WebAuthn assertion.
@@ -1795,6 +1801,7 @@ function _usePasswordless() {
         credentials,
         clientMetadata,
         mediation,
+        password,
         prepared,
         statusCb: setSigninInStatus,
         tokensCb: async (newTokens) => {
@@ -1840,6 +1847,10 @@ function _usePasswordless() {
           debug?.(
             "FIDO2 sign-in superseded by a newer credential request - not surfacing as error"
           );
+          return;
+        }
+        if (isFido2PasswordSelectedError(error)) {
+          // The caller completes sign-in with the password, not an error
           return;
         }
         dispatch({ type: "SET_ERROR", payload: error });

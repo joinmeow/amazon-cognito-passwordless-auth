@@ -18,7 +18,11 @@ import {
   SUPERSEDED_SETTLEMENT_TIMEOUT_MS,
 } from "../fido2.js";
 import { configure } from "../config.js";
-import { Fido2AbortError, Fido2ConfigError } from "../errors.js";
+import {
+  Fido2AbortError,
+  Fido2ConfigError,
+  Fido2PasswordSelectedError,
+} from "../errors.js";
 import {
   MOCK_ASSERTION_CREDENTIAL,
   TEST_CHALLENGES,
@@ -366,6 +370,61 @@ describe("Mediation Integration Tests", () => {
 
       const request = getSpy.mock.calls[0][0];
       expect(request.publicKey.allowCredentials).toHaveLength(1);
+    });
+
+    it("asks for passwords only when password is set with immediate mediation", async () => {
+      const getSpy = jest.fn().mockResolvedValue(MOCK_ASSERTION_CREDENTIAL);
+      cleanup = setupWebAuthnMock({
+        customCredentials: {
+          get: getSpy,
+          create: jest.fn(),
+        } as any,
+      });
+
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "immediate",
+        password: true,
+      });
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "immediate",
+      });
+      await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        password: true,
+      });
+
+      expect(getSpy.mock.calls[0][0].password).toBe(true);
+      expect(getSpy.mock.calls[1][0]).not.toHaveProperty("password");
+      expect(getSpy.mock.calls[2][0]).not.toHaveProperty("password");
+    });
+
+    it("rejects with Fido2PasswordSelectedError when the user picks a saved password", async () => {
+      cleanup = setupWebAuthnMock({
+        customCredentials: {
+          get: jest.fn().mockResolvedValue({
+            type: "password",
+            id: "alice@example.com",
+            password: "secret",
+          }),
+          create: jest.fn(),
+        } as any,
+      });
+
+      const error = await fido2getCredential({
+        challenge: TEST_CHALLENGES.basic,
+        mediation: "immediate",
+        password: true,
+      }).catch((err: unknown) => err);
+
+      expect(error).toBeInstanceOf(Fido2PasswordSelectedError);
+      const selected = error as Fido2PasswordSelectedError;
+      expect(selected.code).toBe("PASSWORD_SELECTED");
+      expect(selected.username).toBe("alice@example.com");
+      expect(selected.password).toBe("secret");
+      expect(Object.keys(selected)).not.toContain("password");
+      expect(JSON.stringify(selected)).not.toContain("secret");
     });
 
     it("logs debug message for immediate mediation", async () => {

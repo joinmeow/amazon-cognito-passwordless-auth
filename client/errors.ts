@@ -142,6 +142,30 @@ export class Fido2CredentialRejectedError extends Fido2Error {
 }
 
 /**
+ * Thrown when the user picks a saved password instead of a passkey in an
+ * immediate-mode request made with `password: true`. Not a failure: sign the
+ * user in with `username` and `password` through the password (SRP) flow.
+ */
+export class Fido2PasswordSelectedError extends Fido2Error {
+  public readonly username: string;
+  public declare readonly password: string;
+
+  constructor(username: string, password: string) {
+    super(
+      "User selected a saved password instead of a passkey",
+      "PASSWORD_SELECTED"
+    );
+    this.name = "Fido2PasswordSelectedError";
+    this.username = username;
+    // Non-enumerable so error loggers that serialize own properties skip it.
+    Object.defineProperty(this, "password", {
+      value: password,
+      enumerable: false,
+    });
+  }
+}
+
+/**
  * Thrown when FIDO2 configuration is missing or invalid
  *
  * Examples:
@@ -282,6 +306,16 @@ export function isFido2CredentialRejectedError(
   error: unknown
 ): error is Fido2CredentialRejectedError {
   return error instanceof Fido2CredentialRejectedError;
+}
+
+/**
+ * Type guard for a saved password picked in an immediate-mode request made
+ * with `password: true`.
+ */
+export function isFido2PasswordSelectedError(
+  error: unknown
+): error is Fido2PasswordSelectedError {
+  return error instanceof Fido2PasswordSelectedError;
 }
 
 /**

@@ -894,6 +894,7 @@ authenticateWithFido2(options?: {
   credentials?: { id: string; transports?: AuthenticatorTransport[] }[];
   clientMetadata?: Record<string, string>;
   mediation?: "conditional" | "immediate" | "optional" | "required" | "silent";
+  password?: boolean; // immediate mode only; see Fido2PasswordSelectedError
   prepared?: PreparedFido2SignIn;
 }) => { signedIn: Promise<TokensFromSignIn> }
 
