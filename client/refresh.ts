@@ -567,7 +567,7 @@ type TokenPayload = {
   username?: string;
   deviceKey?: string;
   expireAt?: Date;
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
 };
 
 /**

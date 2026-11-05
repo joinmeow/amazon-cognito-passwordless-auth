@@ -33,7 +33,7 @@ export interface TokensFromSignIn {
    * The authentication method used to obtain these tokens
    * Used for token refresh to determine how to refresh tokens
    */
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
   /**
    * Client clock drift (ms) measured at token receipt: local time minus the
    * access token's `iat`. Positive => device clock is ahead of server time.
@@ -61,7 +61,7 @@ export interface TokensFromRefresh {
    * The authentication method used to obtain these tokens
    * Used for token refresh to determine how to refresh tokens
    */
-  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT";
+  authMethod?: "SRP" | "FIDO2" | "PLAINTEXT" | "REDIRECT" | "ENTERPRISE";
   /**
    * Client clock drift (ms) measured at token receipt: local time minus the
    * access token's `iat`. Positive => device clock is ahead of server time.
@@ -91,6 +91,7 @@ const idleState = [
   "SIGNIN_WITH_OTP_FAILED",
   "PASSWORD_SIGNIN_FAILED",
   "SIGNED_IN_WITH_REDIRECT",
+  "SIGNED_IN_WITH_ENTERPRISE_SSO",
   "SIGNIN_WITH_REDIRECT_FAILED",
 ] as const;
 export type IdleState = (typeof idleState)[number];
