@@ -6,7 +6,7 @@ import {
   cleanupRefreshSystem,
   cleanupUserRefreshState,
 } from "../client/refresh.js";
-import { storeTokens } from "../client/storage.js";
+import { retrieveTokens, storeTokens } from "../client/storage.js";
 import type { MinimalResponse } from "../client/config.js";
 
 // Helper to create JWT tokens
@@ -234,10 +234,15 @@ describe("Refresh System Comprehensive Tests", () => {
       const newerTokens = { ...tokens, refreshToken: "newer-refresh-token" };
       await storeTokens(newerTokens);
 
-      // First call fails with RefreshTokenReuseException
-      const reuseError = new Error("Refresh token reuse detected");
-      reuseError.name = "RefreshTokenReuseException";
-      fetchMock.mockRejectedValueOnce(reuseError);
+      // First call: Cognito rejects the stale token as reused
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          __type: "RefreshTokenReuseException",
+          message: "Refresh token reuse detected",
+        }),
+      } as MinimalResponse);
 
       // Second call succeeds with newer token
       fetchMock.mockResolvedValueOnce({
@@ -283,6 +288,69 @@ describe("Refresh System Comprehensive Tests", () => {
 
       expect(result.refreshToken).toBe("newest-refresh-token");
       expect(fetchMock).toHaveBeenCalledTimes(2);
+      const sentRefreshTokens = fetchMock.mock.calls.map(
+        ([, init]) => JSON.parse(init.body).RefreshToken
+      );
+      expect(sentRefreshTokens).toEqual([
+        "old-refresh-token",
+        "newer-refresh-token",
+      ]);
+    });
+
+    test("discards refreshed tokens when another sign-in replaced the session", async () => {
+      const tokens = {
+        accessToken: createJWT({
+          sub: "user123",
+          username: "testuser",
+          exp: Math.floor(Date.now() / 1000) + 30,
+          iat: Math.floor(Date.now() / 1000),
+        }),
+        refreshToken: "old-refresh-token",
+        username: "testuser",
+        expireAt: new Date(Date.now() + 30000),
+      };
+      await storeTokens(tokens);
+
+      configure({
+        clientId: "testClient",
+        cognitoIdpEndpoint: "us-west-2",
+        fetch: fetchMock,
+        storage: mockStorage,
+        useGetTokensFromRefreshToken: true,
+      });
+
+      // A new sign-in stores its own session while the refresh is in flight
+      fetchMock.mockImplementationOnce(async () => {
+        await storeTokens({
+          ...tokens,
+          refreshToken: "new-session-refresh-token",
+        });
+        return {
+          ok: true,
+          json: async () => ({
+            AuthenticationResult: {
+              AccessToken: createJWT({
+                sub: "user123",
+                username: "testuser",
+                exp: Math.floor(Date.now() / 1000) + 3600,
+                iat: Math.floor(Date.now() / 1000),
+              }),
+              IdToken: createJWT({
+                sub: "user123",
+                email: "test@example.com",
+                exp: Math.floor(Date.now() / 1000) + 3600,
+                iat: Math.floor(Date.now() / 1000),
+              }),
+              ExpiresIn: 3600,
+              TokenType: "Bearer",
+            },
+          }),
+        } as MinimalResponse;
+      });
+
+      await expect(forceRefreshTokens({ tokens })).rejects.toThrow(/discarded/);
+      const stored = await retrieveTokens();
+      expect(stored?.refreshToken).toBe("new-session-refresh-token");
     });
   });
 

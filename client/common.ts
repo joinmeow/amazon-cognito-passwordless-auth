@@ -119,8 +119,15 @@ async function processTokensInternal(
      * a sign-out can never resurrect the signed-out session.
      */
     sessionMustExistSince?: number;
+    /**
+     * The refresh token the refresh request used. If storage holds a
+     * different one, another sign-in replaced the session mid-refresh, so
+     * the refreshed tokens are discarded.
+     */
+    sessionRefreshToken?: string;
   }
 ): Promise<TokensFromSignIn | TokensFromRefresh> {
+  abort?.throwIfAborted();
   const { debug } = configure();
 
   debug?.("🔄 [Process Tokens] Starting token processing after authentication");
@@ -264,7 +271,9 @@ async function processTokensInternal(
     if (
       tombstone >= opts.sessionMustExistSince ||
       lastAuthUser !== normalizedTokens.username ||
-      !storedRefreshToken
+      !storedRefreshToken ||
+      (opts.sessionRefreshToken !== undefined &&
+        storedRefreshToken !== opts.sessionRefreshToken)
     ) {
       debug?.(
         "🔄 [Process Tokens] Session was signed out before the refreshed tokens could be stored; discarding"
@@ -274,6 +283,7 @@ async function processTokensInternal(
   }
 
   // Store the already normalized tokens
+  abort?.throwIfAborted();
   await storeTokens(normalizedTokens);
 
   if (opts?.sessionMustExistSince !== undefined && tombstoneKey) {
