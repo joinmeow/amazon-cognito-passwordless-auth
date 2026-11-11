@@ -29,10 +29,7 @@ import {
   redactTokensFromObject,
 } from "./util.js";
 import { getRememberedDevice, clearRememberedDevice } from "./storage.js";
-import {
-  createDeviceSrpAuthHandler,
-  isDeviceNotFoundError,
-} from "./device.js";
+import { createDeviceSrpAuthHandler, isDeviceNotFoundError } from "./device.js";
 
 let _CONSTANTS: { g: bigint; N: bigint; k: bigint } | undefined;
 async function getConstants() {

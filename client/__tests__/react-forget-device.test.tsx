@@ -156,8 +156,7 @@ async function signInWithDevice(
     await new Promise((r) => setTimeout(r, 0));
   });
   await act(async () => {
-    await result.current.authenticateWithFido2({ username: USERNAME })
-      .signedIn;
+    await result.current.authenticateWithFido2({ username: USERNAME }).signedIn;
   });
 }
 

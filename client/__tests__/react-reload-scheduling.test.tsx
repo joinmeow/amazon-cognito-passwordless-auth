@@ -20,7 +20,11 @@ import {
   usePasswordless,
 } from "../react/hooks.js";
 import { configure } from "../config.js";
-import { retrieveTokens, onTokensStored, TokensFromStorage } from "../storage.js";
+import {
+  retrieveTokens,
+  onTokensStored,
+  TokensFromStorage,
+} from "../storage.js";
 import { scheduleRefresh } from "../refresh.js";
 
 jest.mock("../config");

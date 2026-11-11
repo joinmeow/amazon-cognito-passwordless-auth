@@ -52,7 +52,8 @@ const SUPPORTED_SCRIPT_REGIONS = [
 // Crucially this contains no "." or "/", so it cannot express a host other
 // than amazon-cognito-assets.<region>.amazoncognito.com when interpolated
 // into the script URL — a value like "us-east-1.evil.com/x" is rejected.
-const AWS_REGION_FORMAT = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
+const AWS_REGION_FORMAT =
+  /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
 
 /**
  * Manages the Amazon Cognito Advanced Security data collection

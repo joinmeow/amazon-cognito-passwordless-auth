@@ -150,11 +150,8 @@ describe("Per-user scheduled-refresh failure backoff", () => {
     jest.resetModules();
     timerRecords.length = 0;
     ({ configure } = await import("../client/config.js"));
-    ({
-      scheduleRefresh,
-      cleanupRefreshSystem,
-      cleanupUserRefreshState,
-    } = await import("../client/refresh.js"));
+    ({ scheduleRefresh, cleanupRefreshSystem, cleanupUserRefreshState } =
+      await import("../client/refresh.js"));
     ({ storeTokens } = await import("../client/storage.js"));
 
     jest.clearAllMocks();
@@ -205,132 +202,144 @@ describe("Per-user scheduled-refresh failure backoff", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  test("a second user's first failure logs 'retry 1/5', not '2/5' (counter is per-user, not global)", async () => {
-    // Storage tracks a single LastAuthUser, so we exercise the two users
-    // SEQUENTIALLY (a user switch): alice fails once, then bob — the exact
-    // scenario the fix targets. With a module-global counter bob's first
-    // failure would log "retry 2/5" (inheriting alice's count); per-user it
-    // must be "retry 1/5".
+  test(
+    "a second user's first failure logs 'retry 1/5', not '2/5' (counter is per-user, not global)",
+    async () => {
+      // Storage tracks a single LastAuthUser, so we exercise the two users
+      // SEQUENTIALLY (a user switch): alice fails once, then bob — the exact
+      // scenario the fix targets. With a module-global counter bob's first
+      // failure would log "retry 2/5" (inheriting alice's count); per-user it
+      // must be "retry 1/5".
 
-    // --- alice: drive one failing scheduled refresh ---
-    await storeTokens(shortDelayTokens("alice"));
-    await scheduleRefresh();
-    await waitFor(() =>
-      debugLogs.some((l) => l.includes("Scheduling retry"))
-    );
-    // alice's first (and, since the 30s retry timer hasn't fired, only)
-    // failure must be retry 1/5.
-    const afterAlice = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    );
-    expect(afterAlice.every((l) => l.includes("Scheduling retry 1/5"))).toBe(
-      true
-    );
-    const aliceRetryCount = afterAlice.length;
+      // --- alice: drive one failing scheduled refresh ---
+      await storeTokens(shortDelayTokens("alice"));
+      await scheduleRefresh();
+      await waitFor(() =>
+        debugLogs.some((l) => l.includes("Scheduling retry"))
+      );
+      // alice's first (and, since the 30s retry timer hasn't fired, only)
+      // failure must be retry 1/5.
+      const afterAlice = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      );
+      expect(afterAlice.every((l) => l.includes("Scheduling retry 1/5"))).toBe(
+        true
+      );
+      const aliceRetryCount = afterAlice.length;
 
-    // Cancel alice's armed 30s retry timer so her chain can't add more retry
-    // logs while we drive bob (deterministic isolation of the two users).
-    cleanupUserRefreshState("alice");
+      // Cancel alice's armed 30s retry timer so her chain can't add more retry
+      // logs while we drive bob (deterministic isolation of the two users).
+      cleanupUserRefreshState("alice");
 
-    // --- bob: user switch, then one failing scheduled refresh ---
-    await storeTokens(shortDelayTokens("bob"));
-    await scheduleRefresh();
-    // Wait until bob's failure has produced a NEW retry log beyond alice's.
-    await waitFor(
-      () =>
-        debugLogs.filter((l) => l.includes("Scheduling retry")).length >
-        aliceRetryCount
-    );
+      // --- bob: user switch, then one failing scheduled refresh ---
+      await storeTokens(shortDelayTokens("bob"));
+      await scheduleRefresh();
+      // Wait until bob's failure has produced a NEW retry log beyond alice's.
+      await waitFor(
+        () =>
+          debugLogs.filter((l) => l.includes("Scheduling retry")).length >
+          aliceRetryCount
+      );
 
-    // The decisive regression signatures, asserted on CONTENT (not on an exact
-    // count, which can race under load): with a module-global counter bob's
-    // first failure logs "Scheduling retry 2/5"; per-user every failing
-    // user's first failure logs "Scheduling retry 1/5".
-    const allRetries = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    );
-    expect(allRetries.every((l) => l.includes("Scheduling retry 1/5"))).toBe(
-      true
-    );
-    expect(debugLogs.some((l) => l.includes("Scheduling retry 2/5"))).toBe(
-      false
-    );
-  }, TEST_TIMEOUT_MS);
+      // The decisive regression signatures, asserted on CONTENT (not on an exact
+      // count, which can race under load): with a module-global counter bob's
+      // first failure logs "Scheduling retry 2/5"; per-user every failing
+      // user's first failure logs "Scheduling retry 1/5".
+      const allRetries = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      );
+      expect(allRetries.every((l) => l.includes("Scheduling retry 1/5"))).toBe(
+        true
+      );
+      expect(debugLogs.some((l) => l.includes("Scheduling retry 2/5"))).toBe(
+        false
+      );
+    },
+    TEST_TIMEOUT_MS
+  );
 
-  test("cleanupUserRefreshState cancels the per-user failure-backoff retry timer", async () => {
-    // Only inspect timers created from here on, so a straggler retry timer
-    // from another test (timerRecords is module-level) can't be mistaken for
-    // this test's.
-    const recordsBase = timerRecords.length;
+  test(
+    "cleanupUserRefreshState cancels the per-user failure-backoff retry timer",
+    async () => {
+      // Only inspect timers created from here on, so a straggler retry timer
+      // from another test (timerRecords is module-level) can't be mistaken for
+      // this test's.
+      const recordsBase = timerRecords.length;
 
-    // One user's scheduled refresh fails and arms a 30s backoff retry timer.
-    await storeTokens(shortDelayTokens("alice"));
-    await scheduleRefresh();
+      // One user's scheduled refresh fails and arms a 30s backoff retry timer.
+      await storeTokens(shortDelayTokens("alice"));
+      await scheduleRefresh();
 
-    // Wait for the failure to arm the retry timer (logged just before it is
-    // created).
-    await waitFor(() =>
-      debugLogs.some((l) => l.includes("Scheduling retry 1/5"))
-    );
+      // Wait for the failure to arm the retry timer (logged just before it is
+      // created).
+      await waitFor(() =>
+        debugLogs.some((l) => l.includes("Scheduling retry 1/5"))
+      );
 
-    // The retry timer is the setTimeoutWallClock call with the first-backoff
-    // delay, created during this test. It must exist and not yet be cancelled.
-    const retryTimers = timerRecords
-      .slice(recordsBase)
-      .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
-    expect(retryTimers.length).toBe(1);
-    const retryTimer = retryTimers[0];
-    expect(retryTimer.cancel).not.toHaveBeenCalled();
+      // The retry timer is the setTimeoutWallClock call with the first-backoff
+      // delay, created during this test. It must exist and not yet be cancelled.
+      const retryTimers = timerRecords
+        .slice(recordsBase)
+        .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
+      expect(retryTimers.length).toBe(1);
+      const retryTimer = retryTimers[0];
+      expect(retryTimer.cancel).not.toHaveBeenCalled();
 
-    // Signing out / tearing down this user must cancel the retry timer so it
-    // can never fire (and re-schedule a refresh) for the dead session.
-    cleanupUserRefreshState("alice");
+      // Signing out / tearing down this user must cancel the retry timer so it
+      // can never fire (and re-schedule a refresh) for the dead session.
+      cleanupUserRefreshState("alice");
 
-    expect(retryTimer.cancel).toHaveBeenCalled();
+      expect(retryTimer.cancel).toHaveBeenCalled();
 
-    // Belt-and-braces: the cancelled retry must not fire a follow-up refresh.
-    // (Without cancellation it would re-enter scheduleRefreshUnlocked after
-    // the backoff.) The cancel handle clears the underlying setTimeout, so
-    // even waiting past a hypothetical short delay yields no further retry.
-    const retriesBefore = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    ).length;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const retriesAfter = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    ).length;
-    expect(retriesAfter).toBe(retriesBefore);
-  }, TEST_TIMEOUT_MS);
+      // Belt-and-braces: the cancelled retry must not fire a follow-up refresh.
+      // (Without cancellation it would re-enter scheduleRefreshUnlocked after
+      // the backoff.) The cancel handle clears the underlying setTimeout, so
+      // even waiting past a hypothetical short delay yields no further retry.
+      const retriesBefore = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      ).length;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const retriesAfter = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      ).length;
+      expect(retriesAfter).toBe(retriesBefore);
+    },
+    TEST_TIMEOUT_MS
+  );
 
-  test("a fresh (re)schedule cancels a pending failure-backoff retry timer", async () => {
-    // A failure-backoff retry is armed, then a fresh scheduleRefresh re-arms a
-    // normal refresh. clearExistingTimer must cancel the stale retry too,
-    // otherwise it later fires a redundant extra refresh on top of the fresh
-    // schedule. (The cleanup/abort/forceRefresh re-entry points already cancel
-    // it; the normal re-schedule path is the gap this covers.)
-    const recordsBase = timerRecords.length;
+  test(
+    "a fresh (re)schedule cancels a pending failure-backoff retry timer",
+    async () => {
+      // A failure-backoff retry is armed, then a fresh scheduleRefresh re-arms a
+      // normal refresh. clearExistingTimer must cancel the stale retry too,
+      // otherwise it later fires a redundant extra refresh on top of the fresh
+      // schedule. (The cleanup/abort/forceRefresh re-entry points already cancel
+      // it; the normal re-schedule path is the gap this covers.)
+      const recordsBase = timerRecords.length;
 
-    await storeTokens(shortDelayTokens("alice"));
-    await scheduleRefresh();
-    await waitFor(() =>
-      debugLogs.some((l) => l.includes("Scheduling retry 1/5"))
-    );
+      await storeTokens(shortDelayTokens("alice"));
+      await scheduleRefresh();
+      await waitFor(() =>
+        debugLogs.some((l) => l.includes("Scheduling retry 1/5"))
+      );
 
-    const retryTimers = timerRecords
-      .slice(recordsBase)
-      .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
-    expect(retryTimers.length).toBe(1);
-    const retryTimer = retryTimers[0];
-    expect(retryTimer.cancel).not.toHaveBeenCalled();
+      const retryTimers = timerRecords
+        .slice(recordsBase)
+        .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
+      expect(retryTimers.length).toBe(1);
+      const retryTimer = retryTimers[0];
+      expect(retryTimer.cancel).not.toHaveBeenCalled();
 
-    // A fresh schedule (e.g. watchdog / page reload / visibility change) for the
-    // same user re-arms a normal refresh; the stale backoff retry must be
-    // cancelled as part of clearing existing timers.
-    await storeTokens(shortDelayTokens("alice"));
-    await scheduleRefresh();
+      // A fresh schedule (e.g. watchdog / page reload / visibility change) for the
+      // same user re-arms a normal refresh; the stale backoff retry must be
+      // cancelled as part of clearing existing timers.
+      await storeTokens(shortDelayTokens("alice"));
+      await scheduleRefresh();
 
-    expect(retryTimer.cancel).toHaveBeenCalled();
-  }, TEST_TIMEOUT_MS);
+      expect(retryTimer.cancel).toHaveBeenCalled();
+    },
+    TEST_TIMEOUT_MS
+  );
 
   test("the scheduled-refresh delay used is the short-lived path (sanity)", async () => {
     // Guards the token tuning above: if the delay drifted to <=60s the
@@ -344,78 +353,80 @@ describe("Per-user scheduled-refresh failure backoff", () => {
       (t) => t.delay > 0 && t.delay <= SCHEDULED_REFRESH_DELAY_MS + 2000
     );
     expect(scheduled).toBeDefined();
-    expect(
-      debugLogs.some((l) => l.includes("Scheduling token refresh"))
-    ).toBe(true);
+    expect(debugLogs.some((l) => l.includes("Scheduling token refresh"))).toBe(
+      true
+    );
   });
 
-  test("a scheduled refresh that fails AFTER the session is torn down does not arm a retry", async () => {
-    // Race window the guard covers: the scheduled timer has fired and the
-    // refresh round-trip is in flight, then a sign-out tears the user down,
-    // and only THEN does the refresh reject. cleanupUserRefreshState had no
-    // armed retry timer to cancel (the failure hadn't happened yet) and the
-    // abort listener, if any, already ran; without the guard the catch would
-    // arm a fresh backoff retry on the orphaned state, resurrecting refresh
-    // scheduling for a dead session.
-    const recordsBase = timerRecords.length;
+  test(
+    "a scheduled refresh that fails AFTER the session is torn down does not arm a retry",
+    async () => {
+      // Race window the guard covers: the scheduled timer has fired and the
+      // refresh round-trip is in flight, then a sign-out tears the user down,
+      // and only THEN does the refresh reject. cleanupUserRefreshState had no
+      // armed retry timer to cancel (the failure hadn't happened yet) and the
+      // abort listener, if any, already ran; without the guard the catch would
+      // arm a fresh backoff retry on the orphaned state, resurrecting refresh
+      // scheduling for a dead session.
+      const recordsBase = timerRecords.length;
 
-    // A fetch we hold pending and reject on command, so we can tear the session
-    // down strictly BETWEEN the timer firing and the refresh rejecting.
-    let rejectFetch!: (err: Error) => void;
-    let fetchCalled = false;
-    const fetchGate = new Promise<never>((_, reject) => {
-      rejectFetch = reject;
-    });
-    fetchMock.mockImplementation(() => {
-      fetchCalled = true;
-      // A non-network message keeps getTokensFromRefreshToken from doing its
-      // own internal retry, so fetch is hit exactly once.
-      return fetchGate;
-    });
+      // A fetch we hold pending and reject on command, so we can tear the session
+      // down strictly BETWEEN the timer firing and the refresh rejecting.
+      let rejectFetch!: (err: Error) => void;
+      let fetchCalled = false;
+      const fetchGate = new Promise<never>((_, reject) => {
+        rejectFetch = reject;
+      });
+      fetchMock.mockImplementation(() => {
+        fetchCalled = true;
+        // A non-network message keeps getTokensFromRefreshToken from doing its
+        // own internal retry, so fetch is hit exactly once.
+        return fetchGate;
+      });
 
-    await storeTokens(shortDelayTokens("alice"));
-    await scheduleRefresh();
+      await storeTokens(shortDelayTokens("alice"));
+      await scheduleRefresh();
 
-    // Wait until the scheduled timer fired and the refresh is in flight.
-    await waitFor(() => fetchCalled);
+      // Wait until the scheduled timer fired and the refresh is in flight.
+      await waitFor(() => fetchCalled);
 
-    // Sign out mid-flight: deletes alice's state from refreshStateMap.
-    cleanupUserRefreshState("alice");
+      // Sign out mid-flight: deletes alice's state from refreshStateMap.
+      cleanupUserRefreshState("alice");
 
-    const retriesBefore = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    ).length;
+      const retriesBefore = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      ).length;
 
-    // Now let the in-flight refresh fail. The catch must observe the torn-down
-    // state and bail WITHOUT arming a backoff retry.
-    rejectFetch(new Error("Simulated refresh failure"));
+      // Now let the in-flight refresh fail. The catch must observe the torn-down
+      // state and bail WITHOUT arming a backoff retry.
+      rejectFetch(new Error("Simulated refresh failure"));
 
-    // Deterministically wait until the scheduled-refresh catch has actually run
-    // (it logs this at the top, before deciding whether to arm a retry). Once
-    // it appears, the arm-or-bail decision has been made synchronously, so the
-    // assertions below see the final state rather than racing the propagation.
-    await waitFor(() =>
-      debugLogs.some((l) => l.includes("Error during scheduled refresh"))
-    );
+      // Deterministically wait until the scheduled-refresh catch has actually run
+      // (it logs this at the top, before deciding whether to arm a retry). Once
+      // it appears, the arm-or-bail decision has been made synchronously, so the
+      // assertions below see the final state rather than racing the propagation.
+      await waitFor(() =>
+        debugLogs.some((l) => l.includes("Error during scheduled refresh"))
+      );
 
-    // The substantive behavior: no first-backoff (30s) retry timer was armed
-    // after the teardown, and no new retry was logged. (Without the guard, the
-    // catch increments the orphaned state's counter, logs "Scheduling retry
-    // 1/5", and arms a 30s retry — both fire synchronously inside the same
-    // catch that logged the message we just awaited, so they are already
-    // visible here if they happened.)
-    const retryTimers = timerRecords
-      .slice(recordsBase)
-      .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
-    expect(retryTimers.length).toBe(0);
-    const retriesAfter = debugLogs.filter((l) =>
-      l.includes("Scheduling retry")
-    ).length;
-    expect(retriesAfter).toBe(retriesBefore);
+      // The substantive behavior: no first-backoff (30s) retry timer was armed
+      // after the teardown, and no new retry was logged. (Without the guard, the
+      // catch increments the orphaned state's counter, logs "Scheduling retry
+      // 1/5", and arms a 30s retry — both fire synchronously inside the same
+      // catch that logged the message we just awaited, so they are already
+      // visible here if they happened.)
+      const retryTimers = timerRecords
+        .slice(recordsBase)
+        .filter((t) => t.delay === FIRST_RETRY_BACKOFF_MS);
+      expect(retryTimers.length).toBe(0);
+      const retriesAfter = debugLogs.filter((l) =>
+        l.includes("Scheduling retry")
+      ).length;
+      expect(retriesAfter).toBe(retriesBefore);
 
-    // And the guard logged its bail-out instead.
-    expect(
-      debugLogs.some((l) => l.includes("Session torn down"))
-    ).toBe(true);
-  }, TEST_TIMEOUT_MS);
+      // And the guard logged its bail-out instead.
+      expect(debugLogs.some((l) => l.includes("Session torn down"))).toBe(true);
+    },
+    TEST_TIMEOUT_MS
+  );
 });

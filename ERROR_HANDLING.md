@@ -228,19 +228,19 @@ All base properties plus:
 
 ## Error Codes
 
-| Code                     | Error Class          | User Message                               | Developer Message                   |
-| ------------------------ | -------------------- | ------------------------------------------ | ----------------------------------- |
-| `WEBAUTHN_ABORTED`       | Fido2AbortError      | "Passkey verification was cancelled"       | User cancelled or operation aborted |
-| `CREDENTIAL_ERROR`       | Fido2CredentialError | "Unable to complete passkey operation"     | Credential operation failed         |
-| `CREDENTIAL_NOT_ALLOWED` | Fido2CredentialError | "Passkey access was denied. Please try again." | User cancelled, no gesture, permission denied, or no local credentials (mediation: "immediate"). Detect via `isFido2NotAllowedError()` |
-| `CREDENTIAL_INVALID_STATE` | Fido2CredentialError | "This passkey is already registered"     | Authenticator in invalid state or credential already registered |
-| `CREDENTIAL_REQUEST_PENDING` | Fido2CredentialError | "Another passkey request is in progress. Please try again." | Another WebAuthn request is already pending (Chrome throws OperationError) |
-| `CONFIG_ERROR`           | Fido2ConfigError     | "Passkeys are not properly configured"     | Missing or invalid configuration    |
-| `VALIDATION_ERROR`       | Fido2ValidationError | "Unable to verify passkey"                 | Data validation failed              |
-| `AUTH_ERROR`             | Fido2AuthError       | "Authentication with passkey failed"       | Authentication/authorization failed |
-| `NETWORK_ERROR`          | Fido2NetworkError    | "Unable to connect to passkey service"     | Server/network request failed       |
-| `WEBAUTHN_UNKNOWN_ERROR` | Fido2Error           | "Something went wrong with your passkey"   | Client-specific unknown error       |
-| `WEBAUTHN_ERROR`         | Fido2Error           | "Unable to use passkey. Please try again." | Generic WebAuthn error              |
+| Code                         | Error Class          | User Message                                                | Developer Message                                                                                                                      |
+| ---------------------------- | -------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `WEBAUTHN_ABORTED`           | Fido2AbortError      | "Passkey verification was cancelled"                        | User cancelled or operation aborted                                                                                                    |
+| `CREDENTIAL_ERROR`           | Fido2CredentialError | "Unable to complete passkey operation"                      | Credential operation failed                                                                                                            |
+| `CREDENTIAL_NOT_ALLOWED`     | Fido2CredentialError | "Passkey access was denied. Please try again."              | User cancelled, no gesture, permission denied, or no local credentials (mediation: "immediate"). Detect via `isFido2NotAllowedError()` |
+| `CREDENTIAL_INVALID_STATE`   | Fido2CredentialError | "This passkey is already registered"                        | Authenticator in invalid state or credential already registered                                                                        |
+| `CREDENTIAL_REQUEST_PENDING` | Fido2CredentialError | "Another passkey request is in progress. Please try again." | Another WebAuthn request is already pending (Chrome throws OperationError)                                                             |
+| `CONFIG_ERROR`               | Fido2ConfigError     | "Passkeys are not properly configured"                      | Missing or invalid configuration                                                                                                       |
+| `VALIDATION_ERROR`           | Fido2ValidationError | "Unable to verify passkey"                                  | Data validation failed                                                                                                                 |
+| `AUTH_ERROR`                 | Fido2AuthError       | "Authentication with passkey failed"                        | Authentication/authorization failed                                                                                                    |
+| `NETWORK_ERROR`              | Fido2NetworkError    | "Unable to connect to passkey service"                      | Server/network request failed                                                                                                          |
+| `WEBAUTHN_UNKNOWN_ERROR`     | Fido2Error           | "Something went wrong with your passkey"                    | Client-specific unknown error                                                                                                          |
+| `WEBAUTHN_ERROR`             | Fido2Error           | "Unable to use passkey. Please try again."                  | Generic WebAuthn error                                                                                                                 |
 
 ## Browser DOMException Errors (WebAuthn Level 2 Spec)
 
@@ -260,14 +260,14 @@ The library automatically converts WebAuthn DOMExceptions to appropriate Fido2Er
 
 ### navigator.credentials.get() Errors
 
-| DOMException        | Converted To         | User Message                                   | Technical Details                                              |
-| ------------------- | -------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `AbortError`        | Fido2AbortError      | "Passkey verification was cancelled"           | Operation cancelled via AbortController or timeout             |
-| `NotAllowedError`   | Fido2CredentialError | "Passkey access was denied. Please try again." | User cancelled ceremony, no user gesture, or permission denied |
-| `InvalidStateError` | Fido2CredentialError | "This passkey is already registered"           | Authenticator is in invalid state                              |
+| DOMException        | Converted To         | User Message                                                | Technical Details                                                          |
+| ------------------- | -------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `AbortError`        | Fido2AbortError      | "Passkey verification was cancelled"                        | Operation cancelled via AbortController or timeout                         |
+| `NotAllowedError`   | Fido2CredentialError | "Passkey access was denied. Please try again."              | User cancelled ceremony, no user gesture, or permission denied             |
+| `InvalidStateError` | Fido2CredentialError | "This passkey is already registered"                        | Authenticator is in invalid state                                          |
 | `OperationError`    | Fido2CredentialError | "Another passkey request is in progress. Please try again." | Another WebAuthn request is already pending (Chrome-specific, not in spec) |
-| `SecurityError`     | Fido2ConfigError     | "Passkeys cannot be used on this website"      | Invalid domain or HTTPS required                               |
-| `UnknownError`      | Fido2Error           | "Something went wrong with your passkey"       | Client-specific error that doesn't fit other categories        |
+| `SecurityError`     | Fido2ConfigError     | "Passkeys cannot be used on this website"                   | Invalid domain or HTTPS required                                           |
+| `UnknownError`      | Fido2Error           | "Something went wrong with your passkey"                    | Client-specific error that doesn't fit other categories                    |
 
 ### Error Conversion Examples
 
