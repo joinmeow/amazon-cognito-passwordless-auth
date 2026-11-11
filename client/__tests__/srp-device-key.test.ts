@@ -120,9 +120,7 @@ beforeEach(() => {
   mockRespondToAuthChallenge = jest.spyOn(
     cognitoApi,
     "respondToAuthChallenge"
-  ) as unknown as jest.MockedFunction<
-    typeof cognitoApi.respondToAuthChallenge
-  >;
+  ) as unknown as jest.MockedFunction<typeof cognitoApi.respondToAuthChallenge>;
   mockHandleAuthResponse = jest.spyOn(
     cognitoApi,
     "handleAuthResponse"

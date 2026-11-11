@@ -577,9 +577,9 @@ describe("fido2.ts error handling", () => {
       expect((thrown as Fido2CredentialError).name).toBe(
         "Fido2CredentialError"
       );
-      expect(((thrown as Fido2CredentialError).cause as DOMException).name).toBe(
-        "NotAllowedError"
-      );
+      expect(
+        ((thrown as Fido2CredentialError).cause as DOMException).name
+      ).toBe("NotAllowedError");
     });
 
     it("should convert OperationError (pending request) to Fido2CredentialError with CREDENTIAL_REQUEST_PENDING", async () => {

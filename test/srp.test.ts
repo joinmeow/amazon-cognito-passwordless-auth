@@ -221,9 +221,7 @@ describe("SRP HKDF salt encoding", () => {
     const rawHex = arrayBufferToHex(uBuf);
     // Big-integer encoding prepends a '00' sign byte (Java
     // BigInteger.toByteArray semantics), matching the Cognito server.
-    expect(padHex(arrayBufferToBigInt(uBuf).toString(16))).toBe(
-      `00${rawHex}`
-    );
+    expect(padHex(arrayBufferToBigInt(uBuf).toString(16))).toBe(`00${rawHex}`);
 
     const { passwordClaimSignature, timestamp } = await actualSignature(
       largeAHex,

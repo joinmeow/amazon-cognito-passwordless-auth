@@ -28,7 +28,8 @@ import { createDeviceSrpAuthHandler, DeviceSrpAuthResult } from "./device.js";
 // us-gov-west-1 (GovCloud) and eusc-de-east-1 (European Sovereign Cloud).
 // Written as 2 alternatives (instead of a nested quantifier) to keep the
 // security/detect-unsafe-regex lint rule happy.
-const AWS_REGION_REGEXP = /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
+const AWS_REGION_REGEXP =
+  /^[a-z]{2,4}-[a-z]+-\d$|^[a-z]{2,4}-[a-z]+-[a-z]+-\d$/;
 
 /**
  * Returns the DNS suffix of the AWS partition the given region belongs to:
@@ -699,23 +700,20 @@ export async function getId({
     throw new Error("Missing ID token");
   }
   const iss = new URL(parseJwtPayload(idToken)["iss"]);
-  return fetch(
-    cognitoIdentityUrl(identityPoolRegion),
-    {
-      signal: abort,
-      headers: {
-        "x-amz-target": "AWSCognitoIdentityService.GetId",
-        "content-type": "application/x-amz-json-1.1",
+  return fetch(cognitoIdentityUrl(identityPoolRegion), {
+    signal: abort,
+    headers: {
+      "x-amz-target": "AWSCognitoIdentityService.GetId",
+      "content-type": "application/x-amz-json-1.1",
+    },
+    method: "POST",
+    body: JSON.stringify({
+      IdentityPoolId: identityPoolId,
+      Logins: {
+        [`${iss.hostname}${iss.pathname}`]: idToken,
       },
-      method: "POST",
-      body: JSON.stringify({
-        IdentityPoolId: identityPoolId,
-        Logins: {
-          [`${iss.hostname}${iss.pathname}`]: idToken,
-        },
-      }),
-    }
-  )
+    }),
+  })
     .then(throwIfNot2xx)
     .then((res) => res.json() as Promise<GetIdResponse | ErrorResponse>);
 }
@@ -770,23 +768,20 @@ export async function getCredentialsForIdentity({
     throw new Error("Missing ID token");
   }
   const iss = new URL(parseJwtPayload(idToken)["iss"]);
-  return fetch(
-    cognitoIdentityUrl(identityPoolRegion),
-    {
-      signal: abort,
-      headers: {
-        "x-amz-target": "AWSCognitoIdentityService.GetCredentialsForIdentity",
-        "content-type": "application/x-amz-json-1.1",
+  return fetch(cognitoIdentityUrl(identityPoolRegion), {
+    signal: abort,
+    headers: {
+      "x-amz-target": "AWSCognitoIdentityService.GetCredentialsForIdentity",
+      "content-type": "application/x-amz-json-1.1",
+    },
+    method: "POST",
+    body: JSON.stringify({
+      IdentityId: identityId,
+      Logins: {
+        [`${iss.hostname}${iss.pathname}`]: idToken,
       },
-      method: "POST",
-      body: JSON.stringify({
-        IdentityId: identityId,
-        Logins: {
-          [`${iss.hostname}${iss.pathname}`]: idToken,
-        },
-      }),
-    }
-  )
+    }),
+  })
     .then(throwIfNot2xx)
     .then(
       (res) =>

@@ -86,16 +86,22 @@ describe("forceRefreshTokens goes through the per-user lock", () => {
     jest.useFakeTimers();
     const username = "testuser";
     const storage = createMemoryStorage();
-    const fetchMock = jest.fn((url: unknown, init?: { headers?: Record<string, string> }) => {
-      const target = init?.headers?.["x-amz-target"] ?? "";
-      if (
-        target.endsWith("GetTokensFromRefreshToken") ||
-        target.endsWith("InitiateAuth")
-      ) {
-        return Promise.resolve(refreshOk(username, "rotated-by-force"));
+    const fetchMock = jest.fn(
+      (url: unknown, init?: { headers?: Record<string, string> }) => {
+        const target = init?.headers?.["x-amz-target"] ?? "";
+        if (
+          target.endsWith("GetTokensFromRefreshToken") ||
+          target.endsWith("InitiateAuth")
+        ) {
+          return Promise.resolve(refreshOk(username, "rotated-by-force"));
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({}),
+        });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
-    });
+    );
     configure({
       clientId: "testClient",
       cognitoIdpEndpoint: "us-west-2",
@@ -156,9 +162,9 @@ describe("forceRefreshTokens goes through the per-user lock", () => {
       }
       expect(outcome.done).toBe(true);
       expect(outcome.error).toBeUndefined();
-      expect(
-        (outcome.value as { refreshToken?: string }).refreshToken
-      ).toBe("rotated-by-force");
+      expect((outcome.value as { refreshToken?: string }).refreshToken).toBe(
+        "rotated-by-force"
+      );
     } finally {
       clearInterval(renewer);
     }

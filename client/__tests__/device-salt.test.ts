@@ -137,9 +137,8 @@ async function confirmAndSignIn(craftedSalt: Uint8Array) {
     DEVICE_PASSWORD
   );
   const echoedSaltHex = echoSaltAsBigIntegerHex(salt);
-  const recomputedVerifier = await recomputeVerifierFromEchoedSalt(
-    echoedSaltHex
-  );
+  const recomputedVerifier =
+    await recomputeVerifierFromEchoedSalt(echoedSaltHex);
   return { passwordVerifier, salt, recomputedVerifier };
 }
 

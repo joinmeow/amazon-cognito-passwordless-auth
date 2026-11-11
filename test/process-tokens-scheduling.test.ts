@@ -108,9 +108,9 @@ describe("processTokens fresh-login deferral", () => {
     expect(debugLogs.some((l) => l.includes("Fresh login detected"))).toBe(
       false
     );
-    expect(
-      debugLogs.some((l) => l.includes("Scheduling token refresh"))
-    ).toBe(true);
+    expect(debugLogs.some((l) => l.includes("Scheduling token refresh"))).toBe(
+      true
+    );
   });
 
   test("defers scheduling only for a genuine fresh login with a new device key", async () => {
@@ -128,16 +128,16 @@ describe("processTokens fresh-login deferral", () => {
     expect(debugLogs.some((l) => l.includes("Fresh login detected"))).toBe(
       true
     );
-    expect(
-      debugLogs.some((l) => l.includes("Scheduling token refresh"))
-    ).toBe(false);
+    expect(debugLogs.some((l) => l.includes("Scheduling token refresh"))).toBe(
+      false
+    );
 
     // Fires after the 2-minute deferral
     debugLogs.length = 0;
     await jest.advanceTimersByTimeAsync(120_000);
-    expect(
-      debugLogs.some((l) => l.includes("Scheduling token refresh"))
-    ).toBe(true);
+    expect(debugLogs.some((l) => l.includes("Scheduling token refresh"))).toBe(
+      true
+    );
   });
 
   test("cancels a pending fresh-login deferral on sign-out", async () => {
@@ -160,8 +160,8 @@ describe("processTokens fresh-login deferral", () => {
     // Advance past the deferral window: the cancelled timer must NOT schedule
     debugLogs.length = 0;
     await jest.advanceTimersByTimeAsync(180_000);
-    expect(
-      debugLogs.some((l) => l.includes("Scheduling token refresh"))
-    ).toBe(false);
+    expect(debugLogs.some((l) => l.includes("Scheduling token refresh"))).toBe(
+      false
+    );
   });
 });

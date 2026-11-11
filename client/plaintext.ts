@@ -26,10 +26,7 @@ import {
   getRememberedDevice,
   setRememberedDevice,
 } from "./storage.js";
-import {
-  createDeviceSrpAuthHandler,
-  isDeviceNotFoundError,
-} from "./device.js";
+import { createDeviceSrpAuthHandler, isDeviceNotFoundError } from "./device.js";
 import { parseJwtPayload, redactTokensFromObject } from "./util.js";
 import { CognitoAccessTokenPayload } from "./jwt-model.js";
 

@@ -1050,11 +1050,7 @@ describe("FIDO2 Core Functionality", () => {
         // modal request's back.
         jest.useFakeTimers();
         mockInitiateAuth.mockResolvedValueOnce(challengeResponse(1));
-        const supersededWhenAborted = ({
-          signal,
-        }: {
-          signal?: AbortSignal;
-        }) =>
+        const supersededWhenAborted = ({ signal }: { signal?: AbortSignal }) =>
           new Promise<never>((_, reject) =>
             signal?.addEventListener("abort", () =>
               reject(
