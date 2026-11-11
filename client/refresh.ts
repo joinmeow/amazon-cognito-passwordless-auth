@@ -749,6 +749,7 @@ export async function refreshTokens({
         }
       }
 
+      let requestRefreshToken = refreshToken;
       let tokensFromRefresh: TokensFromRefresh;
 
       try {
@@ -783,6 +784,7 @@ export async function refreshTokens({
 
             for (let attempt = 1; attempt <= maxRetries; attempt++) {
               try {
+                requestRefreshToken = currentRefreshToken;
                 authResult = await getTokensFromRefreshToken({
                   refreshToken: currentRefreshToken,
                   deviceKey,
@@ -865,7 +867,7 @@ export async function refreshTokens({
           expireAt,
           username,
           refreshToken:
-            authResult.AuthenticationResult.RefreshToken ?? refreshToken,
+            authResult.AuthenticationResult.RefreshToken ?? requestRefreshToken,
           ...(deviceKey && { deviceKey }),
           ...(authMethod && { authMethod }),
         };
@@ -913,6 +915,7 @@ export async function refreshTokens({
           // session (and the sign-out tombstone) immediately before AND
           // after the write, under the auth lock
           sessionMustExistSince: refreshStart,
+          sessionRefreshToken: requestRefreshToken,
         })) as TokensFromRefresh;
         state.lastRefreshTime = Date.now();
 
